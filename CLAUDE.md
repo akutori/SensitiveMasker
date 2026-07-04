@@ -118,3 +118,34 @@ uv run python -m gui.app         # GUI起動
   (例: `__MASK_PHONE_1__`のような衝突しにくい形式)
 - バッチ変換時、`MappingStore`をファイル間で共有するかリセットするかは呼び出し側(cli/gui)の判断とし、
   `masking_core`側では強制しない
+
+## リリース手順
+
+GitHubリポジトリ: https://github.com/akutori/SensitiveMasker (public, デフォルトブランチ`main`)
+
+`v*`タグをpushすると`.github/workflows/release.yml`が自動起動し、`uv sync --extra dev` →
+`pytest` → GUI/CLI両exeをビルド(`packaging/*.spec`)→ GitHub Releaseに`SensitiveMasker.exe`/
+`SensitiveMaskerCLI.exe`を添付、まで自動で行われる。手順は以下の通り:
+
+```bash
+# 1. pyproject.toml の version を更新してから uv.lock も追従させる
+uv sync --extra dev
+
+# 2. バージョン更新をコミット
+git add pyproject.toml uv.lock
+git commit -m "chore: バージョンを X.Y.Z に更新"
+git push origin main
+
+# 3. タグを作成してpush -> ここでReleaseビルドが走る
+git tag -a vX.Y.Z -m "vX.Y.Z"
+git push origin vX.Y.Z
+
+# 4. 進捗確認(任意)
+gh run list --limit 3
+gh release view vX.Y.Z
+```
+
+- 既存タグへの再アタッチ(ビルドやり直し)は`workflow_dispatch`(Actionsタブから手動実行、
+  `tag_name`にvX.Y.Zを入力)で可能
+- ワークフロー定義は[QR-Barcode-GUI](../QR-Barcode-GUI)の`.github/workflows/release.yml`を
+  参考にした構成
