@@ -1,10 +1,36 @@
 import io
+import json
 import sys
 
 import pytest
 
 from cli.main import main
 from tests.fixtures.synthetic_logs import FAKE_PHONE_1
+
+
+@pytest.fixture
+def profile_path(tmp_path):
+    """Self-contained test profile (phone-number rule matching FAKE_PHONE_1).
+
+    CLI tests build their own profile file rather than depending on any
+    shipped rules/*.json, since the CLI must work with any profile the
+    user points it at.
+    """
+    data = {
+        "profile_name": "test",
+        "rules": [
+            {
+                "name": "phone",
+                "pattern_type": "regex",
+                "pattern": r"0\d{1,4}-\d{1,4}-\d{3,4}",
+                "mode": "random",
+                "prefix": "__MASK_PHONE_",
+            }
+        ],
+    }
+    path = tmp_path / "test_profile.json"
+    path.write_text(json.dumps(data), encoding="utf-8")
+    return str(path)
 
 
 def _run(monkeypatch, capsys, argv, stdin_text=None):
@@ -15,12 +41,11 @@ def _run(monkeypatch, capsys, argv, stdin_text=None):
     return exit_code, captured.out, captured.err
 
 
-def test_cli_stdin_stdout_masks_text(monkeypatch, capsys, tmp_path):
-    general_profile = str(_rules_path("general.json"))
+def test_cli_stdin_stdout_masks_text(monkeypatch, capsys, profile_path):
     exit_code, out, _ = _run(
         monkeypatch,
         capsys,
-        ["--profile", general_profile],
+        ["--profile", profile_path],
         stdin_text=f"caller={FAKE_PHONE_1}\n",
     )
     assert exit_code == 0
@@ -28,14 +53,14 @@ def test_cli_stdin_stdout_masks_text(monkeypatch, capsys, tmp_path):
     assert FAKE_PHONE_1 not in out
 
 
-def test_cli_file_input_output(tmp_path):
+def test_cli_file_input_output(tmp_path, profile_path):
     input_path = tmp_path / "in.log"
     output_path = tmp_path / "out.log"
     input_path.write_text(f"caller={FAKE_PHONE_1}\n", encoding="utf-8")
 
     exit_code = main(
         [
-            "--profile", str(_rules_path("general.json")),
+            "--profile", profile_path,
             "--input", str(input_path),
             "--output", str(output_path),
         ]
@@ -62,7 +87,7 @@ def test_cli_invalid_profile_path_exits_nonzero_with_clean_message(capsys):
     assert "Traceback" not in err
 
 
-def test_cli_batch_mode_shared_mapping_across_files(tmp_path):
+def test_cli_batch_mode_shared_mapping_across_files(tmp_path, profile_path):
     file_a = tmp_path / "a.log"
     file_b = tmp_path / "b.log"
     file_a.write_text(f"caller={FAKE_PHONE_1}\n", encoding="utf-8")
@@ -71,7 +96,7 @@ def test_cli_batch_mode_shared_mapping_across_files(tmp_path):
 
     exit_code = main(
         [
-            "--profile", str(_rules_path("general.json")),
+            "--profile", profile_path,
             "--batch", str(file_a), str(file_b),
             "--output-dir", str(output_dir),
         ]
@@ -86,7 +111,7 @@ def test_cli_batch_mode_shared_mapping_across_files(tmp_path):
     assert "__MASK_PHONE_1__" in out_b
 
 
-def test_cli_batch_mode_reset_mapping_per_file(tmp_path):
+def test_cli_batch_mode_reset_mapping_per_file(tmp_path, profile_path):
     file_a = tmp_path / "a.log"
     file_b = tmp_path / "b.log"
     file_a.write_text(f"caller={FAKE_PHONE_1}\n", encoding="utf-8")
@@ -95,7 +120,7 @@ def test_cli_batch_mode_reset_mapping_per_file(tmp_path):
 
     exit_code = main(
         [
-            "--profile", str(_rules_path("general.json")),
+            "--profile", profile_path,
             "--batch", str(file_a), str(file_b),
             "--output-dir", str(output_dir),
             "--reset-mapping-per-file",
@@ -110,30 +135,24 @@ def test_cli_batch_mode_reset_mapping_per_file(tmp_path):
     assert "__MASK_PHONE_1__" in out_b
 
 
-def test_cli_batch_requires_output_dir(tmp_path):
+def test_cli_batch_requires_output_dir(tmp_path, profile_path):
     file_a = tmp_path / "a.log"
     file_a.write_text("nothing\n", encoding="utf-8")
     with pytest.raises(SystemExit) as exc_info:
-        main(["--profile", str(_rules_path("general.json")), "--batch", str(file_a)])
+        main(["--profile", profile_path, "--batch", str(file_a)])
     assert exc_info.value.code == 2
 
 
-def test_cli_batch_and_input_mutually_exclusive(tmp_path):
+def test_cli_batch_and_input_mutually_exclusive(tmp_path, profile_path):
     file_a = tmp_path / "a.log"
     file_a.write_text("nothing\n", encoding="utf-8")
     with pytest.raises(SystemExit) as exc_info:
         main(
             [
-                "--profile", str(_rules_path("general.json")),
+                "--profile", profile_path,
                 "--input", str(file_a),
                 "--batch", str(file_a),
                 "--output-dir", str(tmp_path / "out"),
             ]
         )
     assert exc_info.value.code == 2
-
-
-def _rules_path(name: str):
-    from pathlib import Path
-
-    return Path(__file__).resolve().parents[1] / "rules" / name

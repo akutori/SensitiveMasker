@@ -7,10 +7,7 @@ a = Analysis(
     ['run_cli.py'],
     pathex=['src'],
     binaries=[],
-    datas=[
-        ('../rules/general.json', 'rules'),
-        ('../rules/sip.json', 'rules'),
-    ],
+    datas=[],
     hiddenimports=collect_submodules('masking_core') + collect_submodules('cli'),
     hookspath=[],
     runtime_hooks=[],

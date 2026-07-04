@@ -8,8 +8,6 @@ a = Analysis(
     pathex=['src'],
     binaries=[],
     datas=[
-        ('../rules/general.json', 'rules'),
-        ('../rules/sip.json', 'rules'),
         ('../assets/icon.ico', 'assets'),
     ],
     hiddenimports=collect_submodules('masking_core') + collect_submodules('gui') + ['tkinter'],

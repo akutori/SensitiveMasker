@@ -1,20 +1,5 @@
-from pathlib import Path
-
 from masking_core.masker import MappingStore, apply_profile
 from masking_core.models import Rule, RuleProfile
-from masking_core.profile_io import load_profile
-
-from tests.fixtures.synthetic_logs import (
-    FAKE_IP_1,
-    FAKE_IP_2,
-    FAKE_PHONE_1,
-    FAKE_PHONE_2,
-    FAKE_SIP_URI,
-    SAMPLE_GENERAL_LOG,
-    SAMPLE_SIP_LOG,
-)
-
-RULES_DIR = Path(__file__).resolve().parents[1] / "rules"
 
 
 def _rule(name, pattern, pattern_type="regex", mode="random", prefix=None, fixed_value=None, enabled=True):
@@ -144,31 +129,3 @@ def test_mapping_store_counters_independent_per_prefix():
     assert store.get_or_create("x1", rule_a) == "__MASK_A_1__"
     assert store.get_or_create("x2", rule_a) == "__MASK_A_2__"
     assert store.get_or_create("y1", rule_b) == "__MASK_B_1__"
-
-
-# --- end-to-end tests against the actual shipped rule profiles -----------
-
-def test_general_profile_masks_synthetic_log():
-    profile = load_profile(RULES_DIR / "general.json")
-    masked, _ = apply_profile(SAMPLE_GENERAL_LOG, profile, MappingStore())
-
-    assert FAKE_PHONE_1 not in masked
-    assert FAKE_IP_1 not in masked
-    assert "hunter2_FAKE" not in masked
-    assert "__MASK_PHONE_" in masked
-    assert "__MASK_IP_" in masked
-    assert "password=__MASK_REDACTED__" in masked
-    # Unrelated log scaffolding must survive untouched.
-    assert "INFO connection established" in masked
-
-
-def test_sip_profile_masks_synthetic_log():
-    profile = load_profile(RULES_DIR / "sip.json")
-    masked, _ = apply_profile(SAMPLE_SIP_LOG, profile, MappingStore())
-
-    assert FAKE_SIP_URI not in masked
-    assert FAKE_PHONE_2 not in masked
-    assert FAKE_IP_2 not in masked
-    assert "__MASK_SIPURI_" in masked
-    assert "Authorization: Digest __MASK_REDACTED__" in masked
-    assert "__MASK_SIPHDR_" in masked
