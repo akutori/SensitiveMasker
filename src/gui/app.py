@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import tkinter as tk
+from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
 from tkinter.scrolledtext import ScrolledText
@@ -563,10 +564,14 @@ class SensitiveMaskerApp(tk.Tk):
         masked = self.output_text.get("1.0", "end-1c")
         self.clipboard_clear()
         self.clipboard_append(masked)
+        self.status_var.set("クリップボードにコピーしました")
+        self.after(2000, self._update_status_bar)
 
     def _on_save_output_clicked(self) -> None:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         path = filedialog.asksaveasfilename(
             title="出力テキストをファイルに保存",
+            initialfile=f"output_{timestamp}.txt",
             defaultextension=".txt",
             filetypes=[("テキストファイル", "*.txt"), ("すべてのファイル", "*.*")],
         )
