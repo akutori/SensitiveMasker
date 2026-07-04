@@ -1,0 +1,46 @@
+name: Build & Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'アタッチ先の Release タグ (例: v1.0.0)'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - uses: astral-sh/setup-uv@v4
+
+      - name: Install dependencies
+        run: uv sync --extra dev
+
+      - name: Run tests
+        run: uv run pytest
+
+      - name: Build GUI executable
+        run: uv run pyinstaller packaging/SensitiveMasker.spec --distpath dist --workpath build --noconfirm
+
+      - name: Build CLI executable
+        run: uv run pyinstaller packaging/SensitiveMaskerCLI.spec --distpath dist --workpath build --noconfirm
+
+      - name: Upload to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag_name || github.ref_name }}
+          files: |
+            dist/SensitiveMasker.exe
+            dist/SensitiveMaskerCLI.exe
