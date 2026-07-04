@@ -55,9 +55,91 @@ RULE_TEMPLATES: dict[str, dict[str, str]] = {
     },
 }
 
-PROFILE_TEMPLATE_FILENAMES: dict[str, str] = {
-    "汎用 (general)": "general.json",
-    "SIP": "sip.json",
+PROFILE_TEMPLATES: dict[str, dict] = {
+    "汎用 (general)": {
+        "profile_name": "general",
+        "description": "General-purpose masking rules for arbitrary logs/console output.",
+        "rules": [
+            {
+                "name": "jp_phone_number",
+                "pattern_type": "regex",
+                "pattern": r"0\d{1,4}-\d{1,4}-\d{3,4}",
+                "mode": "random",
+                "prefix": "__MASK_PHONE_",
+                "description": "Japanese-style phone numbers, e.g. 03-1234-5678 / 090-1234-5678",
+            },
+            {
+                "name": "ipv4_address",
+                "pattern_type": "regex",
+                "pattern": r"\b(?:\d{1,3}\.){3}\d{1,3}\b",
+                "mode": "random",
+                "prefix": "__MASK_IP_",
+                "description": "IPv4 addresses",
+            },
+            {
+                "name": "password_kv",
+                "pattern_type": "regex",
+                "pattern": r"(?i)(password|passwd|pwd)\s*[:=]\s*\S+",
+                "mode": "fixed",
+                "fixed_value": "password=__MASK_REDACTED__",
+                "description": "password=... / passwd: ... key-value pairs",
+            },
+            {
+                "name": "email_address",
+                "pattern_type": "regex",
+                "pattern": r"[\w.+-]+@[\w-]+\.[\w.-]+",
+                "mode": "random",
+                "prefix": "__MASK_EMAIL_",
+                "description": "Email addresses",
+            },
+        ],
+    },
+    "SIP": {
+        "profile_name": "sip",
+        "description": "SIP/FreeSWITCH log masking rules.",
+        "rules": [
+            {
+                "name": "sip_uri_phone_user",
+                "pattern_type": "regex",
+                "pattern": r"sip:\d{2,15}@[\w.-]+",
+                "mode": "random",
+                "prefix": "__MASK_SIPURI_",
+                "description": "SIP URIs whose user part is a phone number, e.g. sip:0312345678@example.com",
+            },
+            {
+                "name": "authorization_header_credentials",
+                "pattern_type": "regex",
+                "pattern": r"(?i)Authorization:\s*Digest\s+[^\r\n]+",
+                "mode": "fixed",
+                "fixed_value": "Authorization: Digest __MASK_REDACTED__",
+                "description": "SIP Authorization header (Digest credentials)",
+            },
+            {
+                "name": "contact_via_header_ip",
+                "pattern_type": "regex",
+                "pattern": r"(?i)(Contact|Via):\s*[^\r\n]*?(?:\d{1,3}\.){3}\d{1,3}[^\r\n]*",
+                "mode": "random",
+                "prefix": "__MASK_SIPHDR_",
+                "description": "Contact/Via headers containing IP addresses (masked as a whole line, before the generic IPv4 rule runs)",
+            },
+            {
+                "name": "jp_phone_number",
+                "pattern_type": "regex",
+                "pattern": r"0\d{1,4}-\d{1,4}-\d{3,4}",
+                "mode": "random",
+                "prefix": "__MASK_PHONE_",
+                "description": "Japanese-style phone numbers appearing in SIP log bodies",
+            },
+            {
+                "name": "ipv4_address",
+                "pattern_type": "regex",
+                "pattern": r"\b(?:\d{1,3}\.){3}\d{1,3}\b",
+                "mode": "random",
+                "prefix": "__MASK_IP_",
+                "description": "Generic IPv4 addresses not caught by the header-specific rule above",
+            },
+        ],
+    },
 }
 
 
@@ -228,18 +310,18 @@ class RuleEditDialog(tk.Toplevel):
 
 
 class TemplatePickerDialog(tk.Toplevel):
-    """プロファイルのテンプレート(rules/*.json)を1つ選ぶダイアログ。結果は self.result (Path | None)。"""
+    """プロファイルのテンプレート(組み込み定義)を1つ選ぶダイアログ。結果は self.result (テンプレート名 | None)。"""
 
     def __init__(self, parent: tk.Misc) -> None:
         super().__init__(parent)
         self.title("テンプレートを選択")
         self.resizable(False, False)
-        self.result: Path | None = None
+        self.result: str | None = None
 
         ttk.Label(self, text="元になるテンプレートを選んでください:").pack(padx=12, pady=(12, 4), anchor="w")
 
-        self.choice_var = tk.StringVar(value=next(iter(PROFILE_TEMPLATE_FILENAMES)))
-        for label in PROFILE_TEMPLATE_FILENAMES:
+        self.choice_var = tk.StringVar(value=next(iter(PROFILE_TEMPLATES)))
+        for label in PROFILE_TEMPLATES:
             ttk.Radiobutton(self, text=label, value=label, variable=self.choice_var).pack(
                 padx=24, pady=2, anchor="w"
             )
@@ -255,8 +337,7 @@ class TemplatePickerDialog(tk.Toplevel):
         self.focus_set()
 
     def _on_ok(self) -> None:
-        filename = PROFILE_TEMPLATE_FILENAMES[self.choice_var.get()]
-        self.result = _default_rules_dir() / filename
+        self.result = self.choice_var.get()
         self.destroy()
 
     def _on_cancel(self) -> None:
@@ -544,24 +625,20 @@ class SensitiveMaskerApp(tk.Tk):
         self.wait_window(picker)
         if picker.result is None:
             return
-        try:
-            template_profile = load_profile(picker.result)
-        except ProfileLoadError as exc:
-            messagebox.showerror("SensitiveMasker", str(exc))
-            return
+        template = PROFILE_TEMPLATES[picker.result]
 
         name = simpledialog.askstring(
             "新規プロファイル(テンプレートから)",
             "プロファイル名を入力してください:",
-            initialvalue=template_profile.profile_name,
+            initialvalue=template["profile_name"],
             parent=self,
         )
         if not name:
             return
         self.profile = RuleProfile(
             profile_name=name,
-            description=template_profile.description,
-            rules=list(template_profile.rules),
+            description=template["description"],
+            rules=[Rule(**rule_kwargs) for rule_kwargs in template["rules"]],
         )
         self.profile_path_var.set("")
         self._update_status_bar()
