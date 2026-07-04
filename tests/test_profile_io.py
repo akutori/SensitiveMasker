@@ -94,3 +94,18 @@ def test_save_profile_excludes_none_fields(tmp_path):
     raw = json.loads(path.read_text(encoding="utf-8"))
 
     assert "fixed_value" not in raw["rules"][0]
+
+
+def test_load_and_save_real_shipped_profiles():
+    # Regression test: the actual profiles shipped in rules/ must always
+    # be loadable through the same schema used elsewhere.
+    from pathlib import Path
+
+    rules_dir = Path(__file__).resolve().parents[1] / "rules"
+    general = load_profile(rules_dir / "general.json")
+    sip = load_profile(rules_dir / "sip.json")
+
+    assert general.profile_name == "general"
+    assert sip.profile_name == "sip"
+    assert len(general.rules) > 0
+    assert len(sip.rules) > 0
