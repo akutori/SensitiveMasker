@@ -67,6 +67,14 @@ def _default_rules_dir() -> Path:
     return Path(__file__).resolve().parents[2] / "rules"
 
 
+_INVALID_FILENAME_CHARS = '\\/:*?"<>|'
+
+
+def _safe_filename(name: str) -> str:
+    """プロファイル名をWindowsのファイル名として使える形に変換する。"""
+    return "".join("_" if c in _INVALID_FILENAME_CHARS else c for c in name).strip() or "profile"
+
+
 class RuleEditDialog(tk.Toplevel):
     """モーダルなルール追加/編集ダイアログ。結果は self.result (Rule | None) に入る。"""
 
@@ -253,11 +261,18 @@ class TemplatePickerDialog(tk.Toplevel):
 class RuleListEditorDialog(tk.Toplevel):
     """プロファイル名・説明・ルール一覧(追加/編集/削除/並び替え)を編集するダイアログ。"""
 
-    def __init__(self, parent: tk.Misc, profile: RuleProfile, on_apply) -> None:
+    def __init__(
+        self,
+        parent: tk.Misc,
+        profile: RuleProfile,
+        current_path: str | None,
+        on_saved,
+    ) -> None:
         super().__init__(parent)
-        self.title("ルールを編集")
+        self.title("プロファイル編集")
         self.geometry("700x450")
-        self.on_apply = on_apply
+        self.current_path = current_path
+        self.on_saved = on_saved
         self.rules: list[Rule] = list(profile.rules)
 
         self._build_widgets(profile)
@@ -305,7 +320,7 @@ class RuleListEditorDialog(tk.Toplevel):
 
         footer = ttk.Frame(self, padding=8)
         footer.pack(fill="x", side="bottom")
-        ttk.Button(footer, text="OK(適用)", command=self._on_ok).pack(side="right", padx=4)
+        ttk.Button(footer, text="保存", command=self._on_save).pack(side="right", padx=4)
         ttk.Button(footer, text="キャンセル", command=self._on_cancel).pack(side="right", padx=4)
 
     def _refresh_tree(self, select_index: int | None = None) -> None:
@@ -374,7 +389,7 @@ class RuleListEditorDialog(tk.Toplevel):
         self.rules[index + 1], self.rules[index] = self.rules[index], self.rules[index + 1]
         self._refresh_tree(select_index=index + 1)
 
-    def _on_ok(self) -> None:
+    def _on_save(self) -> None:
         name = self.profile_name_var.get().strip()
         if not name:
             messagebox.showerror("SensitiveMasker", "プロファイル名を入力してください。")
@@ -384,7 +399,25 @@ class RuleListEditorDialog(tk.Toplevel):
             description=self.description_var.get() or None,
             rules=self.rules,
         )
-        self.on_apply(new_profile)
+
+        target_path = self.current_path
+        if not target_path:
+            target_path = filedialog.asksaveasfilename(
+                title="プロファイルを保存",
+                initialfile=f"{_safe_filename(name)}.json",
+                defaultextension=".json",
+                filetypes=[("JSONプロファイル", "*.json"), ("すべてのファイル", "*.*")],
+            )
+            if not target_path:
+                return
+
+        try:
+            save_profile(new_profile, target_path)
+        except ProfileLoadError as exc:
+            messagebox.showerror("SensitiveMasker", str(exc))
+            return
+
+        self.on_saved(new_profile, target_path)
         self.destroy()
 
     def _on_cancel(self) -> None:
@@ -420,9 +453,7 @@ class SensitiveMaskerApp(tk.Tk):
         ttk.Button(
             manage_row, text="テンプレートから作成...", command=self._on_new_profile_from_template
         ).pack(side="left", padx=2)
-        ttk.Button(manage_row, text="保存", command=self._on_save_profile).pack(side="left", padx=2)
-        ttk.Button(manage_row, text="エクスポート...", command=self._on_export_profile).pack(side="left", padx=2)
-        ttk.Button(manage_row, text="ルールを編集...", command=self._on_edit_rules).pack(side="left", padx=2)
+        ttk.Button(manage_row, text="プロファイルを編集...", command=self._on_edit_rules).pack(side="left", padx=2)
 
         ttk.Label(self, text="入力テキスト:").pack(anchor="w", padx=8)
         self.input_text = ScrolledText(self, height=12, wrap="word")
@@ -478,7 +509,7 @@ class SensitiveMaskerApp(tk.Tk):
             return
         self._update_status_bar()
 
-    # --- 新規作成/テンプレート作成/保存/エクスポート/ルール編集 --------------
+    # --- 新規作成/テンプレート作成/プロファイル編集 ---------------------
 
     def _on_new_profile(self) -> None:
         name = simpledialog.askstring("新規プロファイル", "プロファイル名を入力してください:", parent=self)
@@ -487,7 +518,6 @@ class SensitiveMaskerApp(tk.Tk):
         self.profile = RuleProfile(profile_name=name, rules=[])
         self.profile_path_var.set("")
         self._update_status_bar()
-        self._save_profile_as()
         self._on_edit_rules()
 
     def _on_new_profile_from_template(self) -> None:
@@ -516,72 +546,19 @@ class SensitiveMaskerApp(tk.Tk):
         )
         self.profile_path_var.set("")
         self._update_status_bar()
-        self._save_profile_as()
         self._on_edit_rules()
-
-    def _on_save_profile(self) -> None:
-        """現在のプロファイルを保存する。パスが未確定なら保存先を尋ねる(初回保存)。"""
-        if self.profile is None:
-            messagebox.showerror("SensitiveMasker", "保存するプロファイルがありません。")
-            return
-        path = self.profile_path_var.get()
-        if not path:
-            self._save_profile_as()
-            return
-        self._write_profile(path)
-
-    def _save_profile_as(self) -> bool:
-        """保存先を尋ねて保存する。キャンセル時はプロファイルを未保存のまま維持する。"""
-        if self.profile is None:
-            return False
-        path = filedialog.asksaveasfilename(
-            title="プロファイルを保存",
-            defaultextension=".json",
-            filetypes=[("JSONプロファイル", "*.json"), ("すべてのファイル", "*.*")],
-        )
-        if not path:
-            return False
-        return self._write_profile(path)
-
-    def _write_profile(self, path: str) -> bool:
-        try:
-            save_profile(self.profile, path)
-        except ProfileLoadError as exc:
-            messagebox.showerror("SensitiveMasker", str(exc))
-            return False
-        self.profile_path_var.set(path)
-        self._update_status_bar()
-        return True
-
-    def _on_export_profile(self) -> None:
-        """プロファイルを既存の保存先とは別に、任意の場所へコピーとして書き出す。"""
-        if self.profile is None:
-            messagebox.showerror("SensitiveMasker", "エクスポートするプロファイルがありません。")
-            return
-        path = filedialog.asksaveasfilename(
-            title="プロファイルをエクスポート",
-            defaultextension=".json",
-            filetypes=[("JSONプロファイル", "*.json"), ("すべてのファイル", "*.*")],
-        )
-        if not path:
-            return
-        try:
-            save_profile(self.profile, path)
-        except ProfileLoadError as exc:
-            messagebox.showerror("SensitiveMasker", str(exc))
-            return
-        messagebox.showinfo("SensitiveMasker", f"エクスポートしました:\n{path}")
 
     def _on_edit_rules(self) -> None:
         if self.profile is None:
             messagebox.showerror("SensitiveMasker", "編集するプロファイルがありません。先に新規作成/インポートしてください。")
             return
 
-        def _apply(new_profile: RuleProfile) -> None:
+        def _on_saved(new_profile: RuleProfile, path: str) -> None:
             self.profile = new_profile
+            self.profile_path_var.set(path)
             self._update_status_bar()
 
-        RuleListEditorDialog(self, self.profile, _apply)
+        RuleListEditorDialog(self, self.profile, self.profile_path_var.get() or None, _on_saved)
 
     # --- マスキング操作 ------------------------------------------------
 
