@@ -19,11 +19,11 @@ class Rule(BaseModel):
     def check_mode_requirements(self) -> Rule:
         if self.mode == "fixed" and not self.fixed_value:
             raise ValueError(
-                f"Rule '{self.name}': mode='fixed' requires a non-empty 'fixed_value'"
+                f"ルール '{self.name}': mode='fixed' の場合は 'fixed_value' が必須です"
             )
         if self.mode == "random" and not self.prefix:
             raise ValueError(
-                f"Rule '{self.name}': mode='random' requires a non-empty 'prefix'"
+                f"ルール '{self.name}': mode='random' の場合は 'prefix' が必須です"
             )
         return self
 

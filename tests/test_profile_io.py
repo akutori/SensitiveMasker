@@ -39,7 +39,7 @@ def test_load_profile_missing_file_raises_profile_load_error(tmp_path):
 def test_load_profile_malformed_json_raises_profile_load_error(tmp_path):
     path = tmp_path / "bad.json"
     path.write_text("{not valid json", encoding="utf-8")
-    with pytest.raises(ProfileLoadError, match="Invalid JSON"):
+    with pytest.raises(ProfileLoadError, match="JSONが不正"):
         load_profile(path)
 
 

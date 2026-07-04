@@ -22,17 +22,19 @@ def load_profile(path: str | Path) -> RuleProfile:
     try:
         raw = p.read_text(encoding="utf-8")
     except OSError as exc:
-        raise ProfileLoadError(f"Cannot read profile file '{p}': {exc}") from exc
+        raise ProfileLoadError(f"プロファイルファイル '{p}' を読み込めません: {exc}") from exc
 
     try:
         data = json.loads(raw)
     except json.JSONDecodeError as exc:
-        raise ProfileLoadError(f"Invalid JSON in profile file '{p}': {exc}") from exc
+        raise ProfileLoadError(f"プロファイルファイル '{p}' のJSONが不正です: {exc}") from exc
 
     try:
         return RuleProfile.model_validate(data)
     except ValidationError as exc:
-        raise ProfileLoadError(f"Profile '{p}' failed schema validation:\n{exc}") from exc
+        raise ProfileLoadError(
+            f"プロファイル '{p}' のスキーマ検証に失敗しました:\n{exc}"
+        ) from exc
 
 
 def save_profile(profile: RuleProfile, path: str | Path) -> None:
@@ -44,4 +46,4 @@ def save_profile(profile: RuleProfile, path: str | Path) -> None:
             encoding="utf-8",
         )
     except OSError as exc:
-        raise ProfileLoadError(f"Cannot write profile file '{p}': {exc}") from exc
+        raise ProfileLoadError(f"プロファイルファイル '{p}' を書き込めません: {exc}") from exc
