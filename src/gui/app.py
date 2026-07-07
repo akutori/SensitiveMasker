@@ -517,15 +517,19 @@ class SensitiveMaskerApp(tk.Tk):
             pass
 
     def _build_widgets(self) -> None:
+        # ボタン類(固定サイズ)を先にpackして必ずスペースを確保し、Entry
+        # (fill+expand)を最後にpackして残りを埋めさせる。Tkのpackはコンテナが
+        # 縮んだとき「後からpackされたウィジェット」から隠す(サイドの指定に
+        # かかわらず)ため、順序で優先度を制御する(アクセシビリティ配慮)。
         profile_row = ttk.Frame(self, padding=8)
         profile_row.pack(fill="x")
         ttk.Label(profile_row, text="プロファイル:").pack(side="left")
+        ttk.Button(profile_row, text="再読み込み", command=self._on_reload_profile).pack(side="right", padx=2)
+        ttk.Button(profile_row, text="インポート...", command=self._on_import_profile).pack(side="right", padx=2)
         self.profile_path_var = tk.StringVar()
         ttk.Entry(profile_row, textvariable=self.profile_path_var, width=50).pack(
             side="left", padx=4, fill="x", expand=True
         )
-        ttk.Button(profile_row, text="インポート...", command=self._on_import_profile).pack(side="left", padx=2)
-        ttk.Button(profile_row, text="再読み込み", command=self._on_reload_profile).pack(side="left", padx=2)
 
         manage_row = ttk.Frame(self, padding=(8, 0, 8, 8))
         manage_row.pack(fill="x")
@@ -534,6 +538,27 @@ class SensitiveMaskerApp(tk.Tk):
             manage_row, text="テンプレートから作成...", command=self._on_new_profile_from_template
         ).pack(side="left", padx=2)
         ttk.Button(manage_row, text="プロファイルを編集...", command=self._on_edit_rules).pack(side="left", padx=2)
+
+        # ステータスバーと検索バーはself.panedより先にpackし、ウィンドウが縮んで
+        # もTkのpackに隠されないようにする(Tkのpackは後からpackされたウィジェ
+        # ットから隠すため、順序で優先度を制御する。アクセシビリティ配慮)。
+        # 検索バーはCtrl+Fで動的に表示するが、before=self.status_labelで挿入
+        # 位置(=優先度)を固定しておく。
+        self.status_var = tk.StringVar(value="プロファイル未読み込み")
+        self.status_label = ttk.Label(
+            self, textvariable=self.status_var, relief="sunken", anchor="w", padding=4
+        )
+        self.status_label.pack(fill="x", side="bottom")
+
+        self.search_frame = ttk.Frame(self, padding=(8, 4))
+        ttk.Label(self.search_frame, text="検索(Enterで次へ):").pack(side="left")
+        self.search_var = tk.StringVar()
+        self.search_entry = ttk.Entry(self.search_frame, textvariable=self.search_var, width=40)
+        self.search_entry.pack(side="left", padx=4)
+        self.search_entry.bind("<Return>", self._on_search_next)
+        self.search_entry.bind("<Escape>", self._on_search_close)
+        ttk.Button(self.search_frame, text="閉じる", command=self._on_search_close).pack(side="left", padx=2)
+        # search_frame is intentionally not packed here -- Ctrl+F shows it
 
         # ttk.Panedwindowはpane単位のminsizeを持てず、サッシュをドラッグしきると
         # ボタン行が隠れてしまう(pack/gridのminsize指定はコンテナが極端に縮む
@@ -571,22 +596,6 @@ class SensitiveMaskerApp(tk.Tk):
         self.output_text.tag_config("search_highlight", background="#ffd54f")
         self.output_text.bind("<FocusIn>", lambda e: self._remember_focused_text(self.output_text))
         self.paned.add(bottom_pane, minsize=90, stretch="always")
-
-        self.status_var = tk.StringVar(value="プロファイル未読み込み")
-        self.status_label = ttk.Label(
-            self, textvariable=self.status_var, relief="sunken", anchor="w", padding=4
-        )
-        self.status_label.pack(fill="x", side="bottom")
-
-        self.search_frame = ttk.Frame(self, padding=(8, 4))
-        ttk.Label(self.search_frame, text="検索(Enterで次へ):").pack(side="left")
-        self.search_var = tk.StringVar()
-        self.search_entry = ttk.Entry(self.search_frame, textvariable=self.search_var, width=40)
-        self.search_entry.pack(side="left", padx=4)
-        self.search_entry.bind("<Return>", self._on_search_next)
-        self.search_entry.bind("<Escape>", self._on_search_close)
-        ttk.Button(self.search_frame, text="閉じる", command=self._on_search_close).pack(side="left", padx=2)
-        # search_frame is intentionally not packed here -- Ctrl+F shows it
 
     # --- 既存プロファイルの読み込み(インポート/再読み込み) -------------------
 
