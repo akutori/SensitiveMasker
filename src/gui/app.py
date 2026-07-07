@@ -762,13 +762,20 @@ class SensitiveMaskerApp(tk.Tk):
             title="出力テキストをファイルに保存",
             initialfile=f"output_{timestamp}.txt",
             defaultextension=".txt",
-            filetypes=[("テキストファイル", "*.txt"), ("すべてのファイル", "*.*")],
+            filetypes=[
+                ("テキストファイル", "*.txt"),
+                ("Markdownファイル", "*.md"),
+                ("すべてのファイル", "*.*"),
+            ],
         )
         if not path:
             return
         masked = self.output_text.get("1.0", "end-1c")
+        # .mdはコードブロックで囲んで保存する(ログを複数貼り付けてMarkdown
+        # ドキュメントにまとめる際、そのままコードブロックとして使えるように)。
+        content = f"```\n{masked}\n```\n" if path.lower().endswith(".md") else masked
         try:
-            Path(path).write_text(masked, encoding="utf-8")
+            Path(path).write_text(content, encoding="utf-8")
         except OSError as exc:
             messagebox.showerror("SensitiveMasker", f"ファイルに保存できません:\n{exc}")
 
