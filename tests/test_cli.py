@@ -111,6 +111,52 @@ def test_cli_file_input_output(tmp_path, profile_path):
     assert FAKE_PHONE_1 not in masked
 
 
+def test_cli_input_file_not_found_exits_cleanly_without_traceback(tmp_path, capsys, profile_path):
+    # Regression guard: --input pointing at a missing file must fail the
+    # same clean, no-traceback way as an invalid --profile, not leak a raw
+    # FileNotFoundError traceback (found via manual exe verification).
+    missing_path = tmp_path / "does_not_exist.log"
+
+    exit_code = main(["--profile", profile_path, "--input", str(missing_path)])
+    err = capsys.readouterr().err
+
+    assert exit_code == 1
+    assert "Traceback" not in err
+
+
+def test_cli_input_file_decode_error_exits_cleanly_without_traceback(tmp_path, capsys, profile_path):
+    # Regression guard: an --input file whose bytes don't match --encoding
+    # (default utf-8) must fail cleanly, not crash with a raw
+    # UnicodeDecodeError traceback (same class of bug as the stdin case,
+    # but for file-based --input; found via manual exe verification).
+    bad_path = tmp_path / "cp932.log"
+    bad_path.write_bytes("caller=日本語のテスト\n".encode("cp932"))
+
+    exit_code = main(["--profile", profile_path, "--input", str(bad_path)])
+    err = capsys.readouterr().err
+
+    assert exit_code == 1
+    assert "Traceback" not in err
+
+
+def test_cli_batch_input_file_not_found_exits_cleanly_without_traceback(
+    tmp_path, capsys, profile_path
+):
+    missing_path = tmp_path / "does_not_exist.log"
+
+    exit_code = main(
+        [
+            "--profile", profile_path,
+            "--batch", str(missing_path),
+            "--output-dir", str(tmp_path / "out"),
+        ]
+    )
+    err = capsys.readouterr().err
+
+    assert exit_code == 1
+    assert "Traceback" not in err
+
+
 def test_cli_missing_profile_arg_exits_with_usage_error(capsys):
     with pytest.raises(SystemExit) as exc_info:
         main([])

@@ -64,11 +64,46 @@ def _reconfigure_encoding(stream, encoding: str) -> None:
         stream.reconfigure(encoding=encoding)
 
 
+def _read_input_file(path: Path, encoding: str) -> str | None:
+    """Reads path as text, or prints a clean error and returns None on failure.
+
+    Covers both missing/unreadable files (OSError) and files whose bytes
+    don't match `encoding` (UnicodeDecodeError) -- either would otherwise
+    surface as a raw, unhandled traceback.
+    """
+    try:
+        return path.read_text(encoding=encoding)
+    except (OSError, UnicodeDecodeError) as exc:
+        print(
+            f"入力ファイル '{path}' を読み込めません(ファイルが存在するか、"
+            f"文字エンコーディングが --encoding='{encoding}' と一致しているか"
+            f"確認してください): {exc}",
+            file=sys.stderr,
+        )
+        return None
+
+
+def _write_output_file(path: Path, text: str, encoding: str) -> bool:
+    """Writes text to path; returns False after printing a clean error on failure."""
+    try:
+        path.write_text(text, encoding=encoding)
+        return True
+    except (OSError, UnicodeEncodeError) as exc:
+        print(
+            f"出力ファイル '{path}' に書き込めません(--encoding='{encoding}' "
+            f"を確認してください): {exc}",
+            file=sys.stderr,
+        )
+        return False
+
+
 def _run_single(args: argparse.Namespace, profile) -> int:
     store = MappingStore()
 
     if args.input:
-        text = Path(args.input).read_text(encoding=args.encoding)
+        text = _read_input_file(Path(args.input), args.encoding)
+        if text is None:
+            return 1
     else:
         _reconfigure_encoding(sys.stdin, args.encoding)
         try:
@@ -84,7 +119,8 @@ def _run_single(args: argparse.Namespace, profile) -> int:
     masked, _ = apply_profile(text, profile, store)
 
     if args.output:
-        Path(args.output).write_text(masked, encoding=args.encoding)
+        if not _write_output_file(Path(args.output), masked, args.encoding):
+            return 1
     else:
         _reconfigure_encoding(sys.stdout, args.encoding)
         try:
@@ -110,11 +146,14 @@ def _run_batch(args: argparse.Namespace, profile) -> int:
             store = MappingStore()
 
         input_path = Path(input_path_str)
-        text = input_path.read_text(encoding=args.encoding)
+        text = _read_input_file(input_path, args.encoding)
+        if text is None:
+            return 1
         masked, store = apply_profile(text, profile, store)
 
         output_path = output_dir / f"{input_path.stem}.masked{input_path.suffix}"
-        output_path.write_text(masked, encoding=args.encoding)
+        if not _write_output_file(output_path, masked, args.encoding):
+            return 1
 
     return 0
 
