@@ -293,6 +293,7 @@ class RuleListEditorDialog(tk.Toplevel):
         super().__init__(parent)
         self.title("プロファイル編集")
         self.geometry("1050x480")
+        self.minsize(420, 260)
         self.current_path = current_path
         self.on_saved = on_saved
         self.rules: list[Rule] = list(profile.rules)
@@ -318,8 +319,30 @@ class RuleListEditorDialog(tk.Toplevel):
         body = ttk.Frame(self, padding=(8, 0))
         body.pack(fill="both", expand=True)
 
+        # side_buttonsを先にside="right"でpackすることで、ウィンドウが縮んでも
+        # 常に自分の必要幅を確保できるようにする(アクセシビリティ配慮: ボタンが
+        # 隠れて操作不能にならないこと)。幅を固定してpack_propagateを切ることで、
+        # ボタン領域自体のサイズも画面サイズによらず一定にする。
+        side_buttons = ttk.Frame(body, padding=(4, 0), width=112)
+        side_buttons.pack(side="right", fill="y")
+        side_buttons.pack_propagate(False)
+        ttk.Button(side_buttons, text="追加", width=10, command=self._on_add).pack(fill="x", pady=2)
+        ttk.Button(side_buttons, text="コピー", width=10, command=self._on_copy).pack(fill="x", pady=2)
+        ttk.Button(side_buttons, text="編集", width=10, command=self._on_edit).pack(fill="x", pady=2)
+        ttk.Button(side_buttons, text="削除", width=10, command=self._on_delete).pack(fill="x", pady=2)
+        ttk.Button(side_buttons, text="上へ", width=10, command=self._on_move_up).pack(fill="x", pady=(16, 2))
+        ttk.Button(side_buttons, text="下へ", width=10, command=self._on_move_down).pack(fill="x", pady=2)
+
+        # ツリー本体はside_buttonsが確保した残り幅を使う。列は常に固定幅
+        # (stretch=False)とし、収まりきらない分は横スクロールで見せる
+        # (「カラムはそのままに横スクロール」)。縦スクロールも同様に用意する。
+        tree_container = ttk.Frame(body)
+        tree_container.pack(side="left", fill="both", expand=True)
+        tree_container.rowconfigure(0, weight=1)
+        tree_container.columnconfigure(0, weight=1)
+
         columns = ("enabled", "name", "pattern_type", "mode", "pattern", "fixed_value", "prefix", "description")
-        self.tree = ttk.Treeview(body, columns=columns, show="headings", selectmode="browse")
+        self.tree = ttk.Treeview(tree_container, columns=columns, show="headings", selectmode="browse")
         self.tree.heading("enabled", text="有効")
         self.tree.heading("name", text="名前")
         self.tree.heading("pattern_type", text="種別")
@@ -328,24 +351,22 @@ class RuleListEditorDialog(tk.Toplevel):
         self.tree.heading("fixed_value", text="固定値")
         self.tree.heading("prefix", text="プレフィックス")
         self.tree.heading("description", text="説明")
-        self.tree.column("enabled", width=40, anchor="center")
-        self.tree.column("name", width=90)
-        self.tree.column("pattern_type", width=100)
-        self.tree.column("mode", width=100)
-        self.tree.column("pattern", width=160)
-        self.tree.column("fixed_value", width=120)
-        self.tree.column("prefix", width=110)
-        self.tree.column("description", width=180)
-        self.tree.pack(side="left", fill="both", expand=True)
+        self.tree.column("enabled", width=40, anchor="center", stretch=False)
+        self.tree.column("name", width=90, stretch=False)
+        self.tree.column("pattern_type", width=100, stretch=False)
+        self.tree.column("mode", width=100, stretch=False)
+        self.tree.column("pattern", width=160, stretch=False)
+        self.tree.column("fixed_value", width=120, stretch=False)
+        self.tree.column("prefix", width=110, stretch=False)
+        self.tree.column("description", width=180, stretch=False)
 
-        side_buttons = ttk.Frame(body, padding=(4, 0))
-        side_buttons.pack(side="left", fill="y")
-        ttk.Button(side_buttons, text="追加", command=self._on_add).pack(fill="x", pady=2)
-        ttk.Button(side_buttons, text="コピー", command=self._on_copy).pack(fill="x", pady=2)
-        ttk.Button(side_buttons, text="編集", command=self._on_edit).pack(fill="x", pady=2)
-        ttk.Button(side_buttons, text="削除", command=self._on_delete).pack(fill="x", pady=2)
-        ttk.Button(side_buttons, text="上へ", command=self._on_move_up).pack(fill="x", pady=(16, 2))
-        ttk.Button(side_buttons, text="下へ", command=self._on_move_down).pack(fill="x", pady=2)
+        tree_vscroll = ttk.Scrollbar(tree_container, orient="vertical", command=self.tree.yview)
+        tree_hscroll = ttk.Scrollbar(tree_container, orient="horizontal", command=self.tree.xview)
+        self.tree.configure(yscrollcommand=tree_vscroll.set, xscrollcommand=tree_hscroll.set)
+
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        tree_vscroll.grid(row=0, column=1, sticky="ns")
+        tree_hscroll.grid(row=1, column=0, sticky="ew")
 
         footer = ttk.Frame(self, padding=8)
         footer.pack(fill="x", side="bottom")
@@ -514,35 +535,42 @@ class SensitiveMaskerApp(tk.Tk):
         ).pack(side="left", padx=2)
         ttk.Button(manage_row, text="プロファイルを編集...", command=self._on_edit_rules).pack(side="left", padx=2)
 
-        self.paned = ttk.Panedwindow(self, orient="vertical")
+        # ttk.Panedwindowはpane単位のminsizeを持てず、サッシュをドラッグしきると
+        # ボタン行が隠れてしまう(pack/gridのminsize指定はコンテナが極端に縮む
+        # と効かない場合がある)。classic tk.PanedWindowのminsizeはサッシュの
+        # 移動そのものをその位置でクランプしてくれるため、こちらを使う
+        # (アクセシビリティ配慮: ドラッグでボタンが操作不能にならないこと)。
+        self.paned = tk.PanedWindow(self, orient="vertical", sashwidth=6, sashrelief="raised")
         self.paned.pack(fill="both", expand=True, padx=8, pady=(0, 4))
         self.paned.bind("<Double-Button-1>", self._on_paned_double_click)
 
+        # ボタン行はside="bottom"で先にpackし、テキスト欄はfill="both", expand=True
+        # で残りのスペースを埋める。縮小時はテキスト欄側が先に小さくなる。
         top_pane = ttk.Frame(self.paned)
-        ttk.Label(top_pane, text="入力テキスト:").pack(anchor="w")
+        ttk.Label(top_pane, text="入力テキスト:").pack(anchor="w", side="top")
+        button_row = ttk.Frame(top_pane)
+        button_row.pack(side="bottom", fill="x")
+        ttk.Button(button_row, text="マスク実行 ->", command=self._on_mask_clicked).pack(side="left")
+        ttk.Button(button_row, text="クリア", command=self._on_clear_clicked).pack(side="left", padx=4)
         self.input_text = ScrolledText(top_pane, height=12, wrap="word", pady=10)
         self.input_text.pack(fill="both", expand=True, pady=(0, 4))
         self.input_text.tag_config("search_highlight", background="#ffd54f")
         self.input_text.bind("<FocusIn>", lambda e: self._remember_focused_text(self.input_text))
-        button_row = ttk.Frame(top_pane)
-        button_row.pack(fill="x")
-        ttk.Button(button_row, text="マスク実行 ->", command=self._on_mask_clicked).pack(side="left")
-        ttk.Button(button_row, text="クリア", command=self._on_clear_clicked).pack(side="left", padx=4)
-        self.paned.add(top_pane, weight=1)
+        self.paned.add(top_pane, minsize=90, stretch="always")
 
         bottom_pane = ttk.Frame(self.paned)
-        ttk.Label(bottom_pane, text="出力(マスク後)テキスト:").pack(anchor="w")
-        self.output_text = ScrolledText(bottom_pane, height=12, wrap="word", state="disabled", pady=10)
-        self.output_text.pack(fill="both", expand=True, pady=(0, 4))
-        self.output_text.tag_config("search_highlight", background="#ffd54f")
-        self.output_text.bind("<FocusIn>", lambda e: self._remember_focused_text(self.output_text))
+        ttk.Label(bottom_pane, text="出力(マスク後)テキスト:").pack(anchor="w", side="top")
         copy_row = ttk.Frame(bottom_pane)
-        copy_row.pack(fill="x")
+        copy_row.pack(side="bottom", fill="x")
         ttk.Button(copy_row, text="クリップボードにコピー", command=self._on_copy_clicked).pack(side="right")
         ttk.Button(copy_row, text="ファイルに保存...", command=self._on_save_output_clicked).pack(
             side="right", padx=4
         )
-        self.paned.add(bottom_pane, weight=1)
+        self.output_text = ScrolledText(bottom_pane, height=12, wrap="word", state="disabled", pady=10)
+        self.output_text.pack(fill="both", expand=True, pady=(0, 4))
+        self.output_text.tag_config("search_highlight", background="#ffd54f")
+        self.output_text.bind("<FocusIn>", lambda e: self._remember_focused_text(self.output_text))
+        self.paned.add(bottom_pane, minsize=90, stretch="always")
 
         self.status_var = tk.StringVar(value="プロファイル未読み込み")
         self.status_label = ttk.Label(
@@ -660,7 +688,7 @@ class SensitiveMaskerApp(tk.Tk):
         self.output_text.configure(state="disabled")
 
     def _on_paned_double_click(self, _event: object = None) -> None:
-        self.paned.sashpos(0, self.paned.winfo_height() // 2)
+        self.paned.sash_place(0, 1, self.paned.winfo_height() // 2)
 
     # --- テキスト検索(Ctrl+F) ------------------------------------------
 
