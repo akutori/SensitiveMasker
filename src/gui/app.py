@@ -510,28 +510,31 @@ class SensitiveMaskerApp(tk.Tk):
         ).pack(side="left", padx=2)
         ttk.Button(manage_row, text="プロファイルを編集...", command=self._on_edit_rules).pack(side="left", padx=2)
 
-        ttk.Label(self, text="入力テキスト:").pack(anchor="w", padx=8)
-        self.input_text = ScrolledText(self, height=12, wrap="word")
-        self.input_text.pack(fill="both", expand=True, padx=8, pady=(0, 4))
+        self.paned = ttk.Panedwindow(self, orient="vertical")
+        self.paned.pack(fill="both", expand=True, padx=8, pady=(0, 4))
+        self.paned.bind("<Double-Button-1>", self._on_paned_double_click)
 
-        button_row = ttk.Frame(self, padding=(8, 4))
+        top_pane = ttk.Frame(self.paned)
+        ttk.Label(top_pane, text="入力テキスト:").pack(anchor="w")
+        self.input_text = ScrolledText(top_pane, height=12, wrap="word", pady=10)
+        self.input_text.pack(fill="both", expand=True, pady=(0, 4))
+        button_row = ttk.Frame(top_pane)
         button_row.pack(fill="x")
         ttk.Button(button_row, text="マスク実行 ->", command=self._on_mask_clicked).pack(side="left")
         ttk.Button(button_row, text="クリア", command=self._on_clear_clicked).pack(side="left", padx=4)
-        ttk.Button(
-            button_row, text="マッピングをリセット", command=self._on_reset_mapping_clicked
-        ).pack(side="left", padx=4)
+        self.paned.add(top_pane, weight=1)
 
-        ttk.Label(self, text="出力(マスク後)テキスト:").pack(anchor="w", padx=8)
-        self.output_text = ScrolledText(self, height=12, wrap="word", state="disabled")
-        self.output_text.pack(fill="both", expand=True, padx=8, pady=(0, 4))
-
-        copy_row = ttk.Frame(self, padding=(8, 0))
+        bottom_pane = ttk.Frame(self.paned)
+        ttk.Label(bottom_pane, text="出力(マスク後)テキスト:").pack(anchor="w")
+        self.output_text = ScrolledText(bottom_pane, height=12, wrap="word", state="disabled", pady=10)
+        self.output_text.pack(fill="both", expand=True, pady=(0, 4))
+        copy_row = ttk.Frame(bottom_pane)
         copy_row.pack(fill="x")
         ttk.Button(copy_row, text="クリップボードにコピー", command=self._on_copy_clicked).pack(side="right")
         ttk.Button(copy_row, text="ファイルに保存...", command=self._on_save_output_clicked).pack(
             side="right", padx=4
         )
+        self.paned.add(bottom_pane, weight=1)
 
         self.status_var = tk.StringVar(value="プロファイル未読み込み")
         ttk.Label(self, textvariable=self.status_var, relief="sunken", anchor="w", padding=4).pack(
@@ -621,6 +624,9 @@ class SensitiveMaskerApp(tk.Tk):
             messagebox.showerror("SensitiveMasker", "先にプロファイルを読み込んでください。")
             return
         text = self.input_text.get("1.0", "end-1c")
+        # 常に新しいMappingStoreで再マッピングする: プロファイル編集直後でも
+        # 手動リセット操作なしで変更がそのまま反映される。
+        self.mapping_store = MappingStore()
         masked, self.mapping_store = apply_profile(text, self.profile, self.mapping_store)
         self.output_text.configure(state="normal")
         self.output_text.delete("1.0", "end")
@@ -634,9 +640,8 @@ class SensitiveMaskerApp(tk.Tk):
         self.output_text.delete("1.0", "end")
         self.output_text.configure(state="disabled")
 
-    def _on_reset_mapping_clicked(self) -> None:
-        self.mapping_store = MappingStore()
-        self._update_status_bar()
+    def _on_paned_double_click(self, _event: object = None) -> None:
+        self.paned.sashpos(0, self.paned.winfo_height() // 2)
 
     def _on_copy_clicked(self) -> None:
         masked = self.output_text.get("1.0", "end-1c")
