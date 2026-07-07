@@ -53,6 +53,26 @@ def test_cli_stdin_stdout_masks_text(monkeypatch, capsys, profile_path):
     assert FAKE_PHONE_1 not in out
 
 
+def test_cli_stdin_decodes_as_utf8_regardless_of_stream_default_encoding(
+    monkeypatch, capsys, profile_path
+):
+    # Regression test for piped Japanese text getting mangled on Windows: a
+    # real TextIOWrapper's default text encoding follows the console
+    # codepage, which may not be UTF-8 even though the bytes sent to stdin
+    # are UTF-8 (e.g. PowerShell piping). Simulate that mismatch directly
+    # rather than depending on the actual OS console codepage.
+    raw_utf8_bytes = f"caller={FAKE_PHONE_1} 日本語\n".encode("utf-8")
+    stdin_stream = io.TextIOWrapper(io.BytesIO(raw_utf8_bytes), encoding="cp1252")
+    monkeypatch.setattr(sys, "stdin", stdin_stream)
+
+    exit_code = main(["--profile", profile_path])
+    out = capsys.readouterr().out
+
+    assert exit_code == 0
+    assert "日本語" in out
+    assert "__MASK_PHONE_1__" in out
+
+
 def test_cli_file_input_output(tmp_path, profile_path):
     input_path = tmp_path / "in.log"
     output_path = tmp_path / "out.log"

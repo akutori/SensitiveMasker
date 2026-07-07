@@ -55,12 +55,22 @@ def main(argv: list[str] | None = None) -> int:
     return _run_single(args, profile)
 
 
+def _reconfigure_encoding(stream, encoding: str) -> None:
+    # Real stdin/stdout are TextIOWrapper and default to the console's
+    # codepage, which may not match the bytes actually being piped in
+    # (e.g. PowerShell sending UTF-8). Test doubles like io.StringIO have
+    # no encoding concept at all, so skip them via the hasattr guard.
+    if hasattr(stream, "reconfigure"):
+        stream.reconfigure(encoding=encoding)
+
+
 def _run_single(args: argparse.Namespace, profile) -> int:
     store = MappingStore()
 
     if args.input:
         text = Path(args.input).read_text(encoding=args.encoding)
     else:
+        _reconfigure_encoding(sys.stdin, args.encoding)
         text = sys.stdin.read()
 
     masked, _ = apply_profile(text, profile, store)
@@ -68,6 +78,7 @@ def _run_single(args: argparse.Namespace, profile) -> int:
     if args.output:
         Path(args.output).write_text(masked, encoding=args.encoding)
     else:
+        _reconfigure_encoding(sys.stdout, args.encoding)
         sys.stdout.write(masked)
 
     return 0
