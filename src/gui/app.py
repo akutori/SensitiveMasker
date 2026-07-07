@@ -495,7 +495,12 @@ class SensitiveMaskerApp(tk.Tk):
         super().__init__()
         self.title("SensitiveMasker - 機微情報マスキングツール")
         self.geometry("800x650")
-        self.minsize(500, 400)
+        # manage_row(新規作成/テンプレートから作成/プロファイルを編集)には
+        # profile_rowのEntryのような伸縮要素がなく、収まりきらない分は隠れて
+        # しまう。実測(3ボタン+パディング)で必要な最小幅は約322pxなので、
+        # フォント差やDPIスケーリングを見込んだ余裕を持たせて560pxを下限に
+        # する(アクセシビリティ配慮: 常にボタンが操作可能であること)。
+        self.minsize(560, 400)
         self._apply_icon()
 
         self.profile: RuleProfile | None = None
