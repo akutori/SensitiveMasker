@@ -668,7 +668,10 @@ class SensitiveMaskerApp(tk.Tk):
         self._last_focused_text = widget
 
     def _on_open_search(self, _event: object = None) -> str:
-        self._search_target = self._last_focused_text or self.input_text
+        new_target = self._last_focused_text or self.input_text
+        if self._search_target is not None and self._search_target is not new_target:
+            self._search_target.tag_remove("search_highlight", "1.0", "end")
+        self._search_target = new_target
         self._search_last_index = "1.0"
         self.search_frame.pack(fill="x", before=self.status_label)
         self.search_entry.focus_set()

@@ -71,7 +71,15 @@ def _run_single(args: argparse.Namespace, profile) -> int:
         text = Path(args.input).read_text(encoding=args.encoding)
     else:
         _reconfigure_encoding(sys.stdin, args.encoding)
-        text = sys.stdin.read()
+        try:
+            text = sys.stdin.read()
+        except UnicodeDecodeError as exc:
+            print(
+                f"標準入力の読み込みに失敗しました(文字エンコーディングが "
+                f"--encoding='{args.encoding}' と一致しているか確認してください): {exc}",
+                file=sys.stderr,
+            )
+            return 1
 
     masked, _ = apply_profile(text, profile, store)
 
@@ -79,7 +87,15 @@ def _run_single(args: argparse.Namespace, profile) -> int:
         Path(args.output).write_text(masked, encoding=args.encoding)
     else:
         _reconfigure_encoding(sys.stdout, args.encoding)
-        sys.stdout.write(masked)
+        try:
+            sys.stdout.write(masked)
+        except UnicodeEncodeError as exc:
+            print(
+                f"標準出力への書き込みに失敗しました(--encoding='{args.encoding}' "
+                f"を確認してください): {exc}",
+                file=sys.stderr,
+            )
+            return 1
 
     return 0
 

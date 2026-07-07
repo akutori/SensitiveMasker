@@ -73,6 +73,25 @@ def test_cli_stdin_decodes_as_utf8_regardless_of_stream_default_encoding(
     assert "__MASK_PHONE_1__" in out
 
 
+def test_cli_stdin_decode_error_exits_cleanly_without_traceback(
+    monkeypatch, capsys, profile_path
+):
+    # Regression guard: forcing stdin to --encoding's default (utf-8) must
+    # not turn genuinely non-UTF-8 piped input (e.g. cp932/Shift_JIS, which
+    # decoded fine before stdin/stdout were force-reconfigured) into an
+    # unhandled crash. It should fail the same clean, no-traceback way
+    # ProfileLoadError does, not leak a raw Python traceback to the user.
+    raw_cp932_bytes = "caller=日本語のテスト\n".encode("cp932")
+    stdin_stream = io.TextIOWrapper(io.BytesIO(raw_cp932_bytes), encoding="cp932")
+    monkeypatch.setattr(sys, "stdin", stdin_stream)
+
+    exit_code = main(["--profile", profile_path])
+    err = capsys.readouterr().err
+
+    assert exit_code == 1
+    assert "Traceback" not in err
+
+
 def test_cli_file_input_output(tmp_path, profile_path):
     input_path = tmp_path / "in.log"
     output_path = tmp_path / "out.log"
