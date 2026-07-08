@@ -586,6 +586,8 @@ class SensitiveMaskerApp(tk.Tk):
         self.input_text.pack(fill="both", expand=True, pady=(0, 4))
         self.input_text.tag_config("search_highlight", background="#ffd54f")
         self.input_text.bind("<FocusIn>", lambda e: self._remember_focused_text(self.input_text))
+        self.input_text.bind("<<Modified>>", self._on_input_text_modified)
+        self.input_text.bind("<Configure>", lambda e: self._apply_bottom_center_padding(self.input_text))
         self.paned.add(top_pane, minsize=90, stretch="always")
 
         bottom_pane = ttk.Frame(self.paned)
@@ -600,6 +602,7 @@ class SensitiveMaskerApp(tk.Tk):
         self.output_text.pack(fill="both", expand=True, pady=(0, 4))
         self.output_text.tag_config("search_highlight", background="#ffd54f")
         self.output_text.bind("<FocusIn>", lambda e: self._remember_focused_text(self.output_text))
+        self.output_text.bind("<Configure>", lambda e: self._apply_bottom_center_padding(self.output_text))
         self.paned.add(bottom_pane, minsize=90, stretch="always")
 
     # --- 既存プロファイルの読み込み(インポート/再読み込み) -------------------
@@ -693,6 +696,7 @@ class SensitiveMaskerApp(tk.Tk):
         self.output_text.delete("1.0", "end")
         self.output_text.insert("1.0", masked)
         self.output_text.configure(state="disabled")
+        self._apply_bottom_center_padding(self.output_text)
         self._update_status_bar()
 
     def _on_clear_clicked(self) -> None:
@@ -700,9 +704,26 @@ class SensitiveMaskerApp(tk.Tk):
         self.output_text.configure(state="normal")
         self.output_text.delete("1.0", "end")
         self.output_text.configure(state="disabled")
+        self._apply_bottom_center_padding(self.output_text)
 
     def _on_paned_double_click(self, _event: object = None) -> None:
         self.paned.sash_place(0, 1, self.paned.winfo_height() // 2)
+
+    def _on_input_text_modified(self, _event: object = None) -> None:
+        self.input_text.edit_modified(False)
+        self._apply_bottom_center_padding(self.input_text)
+
+    def _apply_bottom_center_padding(self, widget: tk.Text) -> None:
+        # 末尾の行にspacing3(行の下の余白)を大きく取ることで、一番下まで
+        # スクロールしたときに最終行がビューポートのおおよそ中央に来るように
+        # する。実際の描画高さの半分を空白として確保するだけで、"end"の
+        # テキスト内容そのものは変更しない(get()の結果には影響しない)。
+        height_px = widget.winfo_height()
+        if height_px <= 1:
+            return
+        widget.tag_remove("bottom_center_pad", "1.0", "end")
+        widget.tag_config("bottom_center_pad", spacing3=height_px // 2)
+        widget.tag_add("bottom_center_pad", "end-1c linestart", "end-1c")
 
     # --- テキスト検索(Ctrl+F) ------------------------------------------
 
