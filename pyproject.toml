@@ -1,6 +1,6 @@
 [project]
 name = "sensitive-masker"
-version = "1.1.1"
+version = "1.1.2"
 description = "Locally mask sensitive info (phone numbers, passwords, IPs, etc.) in logs before pasting into an external LLM."
 readme = "README.md"
 requires-python = ">=3.12"

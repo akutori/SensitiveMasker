@@ -144,7 +144,7 @@ uv run python -m gui.app         # GUI起動
 
 ## リリース手順
 
-GitHubリポジトリ: https://github.com/akutori/SensitiveMasker (public, デフォルトブランチ`main`)
+GitHubリポジトリ: https://github.com/akutori/SensitiveMaskerWin (public, デフォルトブランチ`main`)
 
 `v*`タグをpushすると`.github/workflows/release.yml`が自動起動し、`uv sync --extra dev` →
 `pytest` → GUI/CLI両exeをビルド(`packaging/*.spec`)→ GitHub Releaseに`SensitiveMasker.exe`/
