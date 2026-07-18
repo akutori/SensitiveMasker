@@ -13,6 +13,7 @@ dev = [
     "pytest>=8.0",
     "pyinstaller>=6.10",
     "pillow>=10.4",
+    "pywinauto>=0.6.8; sys_platform == 'win32'",
 ]
 
 [project.scripts]
@@ -29,3 +30,7 @@ packages = ["src/masking_core", "src/cli", "src/gui"]
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
+addopts = "-m 'not pywinauto'"
+markers = [
+    "pywinauto: black-box GUI smoke tests that launch a real OS window via pywinauto (slow, excluded by default; run with -m pywinauto).",
+]
