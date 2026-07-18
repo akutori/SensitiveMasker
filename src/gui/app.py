@@ -723,7 +723,12 @@ class SensitiveMaskerApp(tk.Tk):
             return
         widget.tag_remove("bottom_center_pad", "1.0", "end")
         widget.tag_config("bottom_center_pad", spacing3=height_px // 2)
-        widget.tag_add("bottom_center_pad", "end-1c linestart", "end-1c")
+        # "end-1c"(末尾行の可視文字の終端)までだと、末尾行が空のとき
+        # linestartと同じ位置になりタグ付け範囲がゼロ幅になって何も
+        # 起きない(改行直後にpaddingが消える不具合の原因)。Tkが常に
+        # 保持する末尾の構造的な改行文字まで含む"end"を上限にすることで、
+        # 末尾行が空でも1文字分の範囲が確保されタグが必ず効くようにする。
+        widget.tag_add("bottom_center_pad", "end-1c linestart", "end")
 
     # --- テキスト検索(Ctrl+F) ------------------------------------------
 
