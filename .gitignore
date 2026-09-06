@@ -1,2 +1,4 @@
 /target
 /.idea
+# poc/配下は使い捨てのPoC用(CLAUDE.md参照)。.gitkeepのみ既存でトラッキング対象。
+/poc/*

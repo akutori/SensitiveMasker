@@ -4,5 +4,15 @@ version = "0.1.0"
 edition.workspace = true
 
 [dependencies]
-rmcp = "3.2.0"
+rmcp = { version = "3.2.0", features = ["server", "transport-io"] }
+schemars = "1.0"
+serde = { version = "1.0.229", features = ["derive"] }
+thiserror = "2.0.20"
 tokio = { version = "1.53.1", features = ["full"] }
+which = "8.0"
+
+[dev-dependencies]
+masker = { path = "../masker" }
+rmcp = { version = "3.2.0", features = ["client", "transport-child-process"] }
+serde_json = "1.0.151"
+tempfile = "3.27.0"
