@@ -69,4 +69,17 @@ pub enum ProfileAction {
     Delete {
         name: String,
     },
+    /// プロファイルをパスフレーズで暗号化してファイルへ書き出す
+    /// (パスフレーズは実行時にプロンプトで入力する。コマンドライン引数では渡せない)
+    Export {
+        name: String,
+        #[arg(long)]
+        output: PathBuf,
+    },
+    /// エクスポートされたファイルからプロファイルを取り込む
+    /// (パスフレーズは実行時にプロンプトで入力する。コマンドライン引数では渡せない)
+    Import {
+        #[arg(long)]
+        input: PathBuf,
+    },
 }

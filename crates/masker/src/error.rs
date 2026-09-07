@@ -31,4 +31,6 @@ pub enum CliError {
     NoActiveProfile,
     #[error("mask引数が不正です: {0}")]
     InvalidMaskArgs(String),
+    #[error("パスフレーズが一致しません")]
+    PassphraseMismatch,
 }

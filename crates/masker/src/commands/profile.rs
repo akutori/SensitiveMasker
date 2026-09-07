@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use masking_core::{Rule, RuleProfile};
-use profile_store::ProfileStore;
+use profile_store::{ProfileStore, SecretString};
 
 use crate::cli::ProfileAction;
 use crate::error::CliError;
@@ -14,6 +14,8 @@ pub(crate) fn run(action: &ProfileAction, store: &mut ProfileStore) -> Result<()
         ProfileAction::Use { name } => use_profile(store, name),
         ProfileAction::Create { name, from_json } => create(store, name, from_json.as_deref()),
         ProfileAction::Delete { name } => delete(store, name),
+        ProfileAction::Export { name, output } => export(store, name, output),
+        ProfileAction::Import { input } => import(store, input),
     }
 }
 
@@ -62,6 +64,56 @@ fn load_rules_from_json(path: &Path) -> Result<Vec<Rule>, CliError> {
 fn delete(store: &mut ProfileStore, name: &str) -> Result<(), CliError> {
     store.delete_profile(name)?;
     println!("プロファイル '{name}' を削除しました");
+    Ok(())
+}
+
+fn export(store: &ProfileStore, name: &str, output: &Path) -> Result<(), CliError> {
+    // 名前の存在確認を先に行う(存在しない名前に対して無駄にパスフレーズを2回入力させない)。
+    store.get_profile(name)?;
+    let passphrase = prompt_new_passphrase()?;
+    export_with_passphrase(store, name, output, passphrase)
+}
+
+// TTY読み取り(rpassword)をテスト対象から分離するための本体。
+fn export_with_passphrase(
+    store: &ProfileStore,
+    name: &str,
+    output: &Path,
+    passphrase: SecretString,
+) -> Result<(), CliError> {
+    let encrypted = store.export_profile(name, passphrase)?;
+    std::fs::write(output, &encrypted).map_err(|source| CliError::IoAt { path: output.to_path_buf(), source })?;
+    println!("プロファイル '{name}' を '{}' にエクスポートしました", output.display());
+    Ok(())
+}
+
+// タイプミス対策として2回入力させ、一致しない場合はエクスポートしない(age -pと同じ挙動)。
+fn prompt_new_passphrase() -> Result<SecretString, CliError> {
+    let first = rpassword::prompt_password("エクスポート用パスフレーズ: ")?;
+    let second = rpassword::prompt_password("パスフレーズ(確認): ")?;
+    confirm_passphrase(first, second)
+}
+
+// 比較ロジックのみを切り出し、TTY読み取り無しでテストできるようにする。
+fn confirm_passphrase(first: String, second: String) -> Result<SecretString, CliError> {
+    if first != second {
+        return Err(CliError::PassphraseMismatch);
+    }
+    Ok(SecretString::from(first))
+}
+
+fn import(store: &mut ProfileStore, input: &Path) -> Result<(), CliError> {
+    // ファイルの存在確認を先に行う(存在しないパスに対して無駄にパスフレーズを入力させない)。
+    std::fs::read(input).map_err(|source| CliError::IoAt { path: input.to_path_buf(), source })?;
+    let passphrase = SecretString::from(rpassword::prompt_password("インポート用パスフレーズ: ")?);
+    import_with_passphrase(store, input, passphrase)
+}
+
+// TTY読み取り(rpassword)をテスト対象から分離するための本体。
+fn import_with_passphrase(store: &mut ProfileStore, input: &Path, passphrase: SecretString) -> Result<(), CliError> {
+    let data = std::fs::read(input).map_err(|source| CliError::IoAt { path: input.to_path_buf(), source })?;
+    let profile = store.import_profile(&data, passphrase)?;
+    println!("プロファイル '{}' をインポートしました(ルール数: {})", profile.profile_name(), profile.rules().len());
     Ok(())
 }
 
@@ -174,5 +226,62 @@ mod tests {
 
         delete(&mut store, "first").unwrap();
         assert!(store.get_profile("first").is_err());
+    }
+
+    fn passphrase(s: &str) -> SecretString {
+        SecretString::from(s.to_owned())
+    }
+
+    #[test]
+    fn export_then_import_round_trips_into_a_different_store() {
+        let (_dir_a, mut store_a) = temp_store();
+        create(&mut store_a, "work", None).unwrap();
+        let export_dir = tempfile::tempdir().unwrap();
+        let export_path = export_dir.path().join("work.agemask");
+
+        export_with_passphrase(&store_a, "work", &export_path, passphrase("pw")).unwrap();
+
+        let (_dir_b, mut store_b) = temp_store();
+        import_with_passphrase(&mut store_b, &export_path, passphrase("pw")).unwrap();
+
+        assert_eq!(store_b.get_profile("work").unwrap().profile_name(), "work");
+    }
+
+    #[test]
+    fn importing_with_the_wrong_passphrase_fails_cleanly() {
+        let (_dir_a, mut store_a) = temp_store();
+        create(&mut store_a, "work", None).unwrap();
+        let export_dir = tempfile::tempdir().unwrap();
+        let export_path = export_dir.path().join("work.agemask");
+        export_with_passphrase(&store_a, "work", &export_path, passphrase("correct")).unwrap();
+
+        let (_dir_b, mut store_b) = temp_store();
+        let err = import_with_passphrase(&mut store_b, &export_path, passphrase("wrong"))
+            .expect_err("誤ったパスフレーズは拒否されるはず");
+
+        assert!(matches!(err, CliError::Store(profile_store::ProfileStoreError::Export(_))));
+    }
+
+    #[test]
+    fn confirm_passphrase_accepts_matching_input() {
+        let result = confirm_passphrase("same".to_string(), "same".to_string());
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn confirm_passphrase_rejects_mismatched_input() {
+        let err = confirm_passphrase("first".to_string(), "second".to_string())
+            .expect_err("不一致は拒否されるはず");
+        assert!(matches!(err, CliError::PassphraseMismatch));
+    }
+
+    #[test]
+    fn importing_a_missing_file_fails_cleanly() {
+        let (_dir, mut store) = temp_store();
+
+        let err = import_with_passphrase(&mut store, Path::new("no/such/file.agemask"), passphrase("pw"))
+            .expect_err("存在しないファイルは失敗するはず");
+
+        assert!(matches!(err, CliError::IoAt { .. }));
     }
 }

@@ -3,6 +3,7 @@
 
 mod crypto;
 mod db;
+mod export;
 mod key;
 mod paths;
 
@@ -13,6 +14,9 @@ use rusqlite::Connection;
 use secrecy::SecretBox;
 
 pub use paths::{AppPaths, PathError};
+// masker/gui側がexport_profile/import_profileにパスフレーズを渡す際、profile-storeが
+// 実際に使っているsecrecyと同一の型を参照できるようにする(独自にsecrecy依存を追加させない)。
+pub use secrecy::SecretString;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProfileStoreError {
@@ -31,6 +35,8 @@ pub enum ProfileStoreError {
     Db(#[from] rusqlite::Error),
     #[error(transparent)]
     Crypto(#[from] crypto::CryptoError),
+    #[error(transparent)]
+    Export(#[from] export::ExportError),
     #[error("プロファイル '{0}' は既に存在します")]
     ProfileAlreadyExists(String),
     #[error("プロファイル '{0}' が見つかりません")]
@@ -133,6 +139,26 @@ impl ProfileStore {
 
         tx.commit()?;
         Ok(())
+    }
+
+    /// プロファイルをパスフレーズで再暗号化したバイト列を返す(ローカル鍵を経由しない)。
+    /// 呼び出し側がこれをファイルに書き出す。
+    pub fn export_profile(&self, name: &str, passphrase: SecretString) -> Result<Vec<u8>, ProfileStoreError> {
+        let profile = self.get_profile(name)?;
+        let json = serde_json::to_vec(&profile).expect("RuleProfileのシリアライズは失敗しない");
+        Ok(export::encrypt_for_export(&json, passphrase)?)
+    }
+
+    /// export_profileが生成したバイト列をパスフレーズで復号し、プロファイルとして取り込む。
+    /// 復号後のJSONはRuleProfileのDeserialize(try_from経由)で検証されるため、不正な内容や
+    /// 重複ルール名を持つデータは取り込まれない。名前が既存プロファイルと重複する場合は
+    /// create_profileと同じくProfileAlreadyExistsで拒否される(いずれの場合もDBは変更されない)。
+    pub fn import_profile(&mut self, data: &[u8], passphrase: SecretString) -> Result<RuleProfile, ProfileStoreError> {
+        let json = export::decrypt_import(data, passphrase)?;
+        let profile: RuleProfile =
+            serde_json::from_slice(&json).map_err(|e| ProfileStoreError::CorruptProfileData(e.to_string()))?;
+        self.create_profile(&profile)?;
+        Ok(profile)
     }
 
     pub fn get_profile(&self, name: &str) -> Result<RuleProfile, ProfileStoreError> {
@@ -524,5 +550,94 @@ mod tests {
         assert!(!alpha.is_favorite);
         let beta = summaries.iter().find(|s| s.name == "beta").unwrap();
         assert!(!beta.is_active);
+    }
+
+    fn passphrase(s: &str) -> SecretString {
+        SecretString::from(s.to_owned())
+    }
+
+    #[test]
+    fn export_then_import_round_trips_into_a_different_store() {
+        let (_dir_a, paths_a) = temp_paths();
+        init_at(&paths_a).unwrap();
+        let mut store_a = ProfileStore::open_at(&paths_a).unwrap();
+        store_a.create_profile(&sample_profile("work")).unwrap();
+
+        let exported = store_a.export_profile("work", passphrase("pw")).unwrap();
+
+        // 別ディレクトリ(=別マシンを模したストア。鍵ファイルも別物)でも、パスフレーズだけで
+        // 復号・取り込みできることを確認する。
+        let (_dir_b, paths_b) = temp_paths();
+        init_at(&paths_b).unwrap();
+        let mut store_b = ProfileStore::open_at(&paths_b).unwrap();
+        let imported = store_b.import_profile(&exported, passphrase("pw")).unwrap();
+
+        assert_eq!(imported.profile_name(), "work");
+        assert_eq!(store_b.get_profile("work").unwrap().rules().len(), 1);
+    }
+
+    #[test]
+    fn importing_with_the_wrong_passphrase_fails_and_creates_nothing() {
+        let (_dir_a, paths_a) = temp_paths();
+        init_at(&paths_a).unwrap();
+        let mut store_a = ProfileStore::open_at(&paths_a).unwrap();
+        store_a.create_profile(&sample_profile("work")).unwrap();
+        let exported = store_a.export_profile("work", passphrase("correct")).unwrap();
+
+        let (_dir_b, paths_b) = temp_paths();
+        init_at(&paths_b).unwrap();
+        let mut store_b = ProfileStore::open_at(&paths_b).unwrap();
+        let err = store_b
+            .import_profile(&exported, passphrase("wrong"))
+            .expect_err("誤ったパスフレーズは拒否されるはず");
+
+        assert!(matches!(err, ProfileStoreError::Export(_)));
+        assert_eq!(store_b.list_profiles().unwrap().len(), 0, "失敗時はプロファイルが作成されてはいけない");
+    }
+
+    #[test]
+    fn importing_a_name_that_already_exists_is_rejected_like_create_profile() {
+        let (_dir, paths) = temp_paths();
+        init_at(&paths).unwrap();
+        let mut store = ProfileStore::open_at(&paths).unwrap();
+        store.create_profile(&sample_profile("work")).unwrap();
+        let exported = store.export_profile("work", passphrase("pw")).unwrap();
+
+        let err = store
+            .import_profile(&exported, passphrase("pw"))
+            .expect_err("同名プロファイルの重複インポートは拒否されるはず");
+
+        assert!(matches!(err, ProfileStoreError::ProfileAlreadyExists(name) if name == "work"));
+    }
+
+    #[test]
+    fn exporting_a_missing_profile_fails() {
+        let (_dir, paths) = temp_paths();
+        init_at(&paths).unwrap();
+        let store = ProfileStore::open_at(&paths).unwrap();
+
+        let err = store
+            .export_profile("nope", passphrase("pw"))
+            .expect_err("存在しないプロファイルのエクスポートはエラーのはず");
+
+        assert!(matches!(err, ProfileStoreError::ProfileNotFound(name) if name == "nope"));
+    }
+
+    #[test]
+    fn importing_data_that_decrypts_but_is_not_a_valid_rule_profile_fails_cleanly() {
+        let (_dir, paths) = temp_paths();
+        init_at(&paths).unwrap();
+        let mut store = ProfileStore::open_at(&paths).unwrap();
+
+        // パスフレーズは正しく復号できるが、中身がRuleProfileのJSONではないデータ
+        // (例: 無関係なファイルを誤ってこの形式で再暗号化した場合)を模擬する。
+        let not_a_profile = export::encrypt_for_export(b"not a rule profile", passphrase("pw")).unwrap();
+
+        let err = store
+            .import_profile(&not_a_profile, passphrase("pw"))
+            .expect_err("RuleProfileとして解釈できないデータは拒否されるはず");
+
+        assert!(matches!(err, ProfileStoreError::CorruptProfileData(_)));
+        assert_eq!(store.list_profiles().unwrap().len(), 0, "失敗時はプロファイルが作成されてはいけない");
     }
 }
