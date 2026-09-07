@@ -1,14 +1,17 @@
 //! プロファイルの永続化・暗号化・鍵管理(Imperative Shell)。masking-coreのRule/RuleProfileを
 //! SQLite+対称暗号化で保存する。GUI/CLI/MCPはこのcrate経由でのみプロファイルを読み書きする。
 
+mod bulk;
 mod crypto;
 mod db;
 mod export;
 mod key;
 mod paths;
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 
+use bulk::{ExportPayload, ExportedProfile};
 use masking_core::RuleProfile;
 use rusqlite::Connection;
 use secrecy::SecretBox;
@@ -16,7 +19,7 @@ use secrecy::SecretBox;
 pub use paths::{AppPaths, PathError};
 // masker/gui側がexport_profile/import_profileにパスフレーズを渡す際、profile-storeが
 // 実際に使っているsecrecyと同一の型を参照できるようにする(独自にsecrecy依存を追加させない)。
-pub use secrecy::SecretString;
+pub use secrecy::{ExposeSecret, SecretString};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProfileStoreError {
@@ -45,6 +48,13 @@ pub enum ProfileStoreError {
     CannotDeleteActiveProfile,
     #[error("保存されているプロファイルのデータが不正です: {0}")]
     CorruptProfileData(String),
+    #[error(
+        "このファイルのフォーマットバージョン({found})は、このmaskerが対応しているバージョン\
+         ({supported})と異なります。エクスポート元・インポート先のmaskerのバージョンを確認してください"
+    )]
+    UnsupportedFormatVersion { found: u32, supported: u32 },
+    #[error("インポートファイル内でプロファイル名が重複しています: '{0}'")]
+    DuplicateNameInImportFile(String),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -54,6 +64,27 @@ pub struct ProfileSummary {
     pub is_favorite: bool,
     pub is_active: bool,
     pub updated_at: String,
+}
+
+/// 全体インポートで、ファイル内の元の名前が取り込み先での衝突によりどう解決されたか。
+#[derive(Debug, Clone, PartialEq)]
+pub struct AllImportEntry {
+    pub original_name: String,
+    pub resolved_name: String,
+    pub renamed: bool,
+}
+
+/// `preview_import`の結果。DBはまだ変更されていない。`commit_import`にそのまま渡す。
+#[derive(Debug, Clone)]
+pub enum ImportPreview {
+    Single { name: String, exported: ExportedProfile },
+    All { active_profile_name: Option<String>, entries: Vec<AllImportEntry>, exported: Vec<ExportedProfile> },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ImportOutcome {
+    Single { name: String },
+    All { entries: Vec<AllImportEntry> },
 }
 
 pub fn is_initialized() -> Result<bool, ProfileStoreError> {
@@ -131,34 +162,165 @@ impl ProfileStore {
             "INSERT INTO profiles (name, rules_encrypted, nonce, updated_at) VALUES (?1, ?2, ?3, datetime('now'))",
             (name, &encrypted.ciphertext, &encrypted.nonce),
         )?;
-        let new_id = tx.last_insert_rowid();
 
-        if read_active_profile_id(&tx)?.is_none() {
-            upsert_active_profile_id(&tx, new_id)?;
+        if read_active_profile_name(&tx)?.is_none() {
+            upsert_active_profile_name(&tx, name)?;
         }
 
         tx.commit()?;
         Ok(())
     }
 
-    /// プロファイルをパスフレーズで再暗号化したバイト列を返す(ローカル鍵を経由しない)。
-    /// 呼び出し側がこれをファイルに書き出す。
+    /// プロファイル(お気に入り・タグを含む)をパスフレーズで再暗号化したバイト列を返す
+    /// (ローカル鍵を経由しない)。呼び出し側がこれをファイルに書き出す。
     pub fn export_profile(&self, name: &str, passphrase: SecretString) -> Result<Vec<u8>, ProfileStoreError> {
-        let profile = self.get_profile(name)?;
-        let json = serde_json::to_vec(&profile).expect("RuleProfileのシリアライズは失敗しない");
+        let exported = self.read_exported_profile(name)?;
+        let payload = ExportPayload::Single { format_version: bulk::CURRENT_FORMAT_VERSION, profile: exported };
+        let json = serde_json::to_vec(&payload).expect("ExportPayloadのシリアライズは失敗しない");
         Ok(export::encrypt_for_export(&json, passphrase)?)
     }
 
-    /// export_profileが生成したバイト列をパスフレーズで復号し、プロファイルとして取り込む。
-    /// 復号後のJSONはRuleProfileのDeserialize(try_from経由)で検証されるため、不正な内容や
-    /// 重複ルール名を持つデータは取り込まれない。名前が既存プロファイルと重複する場合は
-    /// create_profileと同じくProfileAlreadyExistsで拒否される(いずれの場合もDBは変更されない)。
-    pub fn import_profile(&mut self, data: &[u8], passphrase: SecretString) -> Result<RuleProfile, ProfileStoreError> {
+    /// 全プロファイル+タグ+お気に入り+アクティブプロファイル名をパスフレーズで
+    /// 再暗号化したバイト列を返す(PC移行用)。
+    pub fn export_all(&self, passphrase: SecretString) -> Result<Vec<u8>, ProfileStoreError> {
+        let names: Vec<String> = self
+            .conn
+            .prepare("SELECT name FROM profiles ORDER BY name")?
+            .query_map([], |row| row.get(0))?
+            .collect::<Result<_, _>>()?;
+
+        let profiles =
+            names.iter().map(|name| self.read_exported_profile(name)).collect::<Result<Vec<_>, _>>()?;
+        let active_profile_name = read_active_profile_name(&self.conn)?;
+
+        let payload = ExportPayload::All {
+            format_version: bulk::CURRENT_FORMAT_VERSION,
+            active_profile_name,
+            profiles,
+        };
+        let json = serde_json::to_vec(&payload).expect("ExportPayloadのシリアライズは失敗しない");
+        Ok(export::encrypt_for_export(&json, passphrase)?)
+    }
+
+    /// `export_profile`/`export_all`が生成したバイト列を復号し、書き込み内容を計算する
+    /// (DBはまだ変更しない)。単一プロファイルで名前が既存と重複する場合は、この時点で
+    /// `ProfileAlreadyExists`エラーになる(`create_profile`と同じ扱い)。全体の場合は
+    /// 各エントリの名前衝突を`bulk::resolve_name`で解決した結果を返すのみで、エラーには
+    /// ならない(実際のリネームは`commit_import`が行う)。
+    pub fn preview_import(&self, data: &[u8], passphrase: SecretString) -> Result<ImportPreview, ProfileStoreError> {
         let json = export::decrypt_import(data, passphrase)?;
-        let profile: RuleProfile =
+        let payload: ExportPayload =
             serde_json::from_slice(&json).map_err(|e| ProfileStoreError::CorruptProfileData(e.to_string()))?;
-        self.create_profile(&profile)?;
-        Ok(profile)
+
+        match payload {
+            ExportPayload::Single { format_version, profile } => {
+                check_format_version(format_version)?;
+                let name = profile.profile.profile_name().to_string();
+                let exists: bool = self
+                    .conn
+                    .query_row("SELECT EXISTS(SELECT 1 FROM profiles WHERE name = ?1)", [&name], |row| row.get(0))?;
+                if exists {
+                    return Err(ProfileStoreError::ProfileAlreadyExists(name));
+                }
+                Ok(ImportPreview::Single { name, exported: profile })
+            }
+            ExportPayload::All { format_version, active_profile_name, profiles } => {
+                check_format_version(format_version)?;
+
+                // 正規のexport_allでは`profiles.name`のUNIQUE制約によりあり得ないが、
+                // 手作りされた/破損したファイルでは重複しうる。重複があると、後段の
+                // アクティブプロファイル名の解決(先勝ち)が曖昧になるため、ここで
+                // ファイル全体を拒否する(部分的な取り込みは行わない)。
+                let mut seen = HashSet::new();
+                for p in &profiles {
+                    let name = p.profile.profile_name();
+                    if !seen.insert(name.to_string()) {
+                        return Err(ProfileStoreError::DuplicateNameInImportFile(name.to_string()));
+                    }
+                }
+
+                let mut taken: HashSet<String> = self
+                    .conn
+                    .prepare("SELECT name FROM profiles")?
+                    .query_map([], |row| row.get(0))?
+                    .collect::<Result<_, _>>()?;
+
+                let entries = profiles
+                    .iter()
+                    .map(|p| {
+                        let original_name = p.profile.profile_name().to_string();
+                        let (resolved_name, renamed) = bulk::resolve_name(&original_name, &mut taken);
+                        AllImportEntry { original_name, resolved_name, renamed }
+                    })
+                    .collect();
+
+                Ok(ImportPreview::All { active_profile_name, entries, exported: profiles })
+            }
+        }
+    }
+
+    /// `preview_import`の結果を実際に書き込む。全体の場合は1トランザクションにまとめる
+    /// (途中の失敗で一部プロファイルだけが作成された状態を残さないため)。
+    pub fn commit_import(&mut self, preview: ImportPreview) -> Result<ImportOutcome, ProfileStoreError> {
+        match preview {
+            ImportPreview::Single { name, exported } => {
+                let encrypted_json =
+                    serde_json::to_vec(&exported.profile).expect("RuleProfileのシリアライズは失敗しない");
+                let encrypted = crypto::encrypt(&self.key, &encrypted_json, name.as_bytes());
+
+                let tx = self.conn.transaction()?;
+                insert_profile_row(&tx, &name, &encrypted, exported.is_favorite, &exported.tags)?;
+                if read_active_profile_name(&tx)?.is_none() {
+                    upsert_active_profile_name(&tx, &name)?;
+                }
+                tx.commit()?;
+                Ok(ImportOutcome::Single { name })
+            }
+            ImportPreview::All { active_profile_name, entries, exported } => {
+                // 暗号化はself.keyの借用で完結させ、トランザクション(self.connの可変借用)開始前に
+                // 済ませておく(同時に借用しないための構成)。resolved_name/tags/is_favoriteを
+                // 1件ずつ平たいタプルに詰め、参照の入れ子を作らないようにする。
+                struct PreparedEntry {
+                    resolved_name: String,
+                    encrypted: crypto::Encrypted,
+                    is_favorite: bool,
+                    tags: Vec<String>,
+                }
+                let prepared: Vec<PreparedEntry> = entries
+                    .iter()
+                    .zip(exported.iter())
+                    .map(|(entry, exported)| {
+                        let json =
+                            serde_json::to_vec(&exported.profile).expect("RuleProfileのシリアライズは失敗しない");
+                        PreparedEntry {
+                            resolved_name: entry.resolved_name.clone(),
+                            encrypted: crypto::encrypt(&self.key, &json, entry.resolved_name.as_bytes()),
+                            is_favorite: exported.is_favorite,
+                            tags: exported.tags.clone(),
+                        }
+                    })
+                    .collect();
+
+                let tx = self.conn.transaction()?;
+                for p in &prepared {
+                    insert_profile_row(&tx, &p.resolved_name, &p.encrypted, p.is_favorite, &p.tags)?;
+                }
+
+                // アクティブプロファイルの扱い: 取り込み先に既にアクティブなプロファイルが
+                // 設定されている場合は変更しない。未設定の場合のみ、ファイル内の値を
+                // (衝突でリネームされていれば解決後の名前に読み替えて)採用する。
+                if read_active_profile_name(&tx)?.is_none() {
+                    if let Some(original) = &active_profile_name {
+                        if let Some(entry) = entries.iter().find(|e| &e.original_name == original) {
+                            upsert_active_profile_name(&tx, &entry.resolved_name)?;
+                        }
+                    }
+                }
+
+                tx.commit()?;
+                Ok(ImportOutcome::All { entries })
+            }
+        }
     }
 
     pub fn get_profile(&self, name: &str) -> Result<RuleProfile, ProfileStoreError> {
@@ -175,26 +337,24 @@ impl ProfileStore {
     }
 
     pub fn list_profiles(&self) -> Result<Vec<ProfileSummary>, ProfileStoreError> {
-        let active_id = read_active_profile_id(&self.conn)?;
+        let active_name = read_active_profile_name(&self.conn)?;
 
-        let rows: Vec<(i64, String, Vec<u8>, Vec<u8>, bool, String)> = self
+        let rows: Vec<(String, Vec<u8>, Vec<u8>, bool, String)> = self
             .conn
-            .prepare(
-                "SELECT id, name, rules_encrypted, nonce, is_favorite, updated_at FROM profiles ORDER BY name",
-            )?
+            .prepare("SELECT name, rules_encrypted, nonce, is_favorite, updated_at FROM profiles ORDER BY name")?
             .query_map([], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?))
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))
             })?
             .collect::<Result<_, _>>()?;
 
         rows.into_iter()
-            .map(|(id, name, ciphertext, nonce, is_favorite, updated_at)| {
+            .map(|(name, ciphertext, nonce, is_favorite, updated_at)| {
                 let profile = self.decrypt_profile(&ciphertext, &nonce, &name)?;
                 Ok(ProfileSummary {
+                    is_active: Some(&name) == active_name.as_ref(),
                     name,
                     rule_count: profile.rules().len(),
                     is_favorite,
-                    is_active: Some(id) == active_id,
                     updated_at,
                 })
             })
@@ -202,48 +362,119 @@ impl ProfileStore {
     }
 
     pub fn delete_profile(&mut self, name: &str) -> Result<(), ProfileStoreError> {
-        let id: i64 = self
-            .conn
-            .query_row("SELECT id FROM profiles WHERE name = ?1", [name], |row| row.get(0))
-            .map_err(|e| not_found_unless_other_db_error(e, name))?;
-
-        if read_active_profile_id(&self.conn)? == Some(id) {
+        if read_active_profile_name(&self.conn)?.as_deref() == Some(name) {
             return Err(ProfileStoreError::CannotDeleteActiveProfile);
         }
 
-        self.conn.execute("DELETE FROM profiles WHERE id = ?1", [id])?;
+        let changed = self.conn.execute("DELETE FROM profiles WHERE name = ?1", [name])?;
+        if changed == 0 {
+            return Err(ProfileStoreError::ProfileNotFound(name.to_string()));
+        }
         Ok(())
     }
 
     pub fn set_active_profile(&mut self, name: &str) -> Result<(), ProfileStoreError> {
-        let id: i64 = self
-            .conn
-            .query_row("SELECT id FROM profiles WHERE name = ?1", [name], |row| row.get(0))
-            .map_err(|e| not_found_unless_other_db_error(e, name))?;
-        upsert_active_profile_id(&self.conn, id)
+        let exists: bool =
+            self.conn.query_row("SELECT EXISTS(SELECT 1 FROM profiles WHERE name = ?1)", [name], |row| row.get(0))?;
+        if !exists {
+            return Err(ProfileStoreError::ProfileNotFound(name.to_string()));
+        }
+        upsert_active_profile_name(&self.conn, name)
     }
 
     pub fn active_profile(&self) -> Result<Option<RuleProfile>, ProfileStoreError> {
-        let active_id = match read_active_profile_id(&self.conn)? {
-            Some(id) => id,
+        let active_name = match read_active_profile_name(&self.conn)? {
+            Some(name) => name,
             None => return Ok(None),
         };
-        let name: String =
-            self.conn.query_row("SELECT name FROM profiles WHERE id = ?1", [active_id], |row| row.get(0))?;
-        Ok(Some(self.get_profile(&name)?))
+        Ok(Some(self.get_profile(&active_name)?))
     }
 
     fn decrypt_profile(&self, ciphertext: &[u8], nonce: &[u8], name: &str) -> Result<RuleProfile, ProfileStoreError> {
         let plaintext = crypto::decrypt(&self.key, ciphertext, nonce, name.as_bytes())?;
         serde_json::from_slice(&plaintext).map_err(|e| ProfileStoreError::CorruptProfileData(e.to_string()))
     }
+
+    /// 指定したプロファイルのルール・お気に入り・タグをまとめて読み出す
+    /// (export_profile/export_allの共通処理)。
+    fn read_exported_profile(&self, name: &str) -> Result<ExportedProfile, ProfileStoreError> {
+        let (id, is_favorite): (i64, bool) = self
+            .conn
+            .query_row("SELECT id, is_favorite FROM profiles WHERE name = ?1", [name], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .map_err(|e| not_found_unless_other_db_error(e, name))?;
+
+        let profile = self.get_profile(name)?;
+
+        let tags: Vec<String> = self
+            .conn
+            .prepare(
+                "SELECT tags.name FROM tags
+                 JOIN profile_tags ON profile_tags.tag_id = tags.id
+                 WHERE profile_tags.profile_id = ?1
+                 ORDER BY tags.name",
+            )?
+            .query_map([id], |row| row.get(0))?
+            .collect::<Result<_, _>>()?;
+
+        Ok(ExportedProfile { is_favorite, tags, profile })
+    }
+}
+
+fn check_format_version(found: u32) -> Result<(), ProfileStoreError> {
+    if found != bulk::CURRENT_FORMAT_VERSION {
+        return Err(ProfileStoreError::UnsupportedFormatVersion { found, supported: bulk::CURRENT_FORMAT_VERSION });
+    }
+    Ok(())
+}
+
+/// タグ名自体はget-or-createで解決するため衝突しないが、1プロファイルの`tags`内で
+/// 同じ名前が複数回渡された場合(手作りされた/破損したファイル由来。正規のexportでは
+/// 発生しない)、profile_tags側の複合主キーで重複挿入になるため、そちらもON CONFLICTで
+/// 無視する(タグを2回指定しても1回指定と同じ結果になるだけで、エラーにはしない)。
+fn attach_tags(conn: &Connection, profile_id: i64, tags: &[String]) -> Result<(), ProfileStoreError> {
+    for tag_name in tags {
+        conn.execute("INSERT INTO tags (name) VALUES (?1) ON CONFLICT(name) DO NOTHING", [tag_name])?;
+        let tag_id: i64 = conn.query_row("SELECT id FROM tags WHERE name = ?1", [tag_name], |row| row.get(0))?;
+        conn.execute(
+            "INSERT INTO profile_tags (profile_id, tag_id) VALUES (?1, ?2) ON CONFLICT(profile_id, tag_id) DO NOTHING",
+            (profile_id, tag_id),
+        )?;
+    }
+    Ok(())
+}
+
+/// 暗号化済みのプロファイル1件をprofilesテーブルに挿入し、お気に入り・タグを反映する。
+/// 名前が既に存在する場合は`ProfileAlreadyExists`(呼び出し側は事前にpreview_importで
+/// 重複を解決済みのはずだが、念のため二重チェックする)。
+fn insert_profile_row(
+    conn: &Connection,
+    name: &str,
+    encrypted: &crypto::Encrypted,
+    is_favorite: bool,
+    tags: &[String],
+) -> Result<(), ProfileStoreError> {
+    let exists: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM profiles WHERE name = ?1)", [name], |row| row.get(0))?;
+    if exists {
+        return Err(ProfileStoreError::ProfileAlreadyExists(name.to_string()));
+    }
+
+    conn.execute(
+        "INSERT INTO profiles (name, rules_encrypted, nonce, is_favorite, updated_at)
+         VALUES (?1, ?2, ?3, ?4, datetime('now'))",
+        (name, &encrypted.ciphertext, &encrypted.nonce, is_favorite),
+    )?;
+    let profile_id = conn.last_insert_rowid();
+
+    attach_tags(conn, profile_id, tags)
 }
 
 /// `settings`テーブルは「行が無い(未初期化状態)」であればアクティブ未設定として扱うが、
 /// それ以外のDBエラー(ロック競合・I/O異常等)は握り潰さずそのまま伝播させる。
-fn read_active_profile_id(conn: &Connection) -> Result<Option<i64>, ProfileStoreError> {
-    match conn.query_row("SELECT active_profile_id FROM settings WHERE id = 1", [], |row| row.get(0)) {
-        Ok(id) => Ok(id),
+fn read_active_profile_name(conn: &Connection) -> Result<Option<String>, ProfileStoreError> {
+    match conn.query_row("SELECT active_profile_name FROM settings WHERE id = 1", [], |row| row.get(0)) {
+        Ok(name) => Ok(name),
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
         Err(e) => Err(e.into()),
     }
@@ -258,11 +489,11 @@ fn not_found_unless_other_db_error(err: rusqlite::Error, name: &str) -> ProfileS
     }
 }
 
-fn upsert_active_profile_id(conn: &Connection, id: i64) -> Result<(), ProfileStoreError> {
+fn upsert_active_profile_name(conn: &Connection, name: &str) -> Result<(), ProfileStoreError> {
     conn.execute(
-        "INSERT INTO settings (id, active_profile_id) VALUES (1, ?1)
-         ON CONFLICT(id) DO UPDATE SET active_profile_id = ?1",
-        [id],
+        "INSERT INTO settings (id, active_profile_name) VALUES (1, ?1)
+         ON CONFLICT(id) DO UPDATE SET active_profile_name = ?1",
+        [name],
     )?;
     Ok(())
 }
@@ -292,6 +523,10 @@ mod tests {
         )
         .unwrap();
         RuleProfile::new(name, None, vec![rule]).unwrap()
+    }
+
+    fn passphrase(s: &str) -> SecretString {
+        SecretString::from(s.to_owned())
     }
 
     #[test]
@@ -509,6 +744,16 @@ mod tests {
     }
 
     #[test]
+    fn set_active_profile_on_a_missing_name_fails() {
+        let (_dir, paths) = temp_paths();
+        init_at(&paths).unwrap();
+        let mut store = ProfileStore::open_at(&paths).unwrap();
+
+        let err = store.set_active_profile("nope").expect_err("存在しない名前はエラーのはず");
+        assert!(matches!(err, ProfileStoreError::ProfileNotFound(name) if name == "nope"));
+    }
+
+    #[test]
     fn deleting_the_active_profile_is_rejected() {
         let (_dir, paths) = temp_paths();
         init_at(&paths).unwrap();
@@ -534,6 +779,16 @@ mod tests {
     }
 
     #[test]
+    fn deleting_a_missing_profile_fails() {
+        let (_dir, paths) = temp_paths();
+        init_at(&paths).unwrap();
+        let mut store = ProfileStore::open_at(&paths).unwrap();
+
+        let err = store.delete_profile("nope").expect_err("存在しない名前はエラーのはず");
+        assert!(matches!(err, ProfileStoreError::ProfileNotFound(name) if name == "nope"));
+    }
+
+    #[test]
     fn list_profiles_reports_rule_count_favorite_and_active_status() {
         let (_dir, paths) = temp_paths();
         init_at(&paths).unwrap();
@@ -552,10 +807,6 @@ mod tests {
         assert!(!beta.is_active);
     }
 
-    fn passphrase(s: &str) -> SecretString {
-        SecretString::from(s.to_owned())
-    }
-
     #[test]
     fn export_then_import_round_trips_into_a_different_store() {
         let (_dir_a, paths_a) = temp_paths();
@@ -570,10 +821,43 @@ mod tests {
         let (_dir_b, paths_b) = temp_paths();
         init_at(&paths_b).unwrap();
         let mut store_b = ProfileStore::open_at(&paths_b).unwrap();
-        let imported = store_b.import_profile(&exported, passphrase("pw")).unwrap();
+        let preview = store_b.preview_import(&exported, passphrase("pw")).unwrap();
+        assert!(matches!(&preview, ImportPreview::Single { name, .. } if name == "work"));
+        let outcome = store_b.commit_import(preview).unwrap();
 
-        assert_eq!(imported.profile_name(), "work");
+        assert_eq!(outcome, ImportOutcome::Single { name: "work".to_string() });
         assert_eq!(store_b.get_profile("work").unwrap().rules().len(), 1);
+    }
+
+    #[test]
+    fn single_export_import_round_trips_favorite_and_tags() {
+        let (_dir_a, paths_a) = temp_paths();
+        init_at(&paths_a).unwrap();
+        let mut store_a = ProfileStore::open_at(&paths_a).unwrap();
+        store_a.create_profile(&sample_profile("work")).unwrap();
+        store_a.conn.execute("UPDATE profiles SET is_favorite = 1 WHERE name = 'work'", []).unwrap();
+        store_a.conn.execute("INSERT INTO tags (name) VALUES ('sip')", []).unwrap();
+        store_a
+            .conn
+            .execute(
+                "INSERT INTO profile_tags (profile_id, tag_id)
+                 SELECT (SELECT id FROM profiles WHERE name = 'work'), (SELECT id FROM tags WHERE name = 'sip')",
+                [],
+            )
+            .unwrap();
+
+        let exported = store_a.export_profile("work", passphrase("pw")).unwrap();
+
+        let (_dir_b, paths_b) = temp_paths();
+        init_at(&paths_b).unwrap();
+        let mut store_b = ProfileStore::open_at(&paths_b).unwrap();
+        let preview = store_b.preview_import(&exported, passphrase("pw")).unwrap();
+        store_b.commit_import(preview).unwrap();
+
+        let summary = store_b.list_profiles().unwrap().into_iter().find(|s| s.name == "work").unwrap();
+        assert!(summary.is_favorite, "お気に入り状態が引き継がれるはず");
+        let re_exported = store_b.read_exported_profile("work").unwrap();
+        assert_eq!(re_exported.tags, vec!["sip".to_string()], "タグが引き継がれるはず");
     }
 
     #[test]
@@ -586,9 +870,9 @@ mod tests {
 
         let (_dir_b, paths_b) = temp_paths();
         init_at(&paths_b).unwrap();
-        let mut store_b = ProfileStore::open_at(&paths_b).unwrap();
+        let store_b = ProfileStore::open_at(&paths_b).unwrap();
         let err = store_b
-            .import_profile(&exported, passphrase("wrong"))
+            .preview_import(&exported, passphrase("wrong"))
             .expect_err("誤ったパスフレーズは拒否されるはず");
 
         assert!(matches!(err, ProfileStoreError::Export(_)));
@@ -596,7 +880,7 @@ mod tests {
     }
 
     #[test]
-    fn importing_a_name_that_already_exists_is_rejected_like_create_profile() {
+    fn previewing_a_single_import_with_a_name_that_already_exists_is_rejected_immediately() {
         let (_dir, paths) = temp_paths();
         init_at(&paths).unwrap();
         let mut store = ProfileStore::open_at(&paths).unwrap();
@@ -604,8 +888,8 @@ mod tests {
         let exported = store.export_profile("work", passphrase("pw")).unwrap();
 
         let err = store
-            .import_profile(&exported, passphrase("pw"))
-            .expect_err("同名プロファイルの重複インポートは拒否されるはず");
+            .preview_import(&exported, passphrase("pw"))
+            .expect_err("単一インポートの同名重複はpreview時点で拒否されるはず");
 
         assert!(matches!(err, ProfileStoreError::ProfileAlreadyExists(name) if name == "work"));
     }
@@ -624,20 +908,253 @@ mod tests {
     }
 
     #[test]
-    fn importing_data_that_decrypts_but_is_not_a_valid_rule_profile_fails_cleanly() {
+    fn importing_data_that_decrypts_but_is_not_a_valid_export_payload_fails_cleanly() {
+        let (_dir, paths) = temp_paths();
+        init_at(&paths).unwrap();
+        let store = ProfileStore::open_at(&paths).unwrap();
+
+        // パスフレーズは正しく復号できるが、中身がExportPayloadのJSONではないデータ
+        // (例: 無関係なファイルを誤ってこの形式で再暗号化した場合)を模擬する。
+        let not_a_payload = export::encrypt_for_export(b"not an export payload", passphrase("pw")).unwrap();
+
+        let err = store
+            .preview_import(&not_a_payload, passphrase("pw"))
+            .expect_err("ExportPayloadとして解釈できないデータは拒否されるはず");
+
+        assert!(matches!(err, ProfileStoreError::CorruptProfileData(_)));
+    }
+
+    #[test]
+    fn export_all_then_import_all_round_trips_all_profiles_and_active_name() {
+        let (_dir_a, paths_a) = temp_paths();
+        init_at(&paths_a).unwrap();
+        let mut store_a = ProfileStore::open_at(&paths_a).unwrap();
+        store_a.create_profile(&sample_profile("work")).unwrap();
+        store_a.create_profile(&sample_profile("personal")).unwrap();
+        store_a.set_active_profile("personal").unwrap();
+
+        let exported = store_a.export_all(passphrase("pw")).unwrap();
+
+        let (_dir_b, paths_b) = temp_paths();
+        init_at(&paths_b).unwrap();
+        let mut store_b = ProfileStore::open_at(&paths_b).unwrap();
+        let preview = store_b.preview_import(&exported, passphrase("pw")).unwrap();
+        let ImportPreview::All { entries, .. } = &preview else { panic!("Allを期待") };
+        assert!(entries.iter().all(|e| !e.renamed), "空のDBへのインポートはリネームされないはず");
+
+        store_b.commit_import(preview).unwrap();
+
+        let summaries = store_b.list_profiles().unwrap();
+        assert_eq!(summaries.len(), 2);
+        let active = store_b.active_profile().unwrap().unwrap();
+        assert_eq!(active.profile_name(), "personal", "アクティブプロファイル名が引き継がれるはず");
+    }
+
+    #[test]
+    fn import_all_does_not_overwrite_an_already_active_profile() {
+        let (_dir_a, paths_a) = temp_paths();
+        init_at(&paths_a).unwrap();
+        let mut store_a = ProfileStore::open_at(&paths_a).unwrap();
+        store_a.create_profile(&sample_profile("work")).unwrap();
+        let exported = store_a.export_all(passphrase("pw")).unwrap();
+
+        let (_dir_b, paths_b) = temp_paths();
+        init_at(&paths_b).unwrap();
+        let mut store_b = ProfileStore::open_at(&paths_b).unwrap();
+        // インポート先には既にアクティブなプロファイルが存在する状態を作る。
+        store_b.create_profile(&sample_profile("existing")).unwrap();
+
+        let preview = store_b.preview_import(&exported, passphrase("pw")).unwrap();
+        store_b.commit_import(preview).unwrap();
+
+        let active = store_b.active_profile().unwrap().unwrap();
+        assert_eq!(active.profile_name(), "existing", "既にアクティブがある場合は上書きされないはず");
+    }
+
+    #[test]
+    fn import_all_renames_colliding_names_and_creates_the_rest() {
+        let (_dir_a, paths_a) = temp_paths();
+        init_at(&paths_a).unwrap();
+        let mut store_a = ProfileStore::open_at(&paths_a).unwrap();
+        store_a.create_profile(&sample_profile("work")).unwrap();
+        store_a.create_profile(&sample_profile("personal")).unwrap();
+        let exported = store_a.export_all(passphrase("pw")).unwrap();
+
+        let (_dir_b, paths_b) = temp_paths();
+        init_at(&paths_b).unwrap();
+        let mut store_b = ProfileStore::open_at(&paths_b).unwrap();
+        store_b.create_profile(&sample_profile("work")).unwrap(); // 衝突させる
+
+        let preview = store_b.preview_import(&exported, passphrase("pw")).unwrap();
+        let ImportPreview::All { entries, .. } = &preview else { panic!("Allを期待") };
+        let work_entry = entries.iter().find(|e| e.original_name == "work").unwrap();
+        assert!(work_entry.renamed);
+        assert_eq!(work_entry.resolved_name, "work (インポート)");
+        let personal_entry = entries.iter().find(|e| e.original_name == "personal").unwrap();
+        assert!(!personal_entry.renamed);
+
+        store_b.commit_import(preview).unwrap();
+
+        let names: Vec<String> = store_b.list_profiles().unwrap().into_iter().map(|s| s.name).collect();
+        assert!(names.contains(&"work".to_string()), "元のworkは変更されず残っているはず");
+        assert!(names.contains(&"work (インポート)".to_string()));
+        assert!(names.contains(&"personal".to_string()));
+    }
+
+    #[test]
+    fn import_all_creates_missing_tags_and_reuses_existing_ones() {
+        let (_dir_a, paths_a) = temp_paths();
+        init_at(&paths_a).unwrap();
+        let mut store_a = ProfileStore::open_at(&paths_a).unwrap();
+        store_a.create_profile(&sample_profile("work")).unwrap();
+        store_a.conn.execute("INSERT INTO tags (name) VALUES ('sip')", []).unwrap();
+        store_a
+            .conn
+            .execute(
+                "INSERT INTO profile_tags (profile_id, tag_id)
+                 SELECT (SELECT id FROM profiles WHERE name = 'work'), (SELECT id FROM tags WHERE name = 'sip')",
+                [],
+            )
+            .unwrap();
+        let exported = store_a.export_all(passphrase("pw")).unwrap();
+
+        let (_dir_b, paths_b) = temp_paths();
+        init_at(&paths_b).unwrap();
+        let mut store_b = ProfileStore::open_at(&paths_b).unwrap();
+        // インポート先には既に同名のタグが存在する状態を作る(使い回されるはず)。
+        store_b.conn.execute("INSERT INTO tags (name) VALUES ('sip')", []).unwrap();
+
+        let preview = store_b.preview_import(&exported, passphrase("pw")).unwrap();
+        store_b.commit_import(preview).unwrap();
+
+        let tag_count: i64 = store_b.conn.query_row("SELECT COUNT(*) FROM tags", [], |r| r.get(0)).unwrap();
+        assert_eq!(tag_count, 1, "既存タグが使い回され、重複作成されないはず");
+        let re_exported = store_b.read_exported_profile("work").unwrap();
+        assert_eq!(re_exported.tags, vec!["sip".to_string()]);
+    }
+
+    #[test]
+    fn commit_import_all_does_not_partially_write_when_one_entry_fails() {
+        // insert_profile_rowの二重チェックが無ければ通ってしまうはずの状況を作る:
+        // previewの後、commitの前に同名プロファイルが割り込んで作成されるケース。
+        let (_dir_a, paths_a) = temp_paths();
+        init_at(&paths_a).unwrap();
+        let mut store_a = ProfileStore::open_at(&paths_a).unwrap();
+        store_a.create_profile(&sample_profile("work")).unwrap();
+        store_a.create_profile(&sample_profile("personal")).unwrap();
+        let exported = store_a.export_all(passphrase("pw")).unwrap();
+
+        let (_dir_b, paths_b) = temp_paths();
+        init_at(&paths_b).unwrap();
+        let mut store_b = ProfileStore::open_at(&paths_b).unwrap();
+        let preview = store_b.preview_import(&exported, passphrase("pw")).unwrap();
+
+        // previewはリネーム不要と判定した後で、横から同名プロファイルが作られた状況を模擬する。
+        store_b.create_profile(&sample_profile("work")).unwrap();
+
+        let err = store_b.commit_import(preview).expect_err("二重チェックにより失敗するはず");
+        assert!(matches!(err, ProfileStoreError::ProfileAlreadyExists(_)));
+
+        let names: Vec<String> = store_b.list_profiles().unwrap().into_iter().map(|s| s.name).collect();
+        assert!(!names.contains(&"personal".to_string()), "1件でも失敗したら全体がロールバックされるはず");
+    }
+
+    #[test]
+    fn importing_a_profile_with_a_duplicate_tag_in_its_own_list_attaches_it_only_once() {
         let (_dir, paths) = temp_paths();
         init_at(&paths).unwrap();
         let mut store = ProfileStore::open_at(&paths).unwrap();
 
-        // パスフレーズは正しく復号できるが、中身がRuleProfileのJSONではないデータ
-        // (例: 無関係なファイルを誤ってこの形式で再暗号化した場合)を模擬する。
-        let not_a_profile = export::encrypt_for_export(b"not a rule profile", passphrase("pw")).unwrap();
+        let payload = bulk::ExportPayload::All {
+            format_version: bulk::CURRENT_FORMAT_VERSION,
+            active_profile_name: None,
+            profiles: vec![bulk::ExportedProfile {
+                is_favorite: false,
+                tags: vec!["sip".to_string(), "sip".to_string()],
+                profile: sample_profile("work"),
+            }],
+        };
+        let json = serde_json::to_vec(&payload).unwrap();
+        let encrypted = export::encrypt_for_export(&json, passphrase("pw")).unwrap();
+
+        let preview = store.preview_import(&encrypted, passphrase("pw")).unwrap();
+        store.commit_import(preview).unwrap();
+
+        let exported = store.read_exported_profile("work").unwrap();
+        assert_eq!(exported.tags, vec!["sip".to_string()], "重複タグは1回だけ紐付くはず");
+    }
+
+    #[test]
+    fn importing_a_file_with_an_unsupported_format_version_is_rejected() {
+        let (_dir, paths) = temp_paths();
+        init_at(&paths).unwrap();
+        let store = ProfileStore::open_at(&paths).unwrap();
+
+        let payload = bulk::ExportPayload::Single {
+            format_version: bulk::CURRENT_FORMAT_VERSION + 1,
+            profile: bulk::ExportedProfile { is_favorite: false, tags: Vec::new(), profile: sample_profile("work") },
+        };
+        let json = serde_json::to_vec(&payload).unwrap();
+        let encrypted = export::encrypt_for_export(&json, passphrase("pw")).unwrap();
+
+        let err = store.preview_import(&encrypted, passphrase("pw")).expect_err("未対応バージョンは拒否されるはず");
+        assert!(matches!(
+            err,
+            ProfileStoreError::UnsupportedFormatVersion { found, supported }
+                if found == bulk::CURRENT_FORMAT_VERSION + 1 && supported == bulk::CURRENT_FORMAT_VERSION
+        ));
+    }
+
+    #[test]
+    fn importing_a_file_with_duplicate_profile_names_is_rejected_entirely() {
+        let (_dir, paths) = temp_paths();
+        init_at(&paths).unwrap();
+        let store = ProfileStore::open_at(&paths).unwrap();
+
+        let payload = bulk::ExportPayload::All {
+            format_version: bulk::CURRENT_FORMAT_VERSION,
+            active_profile_name: None,
+            profiles: vec![
+                bulk::ExportedProfile { is_favorite: false, tags: Vec::new(), profile: sample_profile("work") },
+                bulk::ExportedProfile { is_favorite: false, tags: Vec::new(), profile: sample_profile("work") },
+            ],
+        };
+        let json = serde_json::to_vec(&payload).unwrap();
+        let encrypted = export::encrypt_for_export(&json, passphrase("pw")).unwrap();
 
         let err = store
-            .import_profile(&not_a_profile, passphrase("pw"))
-            .expect_err("RuleProfileとして解釈できないデータは拒否されるはず");
+            .preview_import(&encrypted, passphrase("pw"))
+            .expect_err("ファイル内の名前重複は拒否されるはず");
+        assert!(matches!(err, ProfileStoreError::DuplicateNameInImportFile(name) if name == "work"));
+        assert_eq!(store.list_profiles().unwrap().len(), 0, "拒否時は何も作成されないはず");
+    }
 
-        assert!(matches!(err, ProfileStoreError::CorruptProfileData(_)));
-        assert_eq!(store.list_profiles().unwrap().len(), 0, "失敗時はプロファイルが作成されてはいけない");
+    #[test]
+    fn a_file_with_both_an_unsupported_version_and_duplicate_names_reports_the_version_problem_first() {
+        // フォーマットバージョンの確認は、ファイル内の名前重複チェックより前に行われるべき
+        // (両方に問題がある場合、より根本的な問題であるバージョン不一致を優先して案内する)。
+        // この優先順位が将来のリファクタリングで入れ替わらないことを固定するための回帰テスト。
+        let (_dir, paths) = temp_paths();
+        init_at(&paths).unwrap();
+        let store = ProfileStore::open_at(&paths).unwrap();
+
+        let payload = bulk::ExportPayload::All {
+            format_version: bulk::CURRENT_FORMAT_VERSION + 1,
+            active_profile_name: None,
+            profiles: vec![
+                bulk::ExportedProfile { is_favorite: false, tags: Vec::new(), profile: sample_profile("work") },
+                bulk::ExportedProfile { is_favorite: false, tags: Vec::new(), profile: sample_profile("work") },
+            ],
+        };
+        let json = serde_json::to_vec(&payload).unwrap();
+        let encrypted = export::encrypt_for_export(&json, passphrase("pw")).unwrap();
+
+        let err = store
+            .preview_import(&encrypted, passphrase("pw"))
+            .expect_err("いずれかの理由で拒否されるはず");
+        assert!(
+            matches!(err, ProfileStoreError::UnsupportedFormatVersion { .. }),
+            "バージョン不一致が名前重複より先に報告されるはず: {err:?}"
+        );
     }
 }

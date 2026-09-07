@@ -22,6 +22,24 @@ pub enum Command {
         #[command(subcommand)]
         action: ProfileAction,
     },
+    /// プロファイルをパスフレーズで暗号化してファイルへ書き出す
+    /// (パスフレーズは実行時にプロンプトで入力する。コマンドライン引数では渡せない)
+    Export {
+        /// 対象プロファイル名。省略時は全プロファイル+設定をまとめてエクスポートする
+        #[arg(long)]
+        profile: Option<String>,
+        #[arg(long)]
+        output: PathBuf,
+    },
+    /// エクスポートされたファイルからプロファイルを取り込む(内容から単一/全体を自動判別する)
+    /// (パスフレーズは実行時にプロンプトで入力する。コマンドライン引数では渡せない)
+    Import {
+        #[arg(long)]
+        input: PathBuf,
+        /// 全体インポート時の確認プロンプトを省略する(非対話環境向け)
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 #[derive(Args, Debug)]
@@ -68,18 +86,5 @@ pub enum ProfileAction {
     /// プロファイルを削除する(アクティブなプロファイルは拒否される)
     Delete {
         name: String,
-    },
-    /// プロファイルをパスフレーズで暗号化してファイルへ書き出す
-    /// (パスフレーズは実行時にプロンプトで入力する。コマンドライン引数では渡せない)
-    Export {
-        name: String,
-        #[arg(long)]
-        output: PathBuf,
-    },
-    /// エクスポートされたファイルからプロファイルを取り込む
-    /// (パスフレーズは実行時にプロンプトで入力する。コマンドライン引数では渡せない)
-    Import {
-        #[arg(long)]
-        input: PathBuf,
     },
 }

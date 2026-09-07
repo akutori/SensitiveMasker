@@ -33,4 +33,6 @@ pub enum CliError {
     InvalidMaskArgs(String),
     #[error("パスフレーズが一致しません")]
     PassphraseMismatch,
+    #[error("全体インポートの確認には対話的な入力が必要です。非対話環境では--yesを指定してください")]
+    NonInteractiveImportNeedsYesFlag,
 }

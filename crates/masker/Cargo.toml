@@ -11,6 +11,7 @@ profile-store = { version = "0.1.0", path = "../profile-store" }
 rpassword = "7.5.4"
 serde_json = "1.0.151"
 thiserror = "2.0.20"
+zxcvbn = "3.1.1"
 
 [dev-dependencies]
 tempfile = "3.27.0"

@@ -19,5 +19,13 @@ pub fn dispatch(cli: Cli, paths: &AppPaths) -> Result<(), CliError> {
             let mut store = ProfileStore::open_at(paths)?;
             commands::profile::run(&action, &mut store)
         }
+        Command::Export { profile, output } => {
+            let store = ProfileStore::open_at(paths)?;
+            commands::export::export(&store, profile.as_deref(), &output)
+        }
+        Command::Import { input, yes } => {
+            let mut store = ProfileStore::open_at(paths)?;
+            commands::export::import(&mut store, &input, yes)
+        }
     }
 }
