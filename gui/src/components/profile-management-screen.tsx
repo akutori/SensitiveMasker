@@ -48,6 +48,7 @@ export interface ProfileManagementScreenProps {
   onSelectedTagsChange: (tags: string[]) => void;
   onClose: () => void;
   onNewProfile: () => void;
+  onCreateFromTemplate: () => void;
   onManageTags: () => void;
   onExportAll: () => void;
   onImport: () => void;
@@ -73,6 +74,7 @@ export function ProfileManagementScreen({
   onSelectedTagsChange,
   onClose,
   onNewProfile,
+  onCreateFromTemplate,
   onManageTags,
   onExportAll,
   onImport,
@@ -130,6 +132,9 @@ export function ProfileManagementScreen({
         <div className="mt-5 flex flex-wrap items-center gap-2">
           <Button variant="outline" onClick={onNewProfile}>
             + 新規プロファイル
+          </Button>
+          <Button variant="outline" onClick={onCreateFromTemplate}>
+            テンプレートから作成
           </Button>
           <div className="flex-1" />
           <Button variant="outline" onClick={onManageTags}>

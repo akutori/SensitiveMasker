@@ -48,7 +48,6 @@ function DemoScreen(props: { initialProfiles: ProfileOption[] }) {
       onImport={() => console.log("import")}
       onReload={() => console.log("reload")}
       onNewProfile={() => console.log("new profile")}
-      onCreateFromTemplate={() => console.log("create from template")}
       onEditProfile={() => console.log("edit profile")}
       inputText={inputText}
       onInputTextChange={setInputText}
@@ -78,7 +77,6 @@ export const Default: Story = {
     onImport: () => {},
     onReload: () => {},
     onNewProfile: () => {},
-    onCreateFromTemplate: () => {},
     onEditProfile: () => {},
     inputText: SAMPLE_TEXT,
     onInputTextChange: () => {},

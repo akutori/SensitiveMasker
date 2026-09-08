@@ -5,6 +5,7 @@ import {
   type RuleListItem,
 } from "./rule-edit-screen";
 import type { RuleFormValues, RuleTemplateOption } from "./rule-edit-dialog";
+import { simulateMask } from "@/lib/demo-masking";
 
 const meta = {
   component: RuleEditScreen,
@@ -88,29 +89,6 @@ const RULE_TEMPLATE_VALUES: Record<string, Partial<RuleFormValues>> = {
   },
 };
 
-function computeMaskedResult(text: string, rules: RuleListItem[]): string {
-  let result = text;
-  const counters: Record<string, number> = {};
-  for (const rule of rules) {
-    if (!rule.enabled) continue;
-    try {
-      const source =
-        rule.patternType === "regex"
-          ? rule.pattern
-          : rule.pattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-      const regex = new RegExp(source, "g");
-      result = result.replace(regex, () => {
-        if (rule.mode === "fixed") return rule.fixedValue || "";
-        counters[rule.id] = (counters[rule.id] ?? 0) + 1;
-        return `${rule.prefix}${counters[rule.id]}`;
-      });
-    } catch {
-      // 無効な正規表現はデモ上スキップ(実際の検証はRuleEditDialog側のerrorMessageで行う)
-    }
-  }
-  return result;
-}
-
 function DemoScreen(props: { initialRules: RuleListItem[] }) {
   const [profileName, setProfileName] = useState("SIP監視用");
   const [profileDescription, setProfileDescription] = useState(
@@ -141,7 +119,7 @@ function DemoScreen(props: { initialRules: RuleListItem[] }) {
       onResolveRuleTemplate={(value) => RULE_TEMPLATE_VALUES[value] ?? {}}
       sampleText={sampleText}
       onSampleTextChange={setSampleText}
-      maskedResult={computeMaskedResult(sampleText, rules)}
+      maskedResult={simulateMask(sampleText, rules).text}
       onSave={() => console.log("save")}
       onCancel={() => console.log("cancel")}
     />
@@ -164,7 +142,7 @@ export const Default: Story = {
     onResolveRuleTemplate: () => ({}),
     sampleText: SAMPLE_TEXT,
     onSampleTextChange: () => {},
-    maskedResult: computeMaskedResult(SAMPLE_TEXT, INITIAL_RULES),
+    maskedResult: simulateMask(SAMPLE_TEXT, INITIAL_RULES).text,
     onSave: () => {},
     onCancel: () => {},
   },

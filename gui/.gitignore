@@ -25,3 +25,6 @@ dist-ssr
 
 *storybook.log
 storybook-static
+
+# TanStack Routerが自動生成するルートツリー
+src/routeTree.gen.ts

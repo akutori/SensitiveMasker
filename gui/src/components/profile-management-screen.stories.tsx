@@ -76,6 +76,7 @@ function DemoScreen(props: { initialProfiles: Profile[] }) {
       onSelectedTagsChange={setSelectedTags}
       onClose={() => console.log("close")}
       onNewProfile={() => console.log("new profile")}
+      onCreateFromTemplate={() => console.log("create from template")}
       onManageTags={() => console.log("manage tags")}
       onExportAll={() => console.log("export all")}
       onImport={() => console.log("import")}
@@ -123,6 +124,7 @@ export const Default: Story = {
     onSelectedTagsChange: () => {},
     onClose: () => {},
     onNewProfile: () => {},
+    onCreateFromTemplate: () => {},
     onManageTags: () => {},
     onExportAll: () => {},
     onImport: () => {},

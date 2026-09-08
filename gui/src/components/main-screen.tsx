@@ -22,7 +22,6 @@ export interface MainScreenProps {
   onImport: () => void;
   onReload: () => void;
   onNewProfile: () => void;
-  onCreateFromTemplate: () => void;
   onEditProfile: () => void;
   inputText: string;
   onInputTextChange: (text: string) => void;
@@ -43,7 +42,6 @@ export function MainScreen({
   onImport,
   onReload,
   onNewProfile,
-  onCreateFromTemplate,
   onEditProfile,
   inputText,
   onInputTextChange,
@@ -99,9 +97,6 @@ export function MainScreen({
       <div className="mt-2 flex flex-wrap gap-2">
         <Button variant="outline" onClick={onNewProfile}>
           新規作成
-        </Button>
-        <Button variant="outline" onClick={onCreateFromTemplate}>
-          テンプレートから作成
         </Button>
         <Button variant="outline" onClick={onEditProfile} disabled={!hasProfiles}>
           プロファイルを編集
