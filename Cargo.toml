@@ -5,8 +5,17 @@ members = [
     "crates/profile-store",
     "crates/masker",
     "crates/masker-mcp",
+    "gui/src-tauri",
 ]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
+
+# Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 3
+panic = "abort"
+strip = true
