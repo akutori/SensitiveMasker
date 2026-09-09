@@ -19,6 +19,8 @@ import { DeleteConfirmDialog } from "./delete-confirm-dialog";
 import { ProfileNameDialog } from "./profile-name-dialog";
 import { cn } from "cn";
 
+const EMPTY_SAVING_TAGS_COUNTS = new Map<string, number>();
+
 export interface Profile {
   id: string;
   name: string;
@@ -58,6 +60,12 @@ export interface ProfileManagementScreenProps {
   onDuplicateProfile: (id: string, newName: string) => void;
   onExportProfile: (id: string) => void;
   onDeleteProfile: (id: string) => void;
+  onProfileTagsChange: (id: string, tags: string[]) => void;
+  // タグの反映が非同期のため、反映待ちの間は該当行のタグ操作を止めて、
+  // 連続変更による無警告の上書きを防ぐ。同一行への変更が複数同時に反映待ちに
+  // なりうるため、真偽値の集合ではなく反映待ち件数で持つ(先に完了した1件が
+  // 無条件に解除すると、その行の別の変更がまだ反映待ちでも解除されてしまう)。
+  savingTagsCountsForProfileIds?: Map<string, number>;
 }
 
 export function ProfileManagementScreen({
@@ -84,6 +92,8 @@ export function ProfileManagementScreen({
   onDuplicateProfile,
   onExportProfile,
   onDeleteProfile,
+  onProfileTagsChange,
+  savingTagsCountsForProfileIds = EMPTY_SAVING_TAGS_COUNTS,
 }: ProfileManagementScreenProps) {
   const [pendingDeleteProfile, setPendingDeleteProfile] = useState<Profile | null>(
     null
@@ -242,6 +252,14 @@ export function ProfileManagementScreen({
                   >
                     編集
                   </Button>
+                  <div onClick={(e) => e.stopPropagation()}>
+                    <TagFilterPopover
+                      availableTags={availableTags}
+                      selectedTags={profile.tags}
+                      onSelectedTagsChange={(tags) => onProfileTagsChange(profile.id, tags)}
+                      disabled={(savingTagsCountsForProfileIds.get(profile.id) ?? 0) > 0}
+                    />
+                  </div>
                   <Button
                     size="sm"
                     variant="outline"

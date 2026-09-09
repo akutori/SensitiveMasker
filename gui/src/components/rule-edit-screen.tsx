@@ -31,6 +31,7 @@ import {
 } from "./rule-edit-dialog";
 import { DeleteConfirmDialog } from "./delete-confirm-dialog";
 import { ConfirmDialog } from "./confirm-dialog";
+import { TagFilterPopover } from "./tag-filter-popover";
 
 export type RuleListItem = RuleFormValues & { id: string };
 
@@ -58,6 +59,9 @@ export interface RuleEditScreenProps {
   onProfileNameChange: (name: string) => void;
   profileDescription: string;
   onProfileDescriptionChange: (description: string) => void;
+  availableTags: string[];
+  profileTags: string[];
+  onProfileTagsChange: (tags: string[]) => void;
   rules: RuleListItem[];
   onReorderRules: (rules: RuleListItem[]) => void;
   onToggleRuleEnabled: (id: string) => void;
@@ -141,6 +145,9 @@ export function RuleEditScreen({
   onProfileNameChange,
   profileDescription,
   onProfileDescriptionChange,
+  availableTags,
+  profileTags,
+  onProfileTagsChange,
   rules,
   onReorderRules,
   onToggleRuleEnabled,
@@ -157,10 +164,10 @@ export function RuleEditScreen({
 }: RuleEditScreenProps) {
   const id = useId();
   const [initialSnapshot] = useState(() =>
-    JSON.stringify({ profileName, profileDescription, rules })
+    JSON.stringify({ profileName, profileDescription, profileTags, rules })
   );
   const hasChanges =
-    JSON.stringify({ profileName, profileDescription, rules }) !== initialSnapshot;
+    JSON.stringify({ profileName, profileDescription, profileTags, rules }) !== initialSnapshot;
 
   const [showDiscardConfirm, setShowDiscardConfirm] = useState(false);
   const [pendingDeleteRule, setPendingDeleteRule] = useState<RuleListItem | null>(null);
@@ -252,6 +259,14 @@ export function RuleEditScreen({
             id={`${id}-profile-description`}
             value={profileDescription}
             onChange={(e) => onProfileDescriptionChange(e.target.value)}
+          />
+        </div>
+        <div className="grid gap-1.5">
+          <Label>タグ:</Label>
+          <TagFilterPopover
+            availableTags={availableTags}
+            selectedTags={profileTags}
+            onSelectedTagsChange={onProfileTagsChange}
           />
         </div>
       </div>

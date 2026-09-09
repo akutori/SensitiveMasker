@@ -17,6 +17,11 @@ function RuleEditRoute() {
 
   const [profileName, setProfileName] = useState("");
   const [profileDescription, setProfileDescription] = useState("");
+  const [profileTags, setProfileTags] = useState<string[]>([]);
+  // この画面上でユーザーが実際にタグ欄を操作したかどうか。falseのままsaveすると
+  // タグの更新自体を送らない(送ると、読み込み時点のスナップショットで
+  // 他画面での並行したタグ変更を無警告に上書きしてしまうため)。
+  const tagsEditedRef = useRef(false);
   const [rules, setRules] = useState<RuleListItem[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [sampleText, setSampleText] = useState(DEMO_SAMPLE_TEXT);
@@ -34,12 +39,21 @@ function RuleEditRoute() {
   // (お気に入り切替等の副作用)に反応して再取得すると、編集中の下書きが失われるため。
   useEffect(() => {
     let cancelled = false;
+    // 現状はprofileIdが変わる場合、必ずこのルート自体がアンマウント/再マウント
+    // される(profiles.tsx/index.tsxを経由しない画面内遷移が存在しない)ため
+    // 実害は無いが、将来的にその前提が崩れた場合に古いプロファイルの内容が
+    // 一瞬表示されるのを防ぐため、念のためリセットしておく。
+    setLoaded(false);
     appState
       .getProfileDetail(profileId)
       .then((detail) => {
         if (cancelled) return;
         setProfileName(detail.name);
         setProfileDescription(detail.description);
+        // タグはRuleProfile(masking-core)には含まれず、profile-store側の別テーブルの
+        // ため、既に読み込み済みの一覧(appState.profiles)から取得する。
+        tagsEditedRef.current = false;
+        setProfileTags(appState.profiles.find((p) => p.id === profileId)?.tags ?? []);
         setRules(detail.rules);
         setLoaded(true);
       })
@@ -100,6 +114,12 @@ function RuleEditRoute() {
       onProfileNameChange={setProfileName}
       profileDescription={profileDescription}
       onProfileDescriptionChange={setProfileDescription}
+      availableTags={appState.tags.map((t) => t.name)}
+      profileTags={profileTags}
+      onProfileTagsChange={(tags) => {
+        tagsEditedRef.current = true;
+        setProfileTags(tags);
+      }}
       rules={rules}
       onReorderRules={setRules}
       onToggleRuleEnabled={(id) =>
@@ -123,6 +143,8 @@ function RuleEditRoute() {
             name: profileName,
             description: profileDescription,
             rules,
+            // この画面で未操作なら送らない(他画面での並行したタグ変更の上書き防止)。
+            tags: tagsEditedRef.current ? profileTags : undefined,
           });
           goBack();
         } catch {

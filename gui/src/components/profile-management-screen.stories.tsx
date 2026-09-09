@@ -105,6 +105,9 @@ function DemoScreen(props: { initialProfiles: Profile[] }) {
       }}
       onExportProfile={(id) => console.log("export", id)}
       onDeleteProfile={(id) => setProfiles(profiles.filter((p) => p.id !== id))}
+      onProfileTagsChange={(id, tags) =>
+        setProfiles(profiles.map((p) => (p.id === id ? { ...p, tags } : p)))
+      }
     />
   );
 }
@@ -134,6 +137,7 @@ export const Default: Story = {
     onDuplicateProfile: () => {},
     onExportProfile: () => {},
     onDeleteProfile: () => {},
+    onProfileTagsChange: () => {},
   },
   render: () => <DemoScreen initialProfiles={INITIAL_PROFILES} />,
 };

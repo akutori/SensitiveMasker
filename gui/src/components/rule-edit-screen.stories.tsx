@@ -56,6 +56,8 @@ const INITIAL_RULES: RuleListItem[] = [
 const SAMPLE_TEXT =
   "着信: 0120-000-000\nSIP URI: sip:alice@203.0.113.10\nパスワード: hunter2";
 
+const AVAILABLE_TAGS = ["SIP", "本番", "検証用"];
+
 const RULE_TEMPLATE_OPTIONS: RuleTemplateOption[] = [
   { value: "phone", label: "電話番号" },
   { value: "email", label: "メールアドレス" },
@@ -94,6 +96,7 @@ function DemoScreen(props: { initialRules: RuleListItem[] }) {
   const [profileDescription, setProfileDescription] = useState(
     "SIPサーバーのアクセスログ用"
   );
+  const [profileTags, setProfileTags] = useState<string[]>(["SIP"]);
   const [rules, setRules] = useState(props.initialRules);
   const [sampleText, setSampleText] = useState(SAMPLE_TEXT);
 
@@ -103,6 +106,9 @@ function DemoScreen(props: { initialRules: RuleListItem[] }) {
       onProfileNameChange={setProfileName}
       profileDescription={profileDescription}
       onProfileDescriptionChange={setProfileDescription}
+      availableTags={AVAILABLE_TAGS}
+      profileTags={profileTags}
+      onProfileTagsChange={setProfileTags}
       rules={rules}
       onReorderRules={setRules}
       onToggleRuleEnabled={(id) =>
@@ -132,6 +138,9 @@ export const Default: Story = {
     onProfileNameChange: () => {},
     profileDescription: "SIPサーバーのアクセスログ用",
     onProfileDescriptionChange: () => {},
+    availableTags: AVAILABLE_TAGS,
+    profileTags: ["SIP"],
+    onProfileTagsChange: () => {},
     rules: INITIAL_RULES,
     onReorderRules: () => {},
     onToggleRuleEnabled: () => {},

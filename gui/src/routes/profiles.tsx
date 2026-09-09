@@ -57,6 +57,9 @@ function ProfilesRoute() {
   const [sortValue, setSortValue] = useState(SORT_OPTIONS[0].value);
   const [favoritesOnly, setFavoritesOnly] = useState(false);
   const [selectedTags, setSelectedTags] = useState<string[]>([]);
+  const [savingTagsCountsForProfileIds, setSavingTagsCountsForProfileIds] = useState<
+    Map<string, number>
+  >(() => new Map());
 
   const [dialog, setDialog] = useState<DialogState>({ kind: "none" });
   const [draftName, setDraftName] = useState("新しいプロファイル");
@@ -140,6 +143,28 @@ function ProfilesRoute() {
           setDialog({ kind: "export", target });
         }}
         onDeleteProfile={(id) => appState.deleteProfile(id)}
+        onProfileTagsChange={(id, tags) => {
+          setSavingTagsCountsForProfileIds((prev) => {
+            const next = new Map(prev);
+            next.set(id, (next.get(id) ?? 0) + 1);
+            return next;
+          });
+          appState
+            .setProfileTags(id, tags)
+            .catch(() => {})
+            .finally(() => {
+              // このidの件数だけを1減らす(同じ行への別の変更がまだ反映待ちの
+              // 場合は0にせず残す)。
+              setSavingTagsCountsForProfileIds((prev) => {
+                const next = new Map(prev);
+                const count = (next.get(id) ?? 1) - 1;
+                if (count <= 0) next.delete(id);
+                else next.set(id, count);
+                return next;
+              });
+            });
+        }}
+        savingTagsCountsForProfileIds={savingTagsCountsForProfileIds}
       />
 
       <ProfileNameDialog

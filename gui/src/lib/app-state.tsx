@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 import type { RuleListItem } from "@/components/rule-edit-screen";
 import { DEMO_SAMPLE_TEXT, PROFILE_TEMPLATE_RULES } from "./demo-seed-data";
@@ -19,7 +19,7 @@ import {
   renameTag as ipcRenameTag,
   setActiveProfile as ipcSetActiveProfile,
   setFavorite as ipcSetFavorite,
-  setProfileTags,
+  setProfileTags as ipcSetProfileTags,
   updateProfile as ipcUpdateProfile,
   type ProfileDetail,
 } from "./profile-ipc";
@@ -64,8 +64,12 @@ export interface AppStateValue {
   getProfileDetail: (id: string) => Promise<ProfileDetail>;
   updateProfile: (
     id: string,
-    meta: { name: string; description: string; rules: RuleListItem[] }
+    // tagsを省略した場合はタグ自体の更新を送らない(呼び出し元の画面でタグ欄が
+    // 未操作の場合に、読み込み時点のスナップショットで他画面での並行した
+    // タグ変更を無警告に上書きしてしまうのを防ぐため)。
+    meta: { name: string; description: string; rules: RuleListItem[]; tags?: string[] }
   ) => Promise<void>;
+  setProfileTags: (id: string, tags: string[]) => Promise<void>;
 
   tags: Tag[];
   createTag: (name: string) => Promise<void>;
@@ -105,6 +109,19 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
   const [inputText, setInputText] = useState(DEMO_SAMPLE_TEXT);
   const [outputText, setOutputText] = useState("");
   const [statusText, setStatusText] = useState("アクティブプロファイル: なし");
+
+  // 同一プロファイルへのタグ更新が並行して呼ばれた場合、IPC応答の順序保証が
+  // 無いため後発が先に完了して先発に上書きされうる。idごとに前回の完了を
+  // 待ってから次を実行することで、発行順=反映順を保証する。
+  const tagUpdateQueues = useRef(new Map<string, Promise<void>>());
+
+  // キュー待ちで実行が遅延した時点の最新profilesを参照するためのref。
+  // (通常のクロージャはsetProfileTags呼び出し時点のprofilesを掴んだままになり、
+  // 待機中に別画面でのリネームが完了していても検知できないため。)
+  const profilesRef = useRef(profiles);
+  useEffect(() => {
+    profilesRef.current = profiles;
+  }, [profiles]);
 
   const refreshProfiles = async () => {
     const summaries = await listProfiles();
@@ -202,7 +219,7 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
           if (!source) throw new Error(`profile not found: ${id}`);
           const detail = await ipcGetProfile(source.name);
           const newId = await ipcCreateProfile(newName, detail.description, detail.rules);
-          if (source.tags.length > 0) await setProfileTags(newName, source.tags);
+          if (source.tags.length > 0) await ipcSetProfileTags(newName, source.tags);
           await refreshProfiles();
           return String(newId);
         }),
@@ -231,7 +248,34 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
           const oldName = findNameById(id);
           if (!oldName) throw new Error(`profile not found: ${id}`);
           await ipcUpdateProfile(oldName, meta.name, meta.description, meta.rules);
+          // refreshProfilesの成否に関わらずfindNameById/profilesRefが常に新しい
+          // 名前を解決できるようにする(そうしないと、この後refreshProfilesや
+          // タグ更新が失敗した場合に、再試行時点で既に存在しない旧名を使い続けて
+          // 永久に失敗する)。
+          setProfiles((prev) => prev.map((p) => (p.id === id ? { ...p, name: meta.name } : p)));
+          if (meta.tags !== undefined) {
+            // idからの再解決はしない: meta.nameを直接使う(再解決するとリネーム前の
+            // 名前を掴んだままの古いクロージャを参照してしまう、というのが元々の
+            // 不具合だった)。
+            await ipcSetProfileTags(meta.name, meta.tags);
+          }
           await refreshProfiles();
+        }),
+      setProfileTags: (id, tags) =>
+        reportAndRethrow("タグの更新に失敗しました", () => {
+          const previous = tagUpdateQueues.current.get(id) ?? Promise.resolve();
+          const next = previous.catch(() => {}).then(async () => {
+            // 実行直前に解決する: キュー待ちの間にルール編集画面側の保存で
+            // 同じプロファイルが改名されている可能性があるため、発行時点の
+            // クロージャ(findNameById)ではなくprofilesRef経由で実行時点の
+            // 最新の名前を使う。
+            const name = profilesRef.current.find((p) => p.id === id)?.name;
+            if (!name) throw new Error(`profile not found: ${id}`);
+            await ipcSetProfileTags(name, tags);
+            await refreshProfiles();
+          });
+          tagUpdateQueues.current.set(id, next);
+          return next;
         }),
 
       tags,
