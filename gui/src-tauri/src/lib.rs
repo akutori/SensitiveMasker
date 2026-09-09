@@ -1,12 +1,6 @@
 mod masking;
 mod profiles;
 
-// Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-#[tauri::command]
-fn greet(name: &str) -> String {
-    format!("Hello, {}! You've been greeted from Rust!", name)
-}
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -14,7 +8,6 @@ pub fn run() {
         .manage(masking::MaskingState::default())
         .manage(profiles::ProfileStoreState::default())
         .invoke_handler(tauri::generate_handler![
-            greet,
             masking::mask_text,
             profiles::is_store_initialized,
             profiles::open_store,
