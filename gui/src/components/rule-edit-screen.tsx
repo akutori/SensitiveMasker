@@ -112,7 +112,7 @@ function SortableRuleRow({
           aria-label={rule.enabled ? "ルールを無効化" : "ルールを有効化"}
           className="mt-1"
         />
-        <div className="flex-1">
+        <div className="min-w-0 flex-1">
           <div className="text-sm font-medium">{rule.name}</div>
           <div className="mt-0.5 text-xs text-foreground">
             {patternTypeLabel(rule.patternType)} / {modeLabel(rule.mode)} ・ 説明:{" "}
@@ -120,7 +120,7 @@ function SortableRuleRow({
             {!rule.enabled && "(無効中)"}
           </div>
         </div>
-        <div className="flex gap-1">
+        <div className="flex shrink-0 gap-1">
           <Button size="sm" variant="outline" onClick={onEdit}>
             編集
           </Button>
