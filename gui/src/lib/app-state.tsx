@@ -1,7 +1,7 @@
 import { createContext, useContext, useMemo, useState, type ReactNode } from "react";
 import type { RuleListItem } from "@/components/rule-edit-screen";
 import { DEMO_SAMPLE_TEXT, PROFILE_TEMPLATE_RULES } from "./demo-seed-data";
-import { simulateMask } from "./demo-masking";
+import { maskText } from "./masking-ipc";
 
 export interface Profile {
   id: string;
@@ -202,15 +202,26 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
       setInputText,
       outputText,
       statusText,
-      runMask: () => {
+      runMask: async () => {
         const activeProfile = profiles.find((p) => p.id === activeProfileId);
-        const rules = activeProfileId ? (rulesByProfileId[activeProfileId] ?? []) : [];
-        const { text, matchCounts } = simulateMask(inputText, rules);
-        const totalMatches = Object.values(matchCounts).reduce((sum, n) => sum + n, 0);
-        setOutputText(text);
-        setStatusText(
-          `アクティブプロファイル: ${activeProfile?.name ?? "なし"} ・ 直近のマスク実行でマッピング${totalMatches}件を置換`
-        );
+        if (!activeProfile) return;
+        const rules = rulesByProfileId[activeProfile.id] ?? [];
+        try {
+          const { text, matchCounts } = await maskText(
+            activeProfile.id,
+            activeProfile.name,
+            rules,
+            inputText
+          );
+          const totalMatches = matchCounts.reduce((sum, m) => sum + m.count, 0);
+          setOutputText(text);
+          setStatusText(
+            `アクティブプロファイル: ${activeProfile.name} ・ 直近のマスク実行でマッピング${totalMatches}件を置換`
+          );
+        } catch (error) {
+          console.error("mask_text failed", error);
+          setStatusText(`アクティブプロファイル: ${activeProfile.name} ・ マスク実行に失敗しました`);
+        }
       },
       clearInput: () => setInputText(""),
     }),

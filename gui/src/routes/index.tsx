@@ -8,7 +8,7 @@ import { MatchCountConfirmDialog, type MatchCountRow } from "@/components/match-
 import { ImportPassphraseDialog } from "@/components/import-passphrase-dialog";
 import { ImportConfirmDialog, type ImportPreviewRow } from "@/components/import-confirm-dialog";
 import { useAppState, resolveUniqueName } from "@/lib/app-state";
-import { simulateMask } from "@/lib/demo-masking";
+import { maskText } from "@/lib/masking-ipc";
 
 export const Route = createFileRoute("/")({
   component: MainRoute,
@@ -109,13 +109,28 @@ function MainRoute() {
             closeDialog();
           }
         }}
-        onMaskAndSaveAs={() => {
-          const rules = activeProfileId ? (rulesByProfileId[activeProfileId] ?? []) : [];
-          const { matchCounts } = simulateMask(DEMO_LOAD_FILE_CONTENT, rules);
-          const rows: MatchCountRow[] = rules
-            .filter((r) => r.enabled)
-            .map((rule) => ({ ruleName: rule.name, matchCount: matchCounts[rule.id] ?? 0 }));
-          setDialog({ kind: "matchCountConfirm", rows });
+        onMaskAndSaveAs={async () => {
+          const activeProfile = profiles.find((p) => p.id === activeProfileId);
+          if (!activeProfile) return;
+          const rules = rulesByProfileId[activeProfile.id] ?? [];
+          try {
+            const { matchCounts } = await maskText(
+              activeProfile.id,
+              activeProfile.name,
+              rules,
+              DEMO_LOAD_FILE_CONTENT
+            );
+            const rows: MatchCountRow[] = rules
+              .filter((r) => r.enabled)
+              .map((rule) => ({
+                ruleName: rule.name,
+                matchCount: matchCounts.find((m) => m.ruleName === rule.name)?.count ?? 0,
+              }));
+            setDialog({ kind: "matchCountConfirm", rows });
+          } catch (error) {
+            // 失敗時は確認ダイアログを開かない(成功したように見せない)。
+            console.error("mask_text failed", error);
+          }
         }}
       />
 

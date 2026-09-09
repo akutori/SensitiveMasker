@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "storybook",
+      "runtimeExecutable": "bun",
+      "runtimeArgs": ["run", "--cwd=gui", "storybook", "--", "--ci"],
+      "port": 6006
+    },
+    {
+      "name": "gui-dev",
+      "runtimeExecutable": "bun",
+      "runtimeArgs": ["run", "--cwd=gui", "dev"],
+      "port": 1420
+    }
+  ]
+}
