@@ -55,15 +55,21 @@ pub enum ProfileStoreError {
     UnsupportedFormatVersion { found: u32, supported: u32 },
     #[error("インポートファイル内でプロファイル名が重複しています: '{0}'")]
     DuplicateNameInImportFile(String),
+    #[error("タグ '{0}' は既に存在します")]
+    TagAlreadyExists(String),
+    #[error("タグ '{0}' が見つかりません")]
+    TagNotFound(String),
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProfileSummary {
+    pub id: i64,
     pub name: String,
     pub rule_count: usize,
     pub is_favorite: bool,
     pub is_active: bool,
     pub updated_at: String,
+    pub tags: Vec<String>,
 }
 
 /// 全体インポートで、ファイル内の元の名前が取り込み先での衝突によりどう解決されたか。
@@ -141,7 +147,11 @@ impl ProfileStore {
         Ok(Self { conn, key })
     }
 
-    pub fn create_profile(&mut self, profile: &RuleProfile) -> Result<(), ProfileStoreError> {
+    /// 新規作成したプロファイルの`id`(SQLiteの内部サロゲートキー)を返す。GUI等の
+    /// 呼び出し元は、name(変更されうる)ではなくこのidを永続的な識別子として保持する
+    /// 想定(名前変更を跨いで安定した対応付けが必要な場面、例えばマスク処理の連番採番用
+    /// マッピングテーブルのキー等で使うため)。
+    pub fn create_profile(&mut self, profile: &RuleProfile) -> Result<i64, ProfileStoreError> {
         let name = profile.profile_name();
         let json = serde_json::to_vec(profile).expect("RuleProfileのシリアライズは失敗しない");
         let encrypted = crypto::encrypt(&self.key, &json, name.as_bytes());
@@ -162,13 +172,14 @@ impl ProfileStore {
             "INSERT INTO profiles (name, rules_encrypted, nonce, updated_at) VALUES (?1, ?2, ?3, datetime('now'))",
             (name, &encrypted.ciphertext, &encrypted.nonce),
         )?;
+        let id = tx.last_insert_rowid();
 
         if read_active_profile_name(&tx)?.is_none() {
             upsert_active_profile_name(&tx, name)?;
         }
 
         tx.commit()?;
-        Ok(())
+        Ok(id)
     }
 
     /// プロファイル(お気に入り・タグを含む)をパスフレーズで再暗号化したバイト列を返す
@@ -339,26 +350,150 @@ impl ProfileStore {
     pub fn list_profiles(&self) -> Result<Vec<ProfileSummary>, ProfileStoreError> {
         let active_name = read_active_profile_name(&self.conn)?;
 
-        let rows: Vec<(String, Vec<u8>, Vec<u8>, bool, String)> = self
+        let rows: Vec<(i64, String, Vec<u8>, Vec<u8>, bool, String)> = self
             .conn
-            .prepare("SELECT name, rules_encrypted, nonce, is_favorite, updated_at FROM profiles ORDER BY name")?
+            .prepare(
+                "SELECT id, name, rules_encrypted, nonce, is_favorite, updated_at FROM profiles ORDER BY name",
+            )?
             .query_map([], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?))
             })?
             .collect::<Result<_, _>>()?;
 
         rows.into_iter()
-            .map(|(name, ciphertext, nonce, is_favorite, updated_at)| {
+            .map(|(id, name, ciphertext, nonce, is_favorite, updated_at)| {
                 let profile = self.decrypt_profile(&ciphertext, &nonce, &name)?;
+                let tags = tags_for_profile_id(&self.conn, id)?;
                 Ok(ProfileSummary {
                     is_active: Some(&name) == active_name.as_ref(),
+                    id,
                     name,
                     rule_count: profile.rules().len(),
                     is_favorite,
                     updated_at,
+                    tags,
                 })
             })
             .collect()
+    }
+
+    /// 既存プロファイルの名前・説明・ルールをまとめて置き換える。名前を変更する場合、
+    /// 暗号化のAAD(プロファイル名)が変わるため再暗号化が必要(単純なUPDATEでは済まない)。
+    /// アクティブプロファイル名(`settings.active_profile_name`)はON UPDATE CASCADEにより
+    /// SQLite側が自動追従するため、ここでの手当ては不要。お気に入り・タグはprofile_id経由の
+    /// 参照のため、名前変更の影響を受けない。
+    pub fn update_profile(&mut self, old_name: &str, new_profile: &RuleProfile) -> Result<(), ProfileStoreError> {
+        let new_name = new_profile.profile_name();
+        let json = serde_json::to_vec(new_profile).expect("RuleProfileのシリアライズは失敗しない");
+        let encrypted = crypto::encrypt(&self.key, &json, new_name.as_bytes());
+
+        let tx = self.conn.transaction()?;
+
+        let exists: bool =
+            tx.query_row("SELECT EXISTS(SELECT 1 FROM profiles WHERE name = ?1)", [old_name], |row| row.get(0))?;
+        if !exists {
+            return Err(ProfileStoreError::ProfileNotFound(old_name.to_string()));
+        }
+
+        if new_name != old_name {
+            let name_taken: bool = tx
+                .query_row("SELECT EXISTS(SELECT 1 FROM profiles WHERE name = ?1)", [new_name], |row| row.get(0))?;
+            if name_taken {
+                return Err(ProfileStoreError::ProfileAlreadyExists(new_name.to_string()));
+            }
+        }
+
+        tx.execute(
+            "UPDATE profiles SET name = ?1, rules_encrypted = ?2, nonce = ?3, updated_at = datetime('now')
+             WHERE name = ?4",
+            (new_name, &encrypted.ciphertext, &encrypted.nonce, old_name),
+        )?;
+
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn set_favorite(&mut self, name: &str, is_favorite: bool) -> Result<(), ProfileStoreError> {
+        let changed =
+            self.conn.execute("UPDATE profiles SET is_favorite = ?1 WHERE name = ?2", (is_favorite, name))?;
+        if changed == 0 {
+            return Err(ProfileStoreError::ProfileNotFound(name.to_string()));
+        }
+        Ok(())
+    }
+
+    pub fn list_tags(&self) -> Result<Vec<String>, ProfileStoreError> {
+        self.conn
+            .prepare("SELECT name FROM tags ORDER BY name")?
+            .query_map([], |row| row.get(0))?
+            .collect::<Result<_, _>>()
+            .map_err(Into::into)
+    }
+
+    pub fn create_tag(&mut self, name: &str) -> Result<(), ProfileStoreError> {
+        let exists: bool =
+            self.conn.query_row("SELECT EXISTS(SELECT 1 FROM tags WHERE name = ?1)", [name], |row| row.get(0))?;
+        if exists {
+            return Err(ProfileStoreError::TagAlreadyExists(name.to_string()));
+        }
+        self.conn.execute("INSERT INTO tags (name) VALUES (?1)", [name])?;
+        Ok(())
+    }
+
+    pub fn rename_tag(&mut self, old_name: &str, new_name: &str) -> Result<(), ProfileStoreError> {
+        let tx = self.conn.transaction()?;
+
+        let exists: bool =
+            tx.query_row("SELECT EXISTS(SELECT 1 FROM tags WHERE name = ?1)", [old_name], |row| row.get(0))?;
+        if !exists {
+            return Err(ProfileStoreError::TagNotFound(old_name.to_string()));
+        }
+
+        if new_name != old_name {
+            let name_taken: bool =
+                tx.query_row("SELECT EXISTS(SELECT 1 FROM tags WHERE name = ?1)", [new_name], |row| row.get(0))?;
+            if name_taken {
+                return Err(ProfileStoreError::TagAlreadyExists(new_name.to_string()));
+            }
+        }
+
+        tx.execute("UPDATE tags SET name = ?1 WHERE name = ?2", [new_name, old_name])?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// `profile_tags`はON DELETE CASCADEのため、紐付いていたプロファイルからの
+    /// タグ外しは自動的に行われる。
+    pub fn delete_tag(&mut self, name: &str) -> Result<(), ProfileStoreError> {
+        let changed = self.conn.execute("DELETE FROM tags WHERE name = ?1", [name])?;
+        if changed == 0 {
+            return Err(ProfileStoreError::TagNotFound(name.to_string()));
+        }
+        Ok(())
+    }
+
+    pub fn profile_tags(&self, profile_name: &str) -> Result<Vec<String>, ProfileStoreError> {
+        let profile_id: i64 = self
+            .conn
+            .query_row("SELECT id FROM profiles WHERE name = ?1", [profile_name], |row| row.get(0))
+            .map_err(|e| not_found_unless_other_db_error(e, profile_name))?;
+        tags_for_profile_id(&self.conn, profile_id)
+    }
+
+    /// 指定したタグ集合で完全に置き換える(既存の紐付けは一旦全て外してから付け直す)。
+    /// 存在しないタグ名を渡した場合はget-or-createで自動作成する(インポート経路の
+    /// `attach_tags`と同じ挙動に揃え、呼び出し側での存在確認を不要にする)。
+    pub fn set_profile_tags(&mut self, profile_name: &str, tags: &[String]) -> Result<(), ProfileStoreError> {
+        let profile_id: i64 = self
+            .conn
+            .query_row("SELECT id FROM profiles WHERE name = ?1", [profile_name], |row| row.get(0))
+            .map_err(|e| not_found_unless_other_db_error(e, profile_name))?;
+
+        let tx = self.conn.transaction()?;
+        tx.execute("DELETE FROM profile_tags WHERE profile_id = ?1", [profile_id])?;
+        attach_tags(&tx, profile_id, tags)?;
+        tx.commit()?;
+        Ok(())
     }
 
     pub fn delete_profile(&mut self, name: &str) -> Result<(), ProfileStoreError> {
@@ -406,20 +541,22 @@ impl ProfileStore {
             .map_err(|e| not_found_unless_other_db_error(e, name))?;
 
         let profile = self.get_profile(name)?;
-
-        let tags: Vec<String> = self
-            .conn
-            .prepare(
-                "SELECT tags.name FROM tags
-                 JOIN profile_tags ON profile_tags.tag_id = tags.id
-                 WHERE profile_tags.profile_id = ?1
-                 ORDER BY tags.name",
-            )?
-            .query_map([id], |row| row.get(0))?
-            .collect::<Result<_, _>>()?;
+        let tags = tags_for_profile_id(&self.conn, id)?;
 
         Ok(ExportedProfile { is_favorite, tags, profile })
     }
+}
+
+fn tags_for_profile_id(conn: &Connection, profile_id: i64) -> Result<Vec<String>, ProfileStoreError> {
+    conn.prepare(
+        "SELECT tags.name FROM tags
+         JOIN profile_tags ON profile_tags.tag_id = tags.id
+         WHERE profile_tags.profile_id = ?1
+         ORDER BY tags.name",
+    )?
+    .query_map([profile_id], |row| row.get(0))?
+    .collect::<Result<_, _>>()
+    .map_err(Into::into)
 }
 
 fn check_format_version(found: u32) -> Result<(), ProfileStoreError> {
@@ -1156,5 +1293,348 @@ mod tests {
             matches!(err, ProfileStoreError::UnsupportedFormatVersion { .. }),
             "バージョン不一致が名前重複より先に報告されるはず: {err:?}"
         );
+    }
+
+    #[test]
+    fn updating_a_profile_replaces_its_rules() {
+        let (_dir, paths) = temp_paths();
+        init_at(&paths).unwrap();
+        let mut store = ProfileStore::open_at(&paths).unwrap();
+        store.create_profile(&sample_profile("work")).unwrap();
+
+        let rule_a = Rule::new("a", PatternType::Regex, r"\d+", Mode::Sequential, None, Some("A_".to_string()), true, None).unwrap();
+        let rule_b = Rule::new("b", PatternType::Regex, r"\w+", Mode::Sequential, None, Some("B_".to_string()), true, None).unwrap();
+        let updated = RuleProfile::new("work", None, vec![rule_a, rule_b]).unwrap();
+        store.update_profile("work", &updated).unwrap();
+
+        let loaded = store.get_profile("work").unwrap();
+        assert_eq!(loaded.rules().len(), 2);
+    }
+
+    #[test]
+    fn updating_a_profile_can_rename_it() {
+        let (_dir, paths) = temp_paths();
+        init_at(&paths).unwrap();
+        let mut store = ProfileStore::open_at(&paths).unwrap();
+        store.create_profile(&sample_profile("old-name")).unwrap();
+
+        store.update_profile("old-name", &sample_profile("new-name")).unwrap();
+
+        assert!(store.get_profile("old-name").is_err(), "旧名ではもう取得できないはず");
+        assert_eq!(store.get_profile("new-name").unwrap().profile_name(), "new-name");
+    }
+
+    #[test]
+    fn renaming_the_active_profile_updates_the_active_profile_name_too() {
+        // settings.active_profile_nameはON UPDATE CASCADEで追従するはず。
+        let (_dir, paths) = temp_paths();
+        init_at(&paths).unwrap();
+        let mut store = ProfileStore::open_at(&paths).unwrap();
+        store.create_profile(&sample_profile("old-name")).unwrap();
+        assert_eq!(store.active_profile().unwrap().unwrap().profile_name(), "old-name");
+
+        store.update_profile("old-name", &sample_profile("new-name")).unwrap();
+
+        assert_eq!(store.active_profile().unwrap().unwrap().profile_name(), "new-name");
+    }
+
+    #[test]
+    fn renaming_a_profile_preserves_its_favorite_and_tags() {
+        // profile_tagsはprofile_id(不変のサロゲートキー)経由の紐付けのため、
+        // name変更の影響を受けないはず。
+        let (_dir, paths) = temp_paths();
+        init_at(&paths).unwrap();
+        let mut store = ProfileStore::open_at(&paths).unwrap();
+        store.create_profile(&sample_profile("old-name")).unwrap();
+        store.set_favorite("old-name", true).unwrap();
+        store.set_profile_tags("old-name", &["sip".to_string()]).unwrap();
+
+        store.update_profile("old-name", &sample_profile("new-name")).unwrap();
+
+        let summary = store.list_profiles().unwrap().into_iter().find(|s| s.name == "new-name").unwrap();
+        assert!(summary.is_favorite);
+        assert_eq!(summary.tags, vec!["sip".to_string()]);
+    }
+
+    #[test]
+    fn updating_a_missing_profile_fails() {
+        let (_dir, paths) = temp_paths();
+        init_at(&paths).unwrap();
+        let mut store = ProfileStore::open_at(&paths).unwrap();
+
+        let err = store.update_profile("nope", &sample_profile("nope")).expect_err("存在しないプロファイルの更新はエラーのはず");
+        assert!(matches!(err, ProfileStoreError::ProfileNotFound(name) if name == "nope"));
+    }
+
+    #[test]
+    fn renaming_to_an_already_existing_name_fails_and_does_not_modify_either_profile() {
+        let (_dir, paths) = temp_paths();
+        init_at(&paths).unwrap();
+        let mut store = ProfileStore::open_at(&paths).unwrap();
+        store.create_profile(&sample_profile("first")).unwrap();
+        store.create_profile(&sample_profile("second")).unwrap();
+
+        let err = store.update_profile("first", &sample_profile("second")).expect_err("既存名への変更はエラーのはず");
+        assert!(matches!(err, ProfileStoreError::ProfileAlreadyExists(name) if name == "second"));
+
+        assert!(store.get_profile("first").is_ok(), "失敗時は元のプロファイルが残っているはず");
+        assert!(store.get_profile("second").is_ok());
+    }
+
+    #[test]
+    fn set_favorite_toggles_the_flag() {
+        let (_dir, paths) = temp_paths();
+        init_at(&paths).unwrap();
+        let mut store = ProfileStore::open_at(&paths).unwrap();
+        store.create_profile(&sample_profile("work")).unwrap();
+
+        store.set_favorite("work", true).unwrap();
+        assert!(store.list_profiles().unwrap()[0].is_favorite);
+
+        store.set_favorite("work", false).unwrap();
+        assert!(!store.list_profiles().unwrap()[0].is_favorite);
+    }
+
+    #[test]
+    fn set_favorite_on_a_missing_profile_fails() {
+        let (_dir, paths) = temp_paths();
+        init_at(&paths).unwrap();
+        let mut store = ProfileStore::open_at(&paths).unwrap();
+
+        let err = store.set_favorite("nope", true).expect_err("存在しないプロファイルはエラーのはず");
+        assert!(matches!(err, ProfileStoreError::ProfileNotFound(name) if name == "nope"));
+    }
+
+    #[test]
+    fn create_tag_adds_it_to_list_tags() {
+        let (_dir, paths) = temp_paths();
+        init_at(&paths).unwrap();
+        let mut store = ProfileStore::open_at(&paths).unwrap();
+
+        store.create_tag("sip").unwrap();
+
+        assert_eq!(store.list_tags().unwrap(), vec!["sip".to_string()]);
+    }
+
+    #[test]
+    fn creating_a_duplicate_tag_fails() {
+        let (_dir, paths) = temp_paths();
+        init_at(&paths).unwrap();
+        let mut store = ProfileStore::open_at(&paths).unwrap();
+        store.create_tag("sip").unwrap();
+
+        let err = store.create_tag("sip").expect_err("重複作成はエラーのはず");
+        assert!(matches!(err, ProfileStoreError::TagAlreadyExists(name) if name == "sip"));
+    }
+
+    #[test]
+    fn rename_tag_renames_it() {
+        let (_dir, paths) = temp_paths();
+        init_at(&paths).unwrap();
+        let mut store = ProfileStore::open_at(&paths).unwrap();
+        store.create_tag("sip").unwrap();
+
+        store.rename_tag("sip", "voip").unwrap();
+
+        assert_eq!(store.list_tags().unwrap(), vec!["voip".to_string()]);
+    }
+
+    #[test]
+    fn renaming_a_missing_tag_fails() {
+        let (_dir, paths) = temp_paths();
+        init_at(&paths).unwrap();
+        let mut store = ProfileStore::open_at(&paths).unwrap();
+
+        let err = store.rename_tag("nope", "voip").expect_err("存在しないタグはエラーのはず");
+        assert!(matches!(err, ProfileStoreError::TagNotFound(name) if name == "nope"));
+    }
+
+    #[test]
+    fn renaming_a_tag_to_an_already_existing_name_fails() {
+        let (_dir, paths) = temp_paths();
+        init_at(&paths).unwrap();
+        let mut store = ProfileStore::open_at(&paths).unwrap();
+        store.create_tag("sip").unwrap();
+        store.create_tag("voip").unwrap();
+
+        let err = store.rename_tag("sip", "voip").expect_err("既存名への変更はエラーのはず");
+        assert!(matches!(err, ProfileStoreError::TagAlreadyExists(name) if name == "voip"));
+    }
+
+    #[test]
+    fn delete_tag_removes_it_and_detaches_it_from_profiles() {
+        let (_dir, paths) = temp_paths();
+        init_at(&paths).unwrap();
+        let mut store = ProfileStore::open_at(&paths).unwrap();
+        store.create_profile(&sample_profile("work")).unwrap();
+        store.set_profile_tags("work", &["sip".to_string()]).unwrap();
+
+        store.delete_tag("sip").unwrap();
+
+        assert_eq!(store.list_tags().unwrap(), Vec::<String>::new());
+        assert_eq!(store.profile_tags("work").unwrap(), Vec::<String>::new(), "ON DELETE CASCADEで自動的に外れるはず");
+    }
+
+    #[test]
+    fn deleting_a_missing_tag_fails() {
+        let (_dir, paths) = temp_paths();
+        init_at(&paths).unwrap();
+        let mut store = ProfileStore::open_at(&paths).unwrap();
+
+        let err = store.delete_tag("nope").expect_err("存在しないタグはエラーのはず");
+        assert!(matches!(err, ProfileStoreError::TagNotFound(name) if name == "nope"));
+    }
+
+    #[test]
+    fn set_profile_tags_replaces_the_full_set() {
+        let (_dir, paths) = temp_paths();
+        init_at(&paths).unwrap();
+        let mut store = ProfileStore::open_at(&paths).unwrap();
+        store.create_profile(&sample_profile("work")).unwrap();
+        store.set_profile_tags("work", &["sip".to_string(), "urgent".to_string()]).unwrap();
+
+        store.set_profile_tags("work", &["sip".to_string()]).unwrap();
+
+        assert_eq!(store.profile_tags("work").unwrap(), vec!["sip".to_string()], "urgentは外れているはず");
+    }
+
+    #[test]
+    fn set_profile_tags_auto_creates_missing_tags() {
+        let (_dir, paths) = temp_paths();
+        init_at(&paths).unwrap();
+        let mut store = ProfileStore::open_at(&paths).unwrap();
+        store.create_profile(&sample_profile("work")).unwrap();
+
+        store.set_profile_tags("work", &["brand-new".to_string()]).unwrap();
+
+        assert_eq!(store.list_tags().unwrap(), vec!["brand-new".to_string()]);
+    }
+
+    #[test]
+    fn set_profile_tags_on_a_missing_profile_fails() {
+        let (_dir, paths) = temp_paths();
+        init_at(&paths).unwrap();
+        let mut store = ProfileStore::open_at(&paths).unwrap();
+
+        let err = store.set_profile_tags("nope", &["sip".to_string()]).expect_err("存在しないプロファイルはエラーのはず");
+        assert!(matches!(err, ProfileStoreError::ProfileNotFound(name) if name == "nope"));
+    }
+
+    #[test]
+    fn profile_tags_returns_the_attached_tags_sorted() {
+        let (_dir, paths) = temp_paths();
+        init_at(&paths).unwrap();
+        let mut store = ProfileStore::open_at(&paths).unwrap();
+        store.create_profile(&sample_profile("work")).unwrap();
+        store.set_profile_tags("work", &["voip".to_string(), "sip".to_string()]).unwrap();
+
+        assert_eq!(store.profile_tags("work").unwrap(), vec!["sip".to_string(), "voip".to_string()]);
+    }
+
+    #[test]
+    fn list_profiles_includes_tags_in_the_summary() {
+        let (_dir, paths) = temp_paths();
+        init_at(&paths).unwrap();
+        let mut store = ProfileStore::open_at(&paths).unwrap();
+        store.create_profile(&sample_profile("work")).unwrap();
+        store.set_profile_tags("work", &["sip".to_string()]).unwrap();
+
+        let summary = store.list_profiles().unwrap().into_iter().find(|s| s.name == "work").unwrap();
+        assert_eq!(summary.tags, vec!["sip".to_string()]);
+    }
+
+    #[test]
+    fn create_profile_returns_an_id_that_matches_list_profiles() {
+        // renameを跨いで安定した識別子として使うため、create_profileの戻り値と
+        // list_profilesが返すidが同一であることを固定する。
+        let (_dir, paths) = temp_paths();
+        init_at(&paths).unwrap();
+        let mut store = ProfileStore::open_at(&paths).unwrap();
+
+        let id = store.create_profile(&sample_profile("work")).unwrap();
+
+        let summary = store.list_profiles().unwrap().into_iter().find(|s| s.name == "work").unwrap();
+        assert_eq!(summary.id, id);
+    }
+
+    #[test]
+    fn a_profiles_id_survives_being_renamed() {
+        let (_dir, paths) = temp_paths();
+        init_at(&paths).unwrap();
+        let mut store = ProfileStore::open_at(&paths).unwrap();
+        let id = store.create_profile(&sample_profile("old-name")).unwrap();
+
+        store.update_profile("old-name", &sample_profile("new-name")).unwrap();
+
+        let summary = store.list_profiles().unwrap().into_iter().find(|s| s.name == "new-name").unwrap();
+        assert_eq!(summary.id, id, "リネームしてもidは変わらないはず");
+    }
+
+    #[test]
+    fn renaming_a_tag_to_its_own_current_name_is_a_harmless_no_op() {
+        let (_dir, paths) = temp_paths();
+        init_at(&paths).unwrap();
+        let mut store = ProfileStore::open_at(&paths).unwrap();
+        store.create_tag("sip").unwrap();
+
+        store.rename_tag("sip", "sip").unwrap();
+
+        assert_eq!(store.list_tags().unwrap(), vec!["sip".to_string()]);
+    }
+
+    #[test]
+    fn set_profile_tags_with_an_empty_list_clears_all_tags() {
+        let (_dir, paths) = temp_paths();
+        init_at(&paths).unwrap();
+        let mut store = ProfileStore::open_at(&paths).unwrap();
+        store.create_profile(&sample_profile("work")).unwrap();
+        store.set_profile_tags("work", &["sip".to_string()]).unwrap();
+
+        store.set_profile_tags("work", &[]).unwrap();
+
+        assert_eq!(store.profile_tags("work").unwrap(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn lock_contention_is_not_mistaken_for_missing_on_the_new_mutating_methods() {
+        // database_lock_contention_is_not_mistaken_for_a_missing_profileと同じ懸念
+        // (ロック競合による失敗が「存在しない」系のエラーに化けないこと)を、
+        // 今回追加した書き込み系メソッド全てについて確認する。
+        let (_dir, paths) = temp_paths();
+        init_at(&paths).unwrap();
+        let mut store = ProfileStore::open_at(&paths).unwrap();
+        store.create_profile(&sample_profile("work")).unwrap();
+        store.create_tag("sip").unwrap();
+
+        let locker = Connection::open(&paths.db_path).unwrap();
+        locker.execute_batch("BEGIN EXCLUSIVE").unwrap();
+
+        assert!(
+            matches!(store.update_profile("work", &sample_profile("work")), Err(ProfileStoreError::Db(_))),
+            "update_profileはロック競合中もProfileNotFoundに化けてはいけない"
+        );
+        assert!(
+            matches!(store.set_favorite("work", true), Err(ProfileStoreError::Db(_))),
+            "set_favoriteはロック競合中もProfileNotFoundに化けてはいけない"
+        );
+        assert!(
+            matches!(store.rename_tag("sip", "voip"), Err(ProfileStoreError::Db(_))),
+            "rename_tagはロック競合中もTagNotFoundに化けてはいけない"
+        );
+        assert!(
+            matches!(store.delete_tag("sip"), Err(ProfileStoreError::Db(_))),
+            "delete_tagはロック競合中もTagNotFoundに化けてはいけない"
+        );
+        assert!(
+            matches!(store.profile_tags("work"), Err(ProfileStoreError::Db(_))),
+            "profile_tagsはロック競合中もProfileNotFoundに化けてはいけない"
+        );
+        assert!(
+            matches!(store.set_profile_tags("work", &["sip".to_string()]), Err(ProfileStoreError::Db(_))),
+            "set_profile_tagsはロック競合中もProfileNotFoundに化けてはいけない"
+        );
+
+        locker.execute_batch("COMMIT").unwrap();
+        store.update_profile("work", &sample_profile("work")).expect("ロック解放後は正常に動作するはず");
     }
 }
