@@ -1,15 +1,36 @@
-import { createContext, useContext, useMemo, useState, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
+import { toast } from "sonner";
 import type { RuleListItem } from "@/components/rule-edit-screen";
 import { DEMO_SAMPLE_TEXT, PROFILE_TEMPLATE_RULES } from "./demo-seed-data";
 import { maskText } from "./masking-ipc";
+import {
+  createProfile as ipcCreateProfile,
+  createTag as ipcCreateTag,
+  deleteProfile as ipcDeleteProfile,
+  deleteTag as ipcDeleteTag,
+  getProfile as ipcGetProfile,
+  initializeStore,
+  isStoreInitialized,
+  listProfiles,
+  listTags,
+  onProfilesChanged,
+  onTagsChanged,
+  openStore,
+  renameTag as ipcRenameTag,
+  setActiveProfile as ipcSetActiveProfile,
+  setFavorite as ipcSetFavorite,
+  setProfileTags,
+  updateProfile as ipcUpdateProfile,
+  type ProfileDetail,
+} from "./profile-ipc";
 
 export interface Profile {
   id: string;
   name: string;
-  description: string;
   isActive: boolean;
   isFavorite: boolean;
   updatedAt: string;
+  ruleCount: number;
   tags: string[];
 }
 
@@ -29,16 +50,8 @@ export function resolveUniqueName(baseName: string, existingNames: string[]): st
   return candidate;
 }
 
-function today(): string {
-  return new Date().toISOString().slice(0, 10);
-}
-
-function withRuleIds(rules: Omit<RuleListItem, "id">[]): RuleListItem[] {
-  return rules.map((rule) => ({ ...rule, id: crypto.randomUUID() }));
-}
-
 export interface AppStateValue {
-  initialized: boolean;
+  initialized: boolean | null;
   start: () => Promise<void>;
 
   profiles: Profile[];
@@ -48,18 +61,16 @@ export interface AppStateValue {
   duplicateProfile: (id: string, newName: string) => Promise<string>;
   deleteProfile: (id: string) => Promise<void>;
   toggleFavorite: (id: string) => Promise<void>;
-  updateProfileMeta: (
+  getProfileDetail: (id: string) => Promise<ProfileDetail>;
+  updateProfile: (
     id: string,
-    meta: { name: string; description: string }
+    meta: { name: string; description: string; rules: RuleListItem[] }
   ) => Promise<void>;
 
   tags: Tag[];
   createTag: (name: string) => Promise<void>;
   renameTag: (id: string, newName: string) => Promise<void>;
   deleteTag: (id: string) => Promise<void>;
-
-  rulesByProfileId: Record<string, RuleListItem[]>;
-  saveRules: (profileId: string, rules: RuleListItem[]) => Promise<void>;
 
   inputText: string;
   setInputText: (text: string) => void;
@@ -71,146 +82,189 @@ export interface AppStateValue {
 
 const AppStateContext = createContext<AppStateValue | null>(null);
 
+function withRuleIds(rules: Omit<RuleListItem, "id">[]): RuleListItem[] {
+  return rules.map((rule) => ({ ...rule, id: crypto.randomUUID() }));
+}
+
+// 失敗を握り潰さず必ずユーザーに見える形にするための共通ラッパー。呼び出し元が
+// 「失敗時は何もしない(画面遷移しない等)」を判断できるよう、表示後にrethrowする。
+async function reportAndRethrow<T>(message: string, action: () => Promise<T>): Promise<T> {
+  try {
+    return await action();
+  } catch (error) {
+    console.error(message, error);
+    toast.error(message);
+    throw error;
+  }
+}
+
 export function AppStateProvider({ children }: { children: ReactNode }) {
-  const [initialized, setInitialized] = useState(false);
+  const [initialized, setInitializedState] = useState<boolean | null>(null);
   const [profiles, setProfiles] = useState<Profile[]>([]);
-  const [activeProfileId, setActiveProfileIdState] = useState<string | null>(null);
   const [tags, setTags] = useState<Tag[]>([]);
-  const [rulesByProfileId, setRulesByProfileId] = useState<Record<string, RuleListItem[]>>({});
   const [inputText, setInputText] = useState(DEMO_SAMPLE_TEXT);
   const [outputText, setOutputText] = useState("");
   const [statusText, setStatusText] = useState("アクティブプロファイル: なし");
 
+  const refreshProfiles = async () => {
+    const summaries = await listProfiles();
+    setProfiles(
+      summaries.map((s) => ({
+        id: String(s.id),
+        name: s.name,
+        isActive: s.is_active,
+        isFavorite: s.is_favorite,
+        updatedAt: s.updated_at,
+        ruleCount: s.rule_count,
+        tags: s.tags,
+      }))
+    );
+  };
+
+  const refreshTags = async () => {
+    const names = await listTags();
+    setTags(names.map((name) => ({ id: name, name })));
+  };
+
+  // 起動時に一度だけ、既に初期化済み(鍵/DBが既存)かを確認する。初回セットアップ画面は
+  // 「未初期化と確認できた場合」だけ表示し、2回目以降の起動では出さない。
+  // 既に初期化済みの場合でも、ProfileStoreState自体はプロセス起動ごとに空になるため、
+  // openStoreで明示的に実体化してからでないとlist_profiles等が失敗する。
+  useEffect(() => {
+    isStoreInitialized()
+      .then(async (yes) => {
+        if (yes) {
+          await openStore();
+          await Promise.all([refreshProfiles(), refreshTags()]);
+        }
+        setInitializedState(yes);
+      })
+      .catch((error) => {
+        console.error("is_store_initialized failed", error);
+        toast.error("初期化状態の確認に失敗しました");
+        setInitializedState(false);
+      });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // 別ウィンドウ(将来分含む)での変更をこのウィンドウにも反映するためのイベント購読。
+  // フォーカスの有無に関係なく届く(PoCで検証済みの方式)。
+  useEffect(() => {
+    if (!initialized) return;
+    const unlistenProfiles = onProfilesChanged(() => {
+      refreshProfiles();
+    });
+    const unlistenTags = onTagsChanged(() => {
+      refreshTags();
+    });
+    return () => {
+      unlistenProfiles.then((f) => f());
+      unlistenTags.then((f) => f());
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialized]);
+
+  const activeProfileId = profiles.find((p) => p.isActive)?.id ?? null;
+  const findNameById = (id: string): string | undefined => profiles.find((p) => p.id === id)?.name;
+
   const value = useMemo<AppStateValue>(
     () => ({
       initialized,
-      start: async () => {
-        setInitialized(true);
-      },
+      start: () =>
+        reportAndRethrow("初期化に失敗しました", async () => {
+          await initializeStore();
+          await Promise.all([refreshProfiles(), refreshTags()]);
+          setInitializedState(true);
+        }),
 
       profiles,
       activeProfileId,
-      setActiveProfileId: async (id) => {
-        setActiveProfileIdState(id);
-        setProfiles((prev) => prev.map((p) => ({ ...p, isActive: p.id === id })));
-      },
-      createProfile: async (name, templateValue) => {
-        const id = crypto.randomUUID();
-        setProfiles((prev) => [
-          ...prev.map((p) => ({ ...p, isActive: false })),
-          {
-            id,
-            name,
-            description: "",
-            isActive: true,
-            isFavorite: false,
-            updatedAt: today(),
-            tags: [],
-          },
-        ]);
-        setActiveProfileIdState(id);
-        const seedRules = templateValue ? PROFILE_TEMPLATE_RULES[templateValue] : undefined;
-        setRulesByProfileId((prev) => ({
-          ...prev,
-          [id]: seedRules ? withRuleIds(seedRules) : [],
-        }));
-        return id;
-      },
-      duplicateProfile: async (id, newName) => {
-        const source = profiles.find((p) => p.id === id);
-        const newId = crypto.randomUUID();
-        setProfiles((prev) => [
-          ...prev,
-          {
-            id: newId,
-            name: newName,
-            description: source?.description ?? "",
-            isActive: false,
-            isFavorite: false,
-            updatedAt: today(),
-            tags: source?.tags ?? [],
-          },
-        ]);
-        setRulesByProfileId((prev) => ({
-          ...prev,
-          [newId]: (rulesByProfileId[id] ?? []).map((rule) => ({
-            ...rule,
-            id: crypto.randomUUID(),
-          })),
-        }));
-        return newId;
-      },
-      deleteProfile: async (id) => {
-        setProfiles((prev) => prev.filter((p) => p.id !== id));
-        setRulesByProfileId((prev) => {
-          const next = { ...prev };
-          delete next[id];
-          return next;
-        });
-        setActiveProfileIdState((prev) => (prev === id ? null : prev));
-      },
-      toggleFavorite: async (id) => {
-        setProfiles((prev) =>
-          prev.map((p) => (p.id === id ? { ...p, isFavorite: !p.isFavorite } : p))
-        );
-      },
-      updateProfileMeta: async (id, meta) => {
-        setProfiles((prev) =>
-          prev.map((p) =>
-            p.id === id
-              ? { ...p, name: meta.name, description: meta.description, updatedAt: today() }
-              : p
-          )
-        );
-      },
+      setActiveProfileId: (id) =>
+        reportAndRethrow("プロファイルの切り替えに失敗しました", async () => {
+          const name = findNameById(id);
+          if (!name) throw new Error(`profile not found: ${id}`);
+          await ipcSetActiveProfile(name);
+          await refreshProfiles();
+        }),
+      createProfile: (name, templateValue) =>
+        reportAndRethrow("プロファイルの作成に失敗しました", async () => {
+          const seedRules = templateValue ? PROFILE_TEMPLATE_RULES[templateValue] : undefined;
+          const id = await ipcCreateProfile(name, "", seedRules ? withRuleIds(seedRules) : []);
+          // profile-storeの既定は「アクティブが未設定の場合のみ」自動アクティブ化するため、
+          // GUI固有の「新規作成分は常にアクティブにする」挙動はここで明示的に行う。
+          await ipcSetActiveProfile(name);
+          await refreshProfiles();
+          return String(id);
+        }),
+      duplicateProfile: (id, newName) =>
+        reportAndRethrow("プロファイルの複製に失敗しました", async () => {
+          const source = profiles.find((p) => p.id === id);
+          if (!source) throw new Error(`profile not found: ${id}`);
+          const detail = await ipcGetProfile(source.name);
+          const newId = await ipcCreateProfile(newName, detail.description, detail.rules);
+          if (source.tags.length > 0) await setProfileTags(newName, source.tags);
+          await refreshProfiles();
+          return String(newId);
+        }),
+      deleteProfile: (id) =>
+        reportAndRethrow("プロファイルの削除に失敗しました", async () => {
+          const name = findNameById(id);
+          if (!name) throw new Error(`profile not found: ${id}`);
+          await ipcDeleteProfile(name);
+          await refreshProfiles();
+        }),
+      toggleFavorite: (id) =>
+        reportAndRethrow("お気に入りの更新に失敗しました", async () => {
+          const target = profiles.find((p) => p.id === id);
+          if (!target) throw new Error(`profile not found: ${id}`);
+          await ipcSetFavorite(target.name, !target.isFavorite);
+          await refreshProfiles();
+        }),
+      getProfileDetail: (id) =>
+        reportAndRethrow("プロファイルの読み込みに失敗しました", async () => {
+          const name = findNameById(id);
+          if (!name) throw new Error(`profile not found: ${id}`);
+          return ipcGetProfile(name);
+        }),
+      updateProfile: (id, meta) =>
+        reportAndRethrow("プロファイルの保存に失敗しました", async () => {
+          const oldName = findNameById(id);
+          if (!oldName) throw new Error(`profile not found: ${id}`);
+          await ipcUpdateProfile(oldName, meta.name, meta.description, meta.rules);
+          await refreshProfiles();
+        }),
 
       tags,
-      createTag: async (name) => {
-        setTags((prev) => [...prev, { id: crypto.randomUUID(), name }]);
-      },
-      renameTag: async (id, newName) => {
-        const oldName = tags.find((t) => t.id === id)?.name;
-        setTags((prev) => prev.map((t) => (t.id === id ? { ...t, name: newName } : t)));
-        if (oldName) {
-          setProfiles((prev) =>
-            prev.map((p) => ({
-              ...p,
-              tags: p.tags.map((t) => (t === oldName ? newName : t)),
-            }))
-          );
-        }
-      },
-      deleteTag: async (id) => {
-        const name = tags.find((t) => t.id === id)?.name;
-        setTags((prev) => prev.filter((t) => t.id !== id));
-        if (name) {
-          setProfiles((prev) =>
-            prev.map((p) => ({ ...p, tags: p.tags.filter((t) => t !== name) }))
-          );
-        }
-      },
-
-      rulesByProfileId,
-      saveRules: async (profileId, rules) => {
-        setRulesByProfileId((prev) => ({ ...prev, [profileId]: rules }));
-        setProfiles((prev) =>
-          prev.map((p) => (p.id === profileId ? { ...p, updatedAt: today() } : p))
-        );
-      },
+      createTag: (name) =>
+        reportAndRethrow("タグの作成に失敗しました", async () => {
+          await ipcCreateTag(name);
+          await refreshTags();
+        }),
+      renameTag: (id, newName) =>
+        // Tag.idはprofile-store側にidが無いためタグ名そのものを使っている。
+        reportAndRethrow("タグ名の変更に失敗しました", async () => {
+          await ipcRenameTag(id, newName);
+          await Promise.all([refreshTags(), refreshProfiles()]);
+        }),
+      deleteTag: (id) =>
+        reportAndRethrow("タグの削除に失敗しました", async () => {
+          await ipcDeleteTag(id);
+          await Promise.all([refreshTags(), refreshProfiles()]);
+        }),
 
       inputText,
       setInputText,
       outputText,
       statusText,
       runMask: async () => {
-        const activeProfile = profiles.find((p) => p.id === activeProfileId);
+        const activeProfile = profiles.find((p) => p.isActive);
         if (!activeProfile) return;
-        const rules = rulesByProfileId[activeProfile.id] ?? [];
         try {
+          const detail = await ipcGetProfile(activeProfile.name);
           const { text, matchCounts } = await maskText(
             activeProfile.id,
             activeProfile.name,
-            rules,
+            detail.rules,
             inputText
           );
           const totalMatches = matchCounts.reduce((sum, m) => sum + m.count, 0);
@@ -220,12 +274,13 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
           );
         } catch (error) {
           console.error("mask_text failed", error);
+          toast.error("マスク実行に失敗しました");
           setStatusText(`アクティブプロファイル: ${activeProfile.name} ・ マスク実行に失敗しました`);
         }
       },
       clearInput: () => setInputText(""),
     }),
-    [initialized, profiles, activeProfileId, tags, rulesByProfileId, inputText, outputText, statusText]
+    [initialized, profiles, activeProfileId, tags, inputText, outputText, statusText]
   );
 
   return <AppStateContext.Provider value={value}>{children}</AppStateContext.Provider>;

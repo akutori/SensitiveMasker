@@ -6,41 +6,60 @@ import { useAppState } from "@/lib/app-state";
 import { maskText } from "@/lib/masking-ipc";
 import { DEMO_SAMPLE_TEXT, RULE_TEMPLATE_OPTIONS, RULE_TEMPLATE_VALUES } from "@/lib/demo-seed-data";
 
-export const Route = createFileRoute("/rules/$profileId")({
-  component: RuleEditRoute,
-});
+export const Route = createFileRoute("/rules/$profileId")({ component: RuleEditRoute });
 
 function RuleEditRoute() {
   const { profileId } = Route.useParams();
   const navigate = useNavigate();
   const router = useRouter();
   const appState = useAppState();
+  const profileExists = appState.profiles.some((p) => p.id === profileId);
 
-  const profile = appState.profiles.find((p) => p.id === profileId);
-
-  const [profileName, setProfileName] = useState(profile?.name ?? "");
-  const [profileDescription, setProfileDescription] = useState(profile?.description ?? "");
-  const [rules, setRules] = useState<RuleListItem[]>(appState.rulesByProfileId[profileId] ?? []);
+  const [profileName, setProfileName] = useState("");
+  const [profileDescription, setProfileDescription] = useState("");
+  const [rules, setRules] = useState<RuleListItem[]>([]);
+  const [loaded, setLoaded] = useState(false);
   const [sampleText, setSampleText] = useState(DEMO_SAMPLE_TEXT);
   const [maskedResult, setMaskedResult] = useState("");
 
+  // profileが一覧から消えた(削除された)場合のみ戻る。プロファイル一覧全体の変更
+  // (無関係な他プロファイルのお気に入り切替等)では再発火しないよう、オブジェクト参照
+  // ではなく存在有無のbooleanだけに依存させる(そうしないと編集中の下書きが上書きされうる)。
   useEffect(() => {
-    if (!profile) navigate({ to: "/profiles" });
+    if (!profileExists) navigate({ to: "/profiles" });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [profile]);
+  }, [profileExists]);
 
-  // profileNameは変更のたびにプレビューを再計算する必要が無い(masking-coreの
-  // マスク処理自体はプロファイル名を使わない)ため、依存配列には含めずrefで最新値だけ読む。
+  // 詳細(ルール本体)はここでprofileIdが変わった時だけ取得する。profiles一覧の再取得
+  // (お気に入り切替等の副作用)に反応して再取得すると、編集中の下書きが失われるため。
+  useEffect(() => {
+    let cancelled = false;
+    appState
+      .getProfileDetail(profileId)
+      .then((detail) => {
+        if (cancelled) return;
+        setProfileName(detail.name);
+        setProfileDescription(detail.description);
+        setRules(detail.rules);
+        setLoaded(true);
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        console.error("getProfileDetail failed", error);
+        navigate({ to: "/profiles" });
+      });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [profileId]);
+
   const profileNameRef = useRef(profileName);
   profileNameRef.current = profileName;
 
-  // 入力のたびにIPCを呼ばないよう、最後の変更から一定時間待ってから実行する
-  // (初回表示時だけは遅延させず即座に計算する)。連続入力中に古い呼び出しの結果が
-  // 後から返って上書きすることを防ぐため、クリーンアップ時点でそのエフェクトの結果を破棄する。
-  // isFirstRunは成功時にのみfalseへ倒す(React 18 StrictModeの開発時二重実行で
-  // 1回目がキャンセルされても、2回目が引き続き「初回」として即時実行されるようにするため)。
   const isFirstRun = useRef(true);
   useEffect(() => {
+    if (!loaded) return;
     let cancelled = false;
     const run = () => {
       maskText(profileId, profileNameRef.current, rules, sampleText)
@@ -66,9 +85,9 @@ function RuleEditRoute() {
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [profileId, rules, sampleText]);
+  }, [loaded, profileId, rules, sampleText]);
 
-  if (!profile) return null;
+  if (!profileExists || !loaded) return null;
 
   const goBack = () => {
     if (window.history.length > 1) router.history.back();
@@ -99,12 +118,17 @@ function RuleEditRoute() {
       onSampleTextChange={setSampleText}
       maskedResult={maskedResult}
       onSave={async () => {
-        await appState.updateProfileMeta(profileId, {
-          name: profileName,
-          description: profileDescription,
-        });
-        await appState.saveRules(profileId, rules);
-        goBack();
+        try {
+          await appState.updateProfile(profileId, {
+            name: profileName,
+            description: profileDescription,
+            rules,
+          });
+          goBack();
+        } catch {
+          // 失敗の通知はappState.updateProfile内のtoastが行う。
+          // ここでは画面遷移を止め、下書きを保持したままにする。
+        }
       }}
       onCancel={goBack}
     />

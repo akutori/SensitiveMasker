@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { RuleListItem } from "@/components/rule-edit-screen";
 
-interface RuleDto {
+export interface RuleDto {
   name: string;
   pattern_type: "literal" | "regex";
   pattern: string;
@@ -12,7 +12,7 @@ interface RuleDto {
   description: string | null;
 }
 
-interface RuleProfileDto {
+export interface RuleProfileDto {
   profile_name: string;
   description: string | null;
   rules: RuleDto[];
@@ -38,7 +38,7 @@ export interface MaskTextResult {
   matchCounts: MaskMatchCount[];
 }
 
-function toRuleDto(rule: RuleListItem): RuleDto {
+export function toRuleDto(rule: RuleListItem): RuleDto {
   return {
     name: rule.name,
     pattern_type: rule.patternType,
@@ -48,6 +48,22 @@ function toRuleDto(rule: RuleListItem): RuleDto {
     prefix: rule.prefix || null,
     enabled: rule.enabled,
     description: rule.description || null,
+  };
+}
+
+// masking-coreはGUI固有のid概念を持たないため、Rust側から返るルールには無く、
+// ここでReact用の一時的なidを新規に振る。
+export function fromRuleDto(dto: RuleDto): RuleListItem {
+  return {
+    id: crypto.randomUUID(),
+    name: dto.name,
+    patternType: dto.pattern_type,
+    pattern: dto.pattern,
+    mode: dto.mode,
+    fixedValue: dto.fixed_value ?? "",
+    prefix: dto.prefix ?? "",
+    enabled: dto.enabled,
+    description: dto.description ?? "",
   };
 }
 

@@ -52,7 +52,8 @@ pub async fn mask_text(
     text: String,
 ) -> Result<MaskTextResult, ()> {
     // poison時も後続の呼び出しを永久に失敗させないよう、中身を取り出して継続する
-    // (GUIはCLIと違いプロセスが常駐するため、一度のpanicで以降すべて失敗し続けるのを避ける)。
+    // (release buildのpanic=abortではpanic自体がプロセスごと終了するため、この回復が
+    // 意味を持つのはdebug build時のみ)。
     let mut stores = state.0.lock().unwrap_or_else(|e| e.into_inner());
     Ok(mask_text_with_stores(&mut stores, profile_id, &profile, &text))
 }

@@ -51,7 +51,7 @@ type DialogState =
 function ProfilesRoute() {
   const navigate = useNavigate();
   const appState = useAppState();
-  const { profiles, tags, rulesByProfileId } = appState;
+  const { profiles, tags } = appState;
 
   const [searchQuery, setSearchQuery] = useState("");
   const [sortValue, setSortValue] = useState(SORT_OPTIONS[0].value);
@@ -91,7 +91,7 @@ function ProfilesRoute() {
           isActive: p.isActive,
           isFavorite: p.isFavorite,
           updatedAt: p.updatedAt,
-          ruleCount: (rulesByProfileId[p.id] ?? []).length,
+          ruleCount: p.ruleCount,
           tags: p.tags,
         }))}
         searchQuery={searchQuery}

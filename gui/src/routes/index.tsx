@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
+import { toast } from "sonner";
 import { MainScreen } from "@/components/main-screen";
 import { ProfileNameDialog } from "@/components/profile-name-dialog";
 import { FileImportChoiceDialog } from "@/components/file-import-choice-dialog";
@@ -31,7 +32,7 @@ type DialogState =
 function MainRoute() {
   const navigate = useNavigate();
   const appState = useAppState();
-  const { profiles, activeProfileId, rulesByProfileId } = appState;
+  const { profiles, activeProfileId } = appState;
 
   const [dialog, setDialog] = useState<DialogState>({ kind: "none" });
   const [draftName, setDraftName] = useState("");
@@ -112,8 +113,8 @@ function MainRoute() {
         onMaskAndSaveAs={async () => {
           const activeProfile = profiles.find((p) => p.id === activeProfileId);
           if (!activeProfile) return;
-          const rules = rulesByProfileId[activeProfile.id] ?? [];
           try {
+            const { rules } = await appState.getProfileDetail(activeProfile.id);
             const { matchCounts } = await maskText(
               activeProfile.id,
               activeProfile.name,
@@ -130,6 +131,7 @@ function MainRoute() {
           } catch (error) {
             // 失敗時は確認ダイアログを開かない(成功したように見せない)。
             console.error("mask_text failed", error);
+            toast.error("マスク実行に失敗しました");
           }
         }}
       />

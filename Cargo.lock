@@ -2146,6 +2146,7 @@ name = "gui"
 version = "0.1.0"
 dependencies = [
  "masking-core",
+ "profile-store",
  "serde",
  "serde_json",
  "tauri",

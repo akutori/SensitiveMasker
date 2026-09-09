@@ -61,7 +61,7 @@ pub enum ProfileStoreError {
     TagNotFound(String),
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct ProfileSummary {
     pub id: i64,
     pub name: String,
