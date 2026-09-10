@@ -7,6 +7,26 @@
     "core:default",
     "opener:default",
     "dialog:allow-open",
-    "dialog:allow-save"
+    "dialog:allow-save",
+    "allow-mask-text",
+    "allow-is-store-initialized",
+    "allow-open-store",
+    "allow-initialize-store",
+    "allow-list-profiles",
+    "allow-get-profile",
+    "allow-create-profile",
+    "allow-update-profile",
+    "allow-delete-profile",
+    "allow-set-active-profile",
+    "allow-set-favorite",
+    "allow-list-tags",
+    "allow-create-tag",
+    "allow-rename-tag",
+    "allow-delete-tag",
+    "allow-set-profile-tags",
+    "allow-export-profile-to-file",
+    "allow-export-all-to-file",
+    "allow-preview-import",
+    "allow-commit-pending-import"
   ]
 }

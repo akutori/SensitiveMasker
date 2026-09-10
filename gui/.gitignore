@@ -37,6 +37,8 @@ e2e/*.spec.d.ts
 /vite.config.d.ts
 /wdio.conf.js
 /wdio.conf.d.ts
+scripts/*.js
+scripts/*.d.ts
 
 # TanStack Routerが自動生成するルートツリー
 src/routeTree.gen.ts
