@@ -56,6 +56,21 @@ fn create(store: &mut ProfileStore, name: &str, from_json: Option<&Path>) -> Res
 
 fn load_rules_from_json(path: &Path) -> Result<Vec<Rule>, CliError> {
     let text = std::fs::read_to_string(path)?;
+
+    // Vec<Rule>への型付きデシリアライズは各ルールの正規表現を実際にコンパイルする
+    // (Rule::new経由)。それより前に、serde_json::Valueとして構造的に(regexへは
+    // 一切触れずに)件数だけを検査する(SMX-4対応: profile-store側のpreview_importと
+    // 同じ考え方を、外部からルール一括投入を受け付けるこの経路にも適用する)。
+    if let Ok(serde_json::Value::Array(rules)) = serde_json::from_str::<serde_json::Value>(&text) {
+        if rules.len() > profile_store::MAX_RULES_PER_PROFILE {
+            return Err(CliError::TooManyRulesInJson {
+                path: path.to_path_buf(),
+                count: rules.len(),
+                limit: profile_store::MAX_RULES_PER_PROFILE,
+            });
+        }
+    }
+
     serde_json::from_str(&text).map_err(|source| CliError::Json { path: path.to_path_buf(), source })
 }
 
@@ -149,6 +164,29 @@ mod tests {
         let err = create(&mut store, "work", Some(&json_path)).expect_err("不正なJSONは拒否されるはず");
         assert!(matches!(err, CliError::Json { .. }));
         assert!(store.get_profile("work").is_err());
+    }
+
+    #[test]
+    fn create_with_too_many_rules_in_json_creates_nothing() {
+        let (_dir, mut store) = temp_store();
+        let json_dir = tempfile::tempdir().unwrap();
+        let json_path = json_dir.path().join("rules.json");
+        let rules: Vec<serde_json::Value> = (0..=profile_store::MAX_RULES_PER_PROFILE)
+            .map(|i| {
+                serde_json::json!({
+                    "name": format!("r{i}"),
+                    "pattern_type": "literal",
+                    "pattern": format!("v{i}"),
+                    "mode": "fixed",
+                    "fixed_value": "masked",
+                })
+            })
+            .collect();
+        std::fs::write(&json_path, serde_json::to_string(&rules).unwrap()).unwrap();
+
+        let err = create(&mut store, "work", Some(&json_path)).expect_err("ルール数上限超過は拒否されるはず");
+        assert!(matches!(err, CliError::TooManyRulesInJson { .. }));
+        assert!(store.get_profile("work").is_err(), "上限超過時はプロファイルが作成されてはいけない");
     }
 
     #[test]

@@ -55,6 +55,8 @@ pub enum ProfileStoreError {
     UnsupportedFormatVersion { found: u32, supported: u32 },
     #[error("インポートファイル内でプロファイル名が重複しています: '{0}'")]
     DuplicateNameInImportFile(String),
+    #[error("インポートファイルの規模が上限を超えています: {0}")]
+    ImportTooLarge(String),
     #[error("タグ '{0}' は既に存在します")]
     TagAlreadyExists(String),
     #[error("タグ '{0}' が見つかりません")]
@@ -220,6 +222,7 @@ impl ProfileStore {
     /// ならない(実際のリネームは`commit_import`が行う)。
     pub fn preview_import(&self, data: &[u8], passphrase: SecretString) -> Result<ImportPreview, ProfileStoreError> {
         let json = export::decrypt_import(data, passphrase)?;
+        check_import_size_limits(&json)?;
         let payload: ExportPayload =
             serde_json::from_slice(&json).map_err(|e| ProfileStoreError::CorruptProfileData(e.to_string()))?;
 
@@ -362,13 +365,13 @@ impl ProfileStore {
 
         rows.into_iter()
             .map(|(id, name, ciphertext, nonce, is_favorite, updated_at)| {
-                let profile = self.decrypt_profile(&ciphertext, &nonce, &name)?;
+                let rule_count = self.decrypt_rule_count(&ciphertext, &nonce, &name)?;
                 let tags = tags_for_profile_id(&self.conn, id)?;
                 Ok(ProfileSummary {
                     is_active: Some(&name) == active_name.as_ref(),
                     id,
                     name,
-                    rule_count: profile.rules().len(),
+                    rule_count,
                     is_favorite,
                     updated_at,
                     tags,
@@ -530,6 +533,18 @@ impl ProfileStore {
         serde_json::from_slice(&plaintext).map_err(|e| ProfileStoreError::CorruptProfileData(e.to_string()))
     }
 
+    /// `list_profiles`専用の軽量パス。`RuleProfile`への型付きデシリアライズは各ルールの
+    /// 正規表現を実際にコンパイルする(`Rule::new`経由)ため、一覧表示のたびに全件で
+    /// 行うと、悪意あるルールを含むプロファイルを一度取り込んだ場合に起動・一覧更新の
+    /// たびコンパイルコストが再発してしまう(SMX-4対応)。ルール件数だけが必要な場合は
+    /// `serde_json::Value`として構造的に数えるだけに留め、regexには一切触れない。
+    fn decrypt_rule_count(&self, ciphertext: &[u8], nonce: &[u8], name: &str) -> Result<usize, ProfileStoreError> {
+        let plaintext = crypto::decrypt(&self.key, ciphertext, nonce, name.as_bytes())?;
+        let value: serde_json::Value =
+            serde_json::from_slice(&plaintext).map_err(|e| ProfileStoreError::CorruptProfileData(e.to_string()))?;
+        Ok(rule_count_of(&value))
+    }
+
     /// 指定したプロファイルのルール・お気に入り・タグをまとめて読み出す
     /// (export_profile/export_allの共通処理)。
     fn read_exported_profile(&self, name: &str) -> Result<ExportedProfile, ProfileStoreError> {
@@ -564,6 +579,74 @@ fn check_format_version(found: u32) -> Result<(), ProfileStoreError> {
         return Err(ProfileStoreError::UnsupportedFormatVersion { found, supported: bulk::CURRENT_FORMAT_VERSION });
     }
     Ok(())
+}
+
+const MAX_PROFILES_PER_IMPORT: usize = 200;
+/// 1プロファイルあたりのルール数上限。`.smx`インポートだけでなく、CLIの
+/// `masker profile create --from-json`等、外部から一括でルール集合を受け取る
+/// 経路全てで同じ値を再利用する(SMX-4対応)。
+pub const MAX_RULES_PER_PROFILE: usize = 500;
+const MAX_TOTAL_RULES_PER_IMPORT: usize = 2000;
+
+/// `ExportPayload`への型付きデシリアライズ(各ルールの正規表現を実際にコンパイルする
+/// `Rule::new`経由)を行う前に、プロファイル数・ルール数を`serde_json::Value`として
+/// 構造的に(regexへは一切触れずに)検査する。巨大な数のルールを仕込んだ悪意ある
+/// ファイルによるコンパイルコストの積み上げを、型付きデシリアライズ自体が走る前に
+/// 防ぐため(SMX-4対応)。JSON自体が不正な形の場合はここでは何も拒否せず、後続の
+/// 型付きデシリアライズが持つ`CorruptProfileData`に判断を委ねる。
+fn check_import_size_limits(json: &[u8]) -> Result<(), ProfileStoreError> {
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(json) else {
+        return Ok(());
+    };
+
+    // 敵対的検証で発覚: 以前は"profiles"キーの有無だけで単一/全体を判定していたため、
+    // kind:"single"のペイロードに空の"profiles":[]を1つ追加するだけでチェック全体を
+    // すり抜けられた(実際のExportPayloadデシリアライズは"kind"タグでのみ判別し、
+    // 余分な"profiles"キーは無視するため)。実際のデシリアライズと同じ"kind"タグで
+    // 判別することで、この種の取り違えを構造的に無くす。
+    let rule_counts: Vec<usize> = match value.get("kind").and_then(serde_json::Value::as_str) {
+        Some("all") => {
+            let profiles = value.get("profiles").and_then(serde_json::Value::as_array);
+            let profiles = match profiles {
+                Some(profiles) => profiles,
+                None => return Ok(()),
+            };
+            if profiles.len() > MAX_PROFILES_PER_IMPORT {
+                return Err(ProfileStoreError::ImportTooLarge(format!(
+                    "プロファイル数が上限({MAX_PROFILES_PER_IMPORT}件)を超えています"
+                )));
+            }
+            profiles.iter().map(rule_count_of).collect()
+        }
+        Some("single") => match value.get("profile") {
+            Some(profile) => vec![rule_count_of(profile)],
+            None => return Ok(()),
+        },
+        // 未知のkindは、この後の型付きデシリアライズが持つCorruptProfileData等の
+        // 適切なエラーに判断を委ねる(ここでは何も拒否しない)。
+        _ => return Ok(()),
+    };
+
+    if let Some(&max) = rule_counts.iter().max() {
+        if max > MAX_RULES_PER_PROFILE {
+            return Err(ProfileStoreError::ImportTooLarge(format!(
+                "1プロファイルあたりのルール数が上限({MAX_RULES_PER_PROFILE}件)を超えています"
+            )));
+        }
+    }
+
+    let total: usize = rule_counts.iter().sum();
+    if total > MAX_TOTAL_RULES_PER_IMPORT {
+        return Err(ProfileStoreError::ImportTooLarge(format!(
+            "インポート全体のルール数合計が上限({MAX_TOTAL_RULES_PER_IMPORT}件)を超えています"
+        )));
+    }
+
+    Ok(())
+}
+
+fn rule_count_of(profile: &serde_json::Value) -> usize {
+    profile.get("rules").and_then(serde_json::Value::as_array).map_or(0, Vec::len)
 }
 
 /// タグ名自体はget-or-createで解決するため衝突しないが、1プロファイルの`tags`内で
@@ -660,6 +743,27 @@ mod tests {
         )
         .unwrap();
         RuleProfile::new(name, None, vec![rule]).unwrap()
+    }
+
+    // SMX-4のルール数上限テスト用。literalルールは正規表現コンパイルを伴わないため、
+    // 大量生成してもテスト自体は高速なまま。
+    fn profile_with_n_rules(name: &str, n: usize) -> RuleProfile {
+        let rules = (0..n)
+            .map(|i| {
+                Rule::new(
+                    format!("r{i}"),
+                    PatternType::Literal,
+                    format!("value{i}"),
+                    Mode::Fixed,
+                    Some("masked".to_string()),
+                    None,
+                    true,
+                    None,
+                )
+                .unwrap()
+            })
+            .collect();
+        RuleProfile::new(name, None, rules).unwrap()
     }
 
     fn passphrase(s: &str) -> SecretString {
@@ -1219,6 +1323,93 @@ mod tests {
 
         let exported = store.read_exported_profile("work").unwrap();
         assert_eq!(exported.tags, vec!["sip".to_string()], "重複タグは1回だけ紐付くはず");
+    }
+
+    #[test]
+    fn check_import_size_limits_rejects_too_many_profiles() {
+        let profiles: Vec<serde_json::Value> = (0..(MAX_PROFILES_PER_IMPORT + 1))
+            .map(|i| serde_json::json!({"profile_name": format!("p{i}"), "rules": []}))
+            .collect();
+        let json = serde_json::to_vec(&serde_json::json!({"kind": "all", "profiles": profiles})).unwrap();
+
+        let err = check_import_size_limits(&json).expect_err("プロファイル数上限超過は拒否されるはず");
+        assert!(matches!(err, ProfileStoreError::ImportTooLarge(_)));
+    }
+
+    #[test]
+    fn check_import_size_limits_rejects_too_many_rules_in_one_profile() {
+        let rules: Vec<serde_json::Value> = (0..(MAX_RULES_PER_PROFILE + 1)).map(|_| serde_json::json!({})).collect();
+        let json = serde_json::to_vec(&serde_json::json!({"kind": "single", "profile": {"rules": rules}})).unwrap();
+
+        let err = check_import_size_limits(&json).expect_err("1プロファイルのルール数上限超過は拒否されるはず");
+        assert!(matches!(err, ProfileStoreError::ImportTooLarge(_)));
+    }
+
+    #[test]
+    fn check_import_size_limits_rejects_total_rules_over_the_aggregate_cap_even_when_each_profile_is_under_the_per_profile_cap()
+     {
+        // 各プロファイル単体はMAX_RULES_PER_PROFILE未満でも、合計がMAX_TOTAL_RULES_PER_IMPORTを
+        // 超える場合は拒否されることを確認する(1プロファイルあたりの上限だけでは防げない経路)。
+        let rules_per_profile = MAX_RULES_PER_PROFILE - 1;
+        let profile_count = MAX_TOTAL_RULES_PER_IMPORT / rules_per_profile + 2;
+        let rules: Vec<serde_json::Value> = (0..rules_per_profile).map(|_| serde_json::json!({})).collect();
+        let profiles: Vec<serde_json::Value> = (0..profile_count)
+            .map(|i| serde_json::json!({"profile_name": format!("p{i}"), "rules": rules}))
+            .collect();
+        let json = serde_json::to_vec(&serde_json::json!({"kind": "all", "profiles": profiles})).unwrap();
+
+        let err = check_import_size_limits(&json).expect_err("合計ルール数上限超過は拒否されるはず");
+        assert!(matches!(err, ProfileStoreError::ImportTooLarge(_)));
+    }
+
+    #[test]
+    fn check_import_size_limits_allows_reasonably_sized_imports() {
+        let rules: Vec<serde_json::Value> = (0..10).map(|_| serde_json::json!({})).collect();
+        let json = serde_json::to_vec(&serde_json::json!({"kind": "single", "profile": {"rules": rules}})).unwrap();
+
+        check_import_size_limits(&json).expect("通常規模のインポートは許可されるはず");
+    }
+
+    // 敵対的検証で発覚: kind:"single"のペイロードに空の"profiles":[]を1つ混ぜるだけで、
+    // 実際に使われる"profile"(単数)側のルール数チェックが丸ごとすり抜けられていた
+    // (実際のExportPayloadデシリアライズは"kind"タグでのみ判別し、余分な"profiles"
+    // キーは無視するため)。この具体的な回避パターンを固定する回帰テスト。
+    #[test]
+    fn check_import_size_limits_is_not_fooled_by_a_decoy_profiles_key_on_a_single_payload() {
+        let rules: Vec<serde_json::Value> =
+            (0..(MAX_RULES_PER_PROFILE + 1)).map(|_| serde_json::json!({})).collect();
+        let json = serde_json::to_vec(&serde_json::json!({
+            "kind": "single",
+            "profile": {"rules": rules},
+            "profiles": [],
+        }))
+        .unwrap();
+
+        let err = check_import_size_limits(&json)
+            .expect_err("kind:singleでは\"profiles\"デコイに惑わされず\"profile\"側を見るはず");
+        assert!(matches!(err, ProfileStoreError::ImportTooLarge(_)));
+    }
+
+    #[test]
+    fn preview_import_rejects_a_profile_with_too_many_rules_before_reaching_the_type_checked_deserialize() {
+        let (_dir, paths) = temp_paths();
+        init_at(&paths).unwrap();
+        let store = ProfileStore::open_at(&paths).unwrap();
+
+        let payload = bulk::ExportPayload::Single {
+            format_version: bulk::CURRENT_FORMAT_VERSION,
+            profile: bulk::ExportedProfile {
+                is_favorite: false,
+                tags: Vec::new(),
+                profile: profile_with_n_rules("big", MAX_RULES_PER_PROFILE + 1),
+            },
+        };
+        let json = serde_json::to_vec(&payload).unwrap();
+        let encrypted = export::encrypt_for_export(&json, passphrase("pw")).unwrap();
+
+        let err =
+            store.preview_import(&encrypted, passphrase("pw")).expect_err("ルール数上限超過は拒否されるはず");
+        assert!(matches!(err, ProfileStoreError::ImportTooLarge(_)));
     }
 
     #[test]

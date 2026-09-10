@@ -35,4 +35,6 @@ pub enum CliError {
     PassphraseMismatch,
     #[error("全体インポートの確認には対話的な入力が必要です。非対話環境では--yesを指定してください")]
     NonInteractiveImportNeedsYesFlag,
+    #[error("{path}のルール数({count}件)が上限({limit}件)を超えています")]
+    TooManyRulesInJson { path: PathBuf, count: usize, limit: usize },
 }
