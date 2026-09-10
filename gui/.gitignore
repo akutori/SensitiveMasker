@@ -29,5 +29,14 @@ storybook-static
 # tsconfig.node.json(composite)のインクリメンタルビルドキャッシュ
 *.tsbuildinfo
 
+# `tsc -b`を型チェック目的で実行すると、tsconfig.node.json配下のファイルに
+# 副次的に生成される(実行時はvite/wdioがソースの.tsを直接読むため未使用)
+e2e/*.spec.js
+e2e/*.spec.d.ts
+/vite.config.js
+/vite.config.d.ts
+/wdio.conf.js
+/wdio.conf.d.ts
+
 # TanStack Routerが自動生成するルートツリー
 src/routeTree.gen.ts

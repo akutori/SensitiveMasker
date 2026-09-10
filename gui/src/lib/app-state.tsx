@@ -1,6 +1,7 @@
 import { createContext, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 import type { RuleListItem } from "@/components/rule-edit-screen";
+import type { ImportPreviewRow } from "@/components/import-confirm-dialog";
 import { DEMO_SAMPLE_TEXT, PROFILE_TEMPLATE_RULES } from "./demo-seed-data";
 import { maskText } from "./masking-ipc";
 import {
@@ -44,15 +45,20 @@ export interface Tag {
   name: string;
 }
 
-export function resolveUniqueName(baseName: string, existingNames: string[]): string {
-  if (!existingNames.includes(baseName)) return baseName;
-  let candidate = `${baseName} (インポート)`;
-  let suffix = 2;
-  while (existingNames.includes(candidate)) {
-    candidate = `${baseName} (インポート ${suffix})`;
-    suffix += 1;
+// インポート対象ファイルのネイティブダイアログ用フィルタ。エクスポート保存
+// ダイアログとも共用する(拡張子は常に.smx)。
+export const SMX_FILE_FILTERS = [{ name: "SensitiveMasker Export", extensions: ["smx"] }];
+
+export function toImportPreviewRows(preview: ImportPreviewDto): ImportPreviewRow[] {
+  if (preview.kind === "single") {
+    return [{ profileName: preview.name, result: "新規プロファイルとして追加されます" }];
   }
-  return candidate;
+  return preview.entries.map((entry) => ({
+    profileName: entry.original_name,
+    result: entry.renamed
+      ? `名前が重複するため「${entry.resolved_name}」として追加されます`
+      : "新規プロファイルとして追加されます",
+  }));
 }
 
 export interface AppStateValue {

@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
+import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import { toast } from "sonner";
 import { MainScreen } from "@/components/main-screen";
 import { ProfileNameDialog } from "@/components/profile-name-dialog";
@@ -8,15 +9,13 @@ import { ConfirmDialog } from "@/components/confirm-dialog";
 import { MatchCountConfirmDialog, type MatchCountRow } from "@/components/match-count-confirm-dialog";
 import { ImportPassphraseDialog } from "@/components/import-passphrase-dialog";
 import { ImportConfirmDialog, type ImportPreviewRow } from "@/components/import-confirm-dialog";
-import { useAppState, resolveUniqueName } from "@/lib/app-state";
+import { useAppState, SMX_FILE_FILTERS, toImportPreviewRows } from "@/lib/app-state";
 import { maskText } from "@/lib/masking-ipc";
 
 export const Route = createFileRoute("/")({
   component: MainRoute,
 });
 
-const DEMO_IMPORT_FILE_NAME = "sip_profile_export.smexport";
-const DEMO_IMPORT_PROFILE_NAME = "SIP監視用(インポート)";
 const DEMO_LOAD_FILE_PATH = "C:\\Users\\example_user\\logs\\debug_console_output.log";
 const DEMO_LOAD_FILE_CONTENT = "着信: 0000-000-000\nSIP URI: sip:bob@203.0.113.20";
 
@@ -26,8 +25,8 @@ type DialogState =
   | { kind: "fileImportChoice" }
   | { kind: "overwriteConfirm" }
   | { kind: "matchCountConfirm"; rows: MatchCountRow[] }
-  | { kind: "importPassphrase" }
-  | { kind: "importConfirm"; rows: ImportPreviewRow[]; resolvedProfileName: string };
+  | { kind: "importPassphrase"; sourcePath: string; fileName: string }
+  | { kind: "importConfirm"; rows: ImportPreviewRow[] };
 
 function MainRoute() {
   const navigate = useNavigate();
@@ -59,10 +58,16 @@ function MainRoute() {
         activeProfileId={activeProfileId}
         onActiveProfileIdChange={(id) => appState.setActiveProfileId(id)}
         onOpenProfileList={() => navigate({ to: "/profiles" })}
-        onImport={() => {
+        onImport={async () => {
+          const path = await openFileDialog({ multiple: false, filters: SMX_FILE_FILTERS });
+          if (!path || Array.isArray(path)) return;
           setPassphrase("");
           setPassphraseError(undefined);
-          setDialog({ kind: "importPassphrase" });
+          setDialog({
+            kind: "importPassphrase",
+            sourcePath: path,
+            fileName: path.split(/[\\/]/).pop() ?? path,
+          });
         }}
         onReload={() => console.log("reload profile")}
         onNewProfile={() => {
@@ -160,35 +165,28 @@ function MainRoute() {
       <ImportPassphraseDialog
         open={dialog.kind === "importPassphrase"}
         onOpenChange={(open) => !open && closeDialog()}
-        fileName={DEMO_IMPORT_FILE_NAME}
+        fileName={dialog.kind === "importPassphrase" ? dialog.fileName : ""}
         passphrase={passphrase}
         onPassphraseChange={(value) => {
           setPassphrase(value);
           setPassphraseError(undefined);
         }}
         errorMessage={passphraseError}
-        onConfirm={() => {
-          if (passphrase.trim().length === 0) {
-            setPassphraseError("パスフレーズが正しくありません");
-            return;
+        onConfirm={async () => {
+          if (dialog.kind !== "importPassphrase") return;
+          const { sourcePath } = dialog;
+          try {
+            const preview = await appState.previewImport(sourcePath, passphrase);
+            // await中にユーザーがダイアログを閉じた、または別のファイルで
+            // インポートをやり直している場合は上書きしない。
+            setDialog((current) =>
+              current.kind === "importPassphrase" && current.sourcePath === sourcePath
+                ? { kind: "importConfirm", rows: toImportPreviewRows(preview) }
+                : current
+            );
+          } catch {
+            setPassphraseError("パスフレーズが誤っているか、対応していないファイル形式です");
           }
-          const resolvedProfileName = resolveUniqueName(
-            DEMO_IMPORT_PROFILE_NAME,
-            profiles.map((p) => p.name)
-          );
-          setDialog({
-            kind: "importConfirm",
-            resolvedProfileName,
-            rows: [
-              {
-                profileName: DEMO_IMPORT_PROFILE_NAME,
-                result:
-                  resolvedProfileName === DEMO_IMPORT_PROFILE_NAME
-                    ? "新規プロファイルとして追加されます"
-                    : `名前が重複するため「${resolvedProfileName}」として追加されます`,
-              },
-            ],
-          });
         }}
       />
 
@@ -197,10 +195,14 @@ function MainRoute() {
         onOpenChange={(open) => !open && closeDialog()}
         rows={dialog.kind === "importConfirm" ? dialog.rows : []}
         onConfirm={async () => {
-          if (dialog.kind === "importConfirm") {
-            await appState.createProfile(dialog.resolvedProfileName);
+          try {
+            await appState.commitImport();
+          } catch {
+            // 失敗時のトースト表示はappState側のreportAndRethrowが行うため、
+            // ここでの追加対応は不要(catchが無いとこのPromise自体がunhandledになる)。
+          } finally {
+            closeDialog();
           }
-          closeDialog();
         }}
       />
     </>

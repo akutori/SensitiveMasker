@@ -9,8 +9,7 @@ import { TagManagementDialog } from "@/components/tag-management-dialog";
 import { ExportModal } from "@/components/export-modal";
 import { ImportPassphraseDialog } from "@/components/import-passphrase-dialog";
 import { ImportConfirmDialog, type ImportPreviewRow } from "@/components/import-confirm-dialog";
-import { useAppState } from "@/lib/app-state";
-import type { ImportPreviewDto } from "@/lib/profile-ipc";
+import { useAppState, SMX_FILE_FILTERS, toImportPreviewRows } from "@/lib/app-state";
 
 export const Route = createFileRoute("/profiles")({
   component: ProfilesRoute,
@@ -22,7 +21,6 @@ const SORT_OPTIONS: SortOption[] = [
   { value: "name_asc", label: "名前順" },
 ];
 
-const EXPORT_FILE_FILTERS = [{ name: "SensitiveMasker Export", extensions: ["smx"] }];
 // コピー後この時間が経過したら、クリップボードの中身がまだこのパスフレーズの
 // ままであることを確認した上でクリアする(モックアップ6の要件)。
 const CLIPBOARD_CLEAR_DELAY_MS = 30_000;
@@ -41,18 +39,6 @@ function sortProfiles<T extends { name: string; updatedAt: string }>(
 
 function generatePassphrase(): string {
   return crypto.randomUUID().replace(/-/g, "").slice(0, 20);
-}
-
-function toImportPreviewRows(preview: ImportPreviewDto): ImportPreviewRow[] {
-  if (preview.kind === "single") {
-    return [{ profileName: preview.name, result: "新規プロファイルとして追加されます" }];
-  }
-  return preview.entries.map((entry) => ({
-    profileName: entry.original_name,
-    result: entry.renamed
-      ? `名前が重複するため「${entry.resolved_name}」として追加されます`
-      : "新規プロファイルとして追加されます",
-  }));
 }
 
 type DialogState =
@@ -168,7 +154,7 @@ function ProfilesRoute() {
           setDialog({ kind: "export", target: "全プロファイル", profileId: null });
         }}
         onImport={async () => {
-          const path = await openFileDialog({ multiple: false, filters: EXPORT_FILE_FILTERS });
+          const path = await openFileDialog({ multiple: false, filters: SMX_FILE_FILTERS });
           if (!path || Array.isArray(path)) return;
           setImportPassphrase("");
           setImportPassphraseError(undefined);
@@ -304,7 +290,7 @@ function ProfilesRoute() {
           if (dialog.kind !== "export") return;
           const { profileId } = dialog;
           const defaultPath = `${profileId === null ? "sensitivemasker_all" : dialog.target}.smx`;
-          const destPath = await saveFileDialog({ defaultPath, filters: EXPORT_FILE_FILTERS });
+          const destPath = await saveFileDialog({ defaultPath, filters: SMX_FILE_FILTERS });
           if (!destPath) return;
           try {
             if (profileId === null) await appState.exportAll(passphrase, destPath);
@@ -332,9 +318,16 @@ function ProfilesRoute() {
         errorMessage={importPassphraseError}
         onConfirm={async () => {
           if (dialog.kind !== "importPassphrase") return;
+          const { sourcePath } = dialog;
           try {
-            const preview = await appState.previewImport(dialog.sourcePath, importPassphrase);
-            setDialog({ kind: "importConfirm", rows: toImportPreviewRows(preview) });
+            const preview = await appState.previewImport(sourcePath, importPassphrase);
+            // await中にユーザーがダイアログを閉じた、または別のファイルで
+            // インポートをやり直している場合は上書きしない。
+            setDialog((current) =>
+              current.kind === "importPassphrase" && current.sourcePath === sourcePath
+                ? { kind: "importConfirm", rows: toImportPreviewRows(preview) }
+                : current
+            );
           } catch {
             setImportPassphraseError("パスフレーズが誤っているか、対応していないファイル形式です");
           }
@@ -348,10 +341,13 @@ function ProfilesRoute() {
         onConfirm={async () => {
           try {
             await appState.commitImport();
+          } catch {
+            // 失敗時のトースト表示はappState側のreportAndRethrowが行うため、
+            // ここでの追加対応は不要(catchが無いとこのPromise自体がunhandledになる)。
           } finally {
-            // 成否に関わらずここで確認は終わる(失敗時の通知はappState側のtoastが行う。
-            // 確認済みのpreviewはcommit呼び出しの成否に関わらずサーバー側で消費済みのため、
-            // このダイアログを開いたままにしても同じ内容で再試行はできない)。
+            // 成否に関わらずここで確認は終わる。確認済みのpreviewはcommit呼び出しの
+            // 成否に関わらずサーバー側で消費済みのため、このダイアログを開いたままに
+            // しても同じ内容で再試行はできない。
             closeDialog();
           }
         }}
