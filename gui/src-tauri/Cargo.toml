@@ -28,8 +28,12 @@ profile-store = { version = "0.1.0", path = "../../crates/profile-store" }
 # 配布用ビルドに絶対に含めない(optional依存にしてデフォルトのコンパイル対象から外す)。
 tauri-plugin-wdio = { version = "1.4.0", optional = true }
 tauri-plugin-wdio-webdriver = { version = "1.4.0", optional = true }
+tauri-plugin-dialog = "2.7.3"
 
 [features]
 # 依存自体をデフォルトから外すためのfeature。有効化してもlib.rs側でさらに
 # debug_assertionsも要求するため、release buildでは万一指定されても無効化される。
 e2e-testing = ["dep:tauri-plugin-wdio", "dep:tauri-plugin-wdio-webdriver"]
+
+[dev-dependencies]
+tempfile = "3.27.0"

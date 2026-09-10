@@ -1,3 +1,4 @@
+mod export_import;
 mod masking;
 mod profiles;
 
@@ -6,8 +7,10 @@ pub fn run() {
     #[allow(unused_mut)]
     let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .manage(masking::MaskingState::default())
-        .manage(profiles::ProfileStoreState::default());
+        .manage(profiles::ProfileStoreState::default())
+        .manage(export_import::PendingImportState::default());
 
     // e2e-testing feature + debug buildの両方を要求する(release buildでは
     // featureを指定しても依存自体がコンパイル対象に入らないためこのブロック自体が
@@ -39,6 +42,10 @@ pub fn run() {
             profiles::rename_tag,
             profiles::delete_tag,
             profiles::set_profile_tags,
+            export_import::export_profile_to_file,
+            export_import::export_all_to_file,
+            export_import::preview_import,
+            export_import::commit_pending_import,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

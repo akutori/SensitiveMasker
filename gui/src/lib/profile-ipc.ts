@@ -95,6 +95,36 @@ export async function setProfileTags(profileName: string, tags: string[]): Promi
   await invoke("set_profile_tags", { profileName, tags });
 }
 
+export async function exportProfileToFile(
+  name: string,
+  passphrase: string,
+  destPath: string
+): Promise<void> {
+  await invoke("export_profile_to_file", { name, passphrase, destPath });
+}
+
+export async function exportAllToFile(passphrase: string, destPath: string): Promise<void> {
+  await invoke("export_all_to_file", { passphrase, destPath });
+}
+
+export interface ImportEntryDto {
+  original_name: string;
+  resolved_name: string;
+  renamed: boolean;
+}
+
+export type ImportPreviewDto =
+  | { kind: "single"; name: string }
+  | { kind: "all"; active_profile_name: string | null; entries: ImportEntryDto[] };
+
+export async function previewImport(sourcePath: string, passphrase: string): Promise<ImportPreviewDto> {
+  return invoke<ImportPreviewDto>("preview_import", { sourcePath, passphrase });
+}
+
+export async function commitPendingImport(): Promise<void> {
+  await invoke("commit_pending_import");
+}
+
 // フォーカスの有無に関わらず、変更を検知したウィンドウ側で最新状態を取り直すためのイベント。
 // 今は単一ウィンドウだが、将来の別ウィンドウ化でそのまま使う想定(PoCで検証済み)。
 export function onProfilesChanged(handler: () => void): Promise<() => void> {

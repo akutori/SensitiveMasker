@@ -7,6 +7,15 @@ use tauri::Emitter;
 #[derive(Default)]
 pub struct ProfileStoreState(Mutex<Option<ProfileStore>>);
 
+impl ProfileStoreState {
+    // export_import.rsのテストが実ストア入りの状態を組み立てるためのもの
+    // (フィールド自体は非公開のため)。
+    #[cfg(test)]
+    pub(crate) fn with_store_for_test(store: ProfileStore) -> Self {
+        Self(Mutex::new(Some(store)))
+    }
+}
+
 /// SENSITIVEMASKER_DATA_DIRが設定されていればそこを、無ければOS標準の
 /// データディレクトリを使う。E2Eテストが実ユーザーの鍵/DBを書き換えないようにする
 /// ためのdebug build専用の迂回路(release buildではこの分岐自体が存在しない)。
@@ -33,7 +42,7 @@ fn resolve_paths() -> Result<AppPaths, String> {
 
 // tauri::Stateに依存しない形にして単体テスト可能にする(masking.rsのmask_text_with_stores
 // と同じ方針)。呼び出し側は&tauri::State<'_, ProfileStoreState>のままDeref経由で渡せる。
-fn with_store<T>(
+pub(crate) fn with_store<T>(
     state: &ProfileStoreState,
     f: impl FnOnce(&mut ProfileStore) -> Result<T, ProfileStoreError>,
 ) -> Result<T, String> {

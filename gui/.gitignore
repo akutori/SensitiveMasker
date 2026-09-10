@@ -26,5 +26,8 @@ dist-ssr
 *storybook.log
 storybook-static
 
+# tsconfig.node.json(composite)のインクリメンタルビルドキャッシュ
+*.tsbuildinfo
+
 # TanStack Routerが自動生成するルートツリー
 src/routeTree.gen.ts

@@ -4,10 +4,13 @@ import type { RuleListItem } from "@/components/rule-edit-screen";
 import { DEMO_SAMPLE_TEXT, PROFILE_TEMPLATE_RULES } from "./demo-seed-data";
 import { maskText } from "./masking-ipc";
 import {
+  commitPendingImport as ipcCommitPendingImport,
   createProfile as ipcCreateProfile,
   createTag as ipcCreateTag,
   deleteProfile as ipcDeleteProfile,
   deleteTag as ipcDeleteTag,
+  exportAllToFile as ipcExportAllToFile,
+  exportProfileToFile as ipcExportProfileToFile,
   getProfile as ipcGetProfile,
   initializeStore,
   isStoreInitialized,
@@ -16,11 +19,13 @@ import {
   onProfilesChanged,
   onTagsChanged,
   openStore,
+  previewImport as ipcPreviewImport,
   renameTag as ipcRenameTag,
   setActiveProfile as ipcSetActiveProfile,
   setFavorite as ipcSetFavorite,
   setProfileTags as ipcSetProfileTags,
   updateProfile as ipcUpdateProfile,
+  type ImportPreviewDto,
   type ProfileDetail,
 } from "./profile-ipc";
 
@@ -70,6 +75,10 @@ export interface AppStateValue {
     meta: { name: string; description: string; rules: RuleListItem[]; tags?: string[] }
   ) => Promise<void>;
   setProfileTags: (id: string, tags: string[]) => Promise<void>;
+  exportProfile: (id: string, passphrase: string, destPath: string) => Promise<void>;
+  exportAll: (passphrase: string, destPath: string) => Promise<void>;
+  previewImport: (sourcePath: string, passphrase: string) => Promise<ImportPreviewDto>;
+  commitImport: () => Promise<void>;
 
   tags: Tag[];
   createTag: (name: string) => Promise<void>;
@@ -276,6 +285,25 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
           });
           tagUpdateQueues.current.set(id, next);
           return next;
+        }),
+      exportProfile: (id, passphrase, destPath) =>
+        reportAndRethrow("エクスポートに失敗しました", async () => {
+          const name = findNameById(id);
+          if (!name) throw new Error(`profile not found: ${id}`);
+          await ipcExportProfileToFile(name, passphrase, destPath);
+        }),
+      exportAll: (passphrase, destPath) =>
+        reportAndRethrow("エクスポートに失敗しました", async () => {
+          await ipcExportAllToFile(passphrase, destPath);
+        }),
+      // ここは意図的にreportAndRethrow(汎用トースト)を使わない: 誤ったパスフレーズは
+      // 想定内の入力ミスであり、モックアップ通り呼び出し元(パスフレーズ入力欄)で
+      // インラインエラーとして表示する。
+      previewImport: (sourcePath, passphrase) => ipcPreviewImport(sourcePath, passphrase),
+      commitImport: () =>
+        reportAndRethrow("インポートに失敗しました", async () => {
+          await ipcCommitPendingImport();
+          await Promise.all([refreshProfiles(), refreshTags()]);
         }),
 
       tags,

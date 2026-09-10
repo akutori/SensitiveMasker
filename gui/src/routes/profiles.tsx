@@ -1,5 +1,7 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
+import { open as openFileDialog, save as saveFileDialog } from "@tauri-apps/plugin-dialog";
+import { toast } from "sonner";
 import { ProfileManagementScreen, type SortOption } from "@/components/profile-management-screen";
 import { ProfileNameDialog } from "@/components/profile-name-dialog";
 import { TemplateSelectDialog, DEFAULT_TEMPLATES } from "@/components/template-select-dialog";
@@ -7,7 +9,8 @@ import { TagManagementDialog } from "@/components/tag-management-dialog";
 import { ExportModal } from "@/components/export-modal";
 import { ImportPassphraseDialog } from "@/components/import-passphrase-dialog";
 import { ImportConfirmDialog, type ImportPreviewRow } from "@/components/import-confirm-dialog";
-import { useAppState, resolveUniqueName } from "@/lib/app-state";
+import { useAppState } from "@/lib/app-state";
+import type { ImportPreviewDto } from "@/lib/profile-ipc";
 
 export const Route = createFileRoute("/profiles")({
   component: ProfilesRoute,
@@ -19,8 +22,10 @@ const SORT_OPTIONS: SortOption[] = [
   { value: "name_asc", label: "名前順" },
 ];
 
-const DEMO_IMPORT_FILE_NAME = "sip_profile_export.smexport";
-const DEMO_IMPORT_PROFILE_NAME = "SIP監視用(インポート)";
+const EXPORT_FILE_FILTERS = [{ name: "SensitiveMasker Export", extensions: ["smx"] }];
+// コピー後この時間が経過したら、クリップボードの中身がまだこのパスフレーズの
+// ままであることを確認した上でクリアする(モックアップ6の要件)。
+const CLIPBOARD_CLEAR_DELAY_MS = 30_000;
 
 function sortProfiles<T extends { name: string; updatedAt: string }>(
   profiles: T[],
@@ -34,8 +39,20 @@ function sortProfiles<T extends { name: string; updatedAt: string }>(
   return sorted;
 }
 
-function generateDemoPassphrase(): string {
+function generatePassphrase(): string {
   return crypto.randomUUID().replace(/-/g, "").slice(0, 20);
+}
+
+function toImportPreviewRows(preview: ImportPreviewDto): ImportPreviewRow[] {
+  if (preview.kind === "single") {
+    return [{ profileName: preview.name, result: "新規プロファイルとして追加されます" }];
+  }
+  return preview.entries.map((entry) => ({
+    profileName: entry.original_name,
+    result: entry.renamed
+      ? `名前が重複するため「${entry.resolved_name}」として追加されます`
+      : "新規プロファイルとして追加されます",
+  }));
 }
 
 type DialogState =
@@ -44,9 +61,9 @@ type DialogState =
   | { kind: "templateSelect" }
   | { kind: "profileNameFromTemplate"; templateValue: string }
   | { kind: "tagManagement" }
-  | { kind: "export"; target: string }
-  | { kind: "importPassphrase" }
-  | { kind: "importConfirm"; rows: ImportPreviewRow[]; resolvedProfileName: string };
+  | { kind: "export"; target: string; profileId: string | null }
+  | { kind: "importPassphrase"; sourcePath: string; fileName: string }
+  | { kind: "importConfirm"; rows: ImportPreviewRow[] };
 
 function ProfilesRoute() {
   const navigate = useNavigate();
@@ -72,8 +89,30 @@ function ProfilesRoute() {
   const [passphrase, setPassphrase] = useState("");
   const [importPassphrase, setImportPassphrase] = useState("");
   const [importPassphraseError, setImportPassphraseError] = useState<string | undefined>();
+  const clipboardClearTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const closeDialog = () => setDialog({ kind: "none" });
+
+  const cancelClipboardClear = () => {
+    if (clipboardClearTimer.current) {
+      clearTimeout(clipboardClearTimer.current);
+      clipboardClearTimer.current = null;
+    }
+  };
+
+  const copyPassphraseWithAutoClear = (value: string) => {
+    navigator.clipboard.writeText(value).catch(() => {});
+    cancelClipboardClear();
+    clipboardClearTimer.current = setTimeout(() => {
+      // 書き込み後に他の内容が上書きされている場合は消さない(意図しないクリアを防ぐ)。
+      navigator.clipboard
+        .readText()
+        .then((current) => {
+          if (current === value) return navigator.clipboard.writeText("");
+        })
+        .catch(() => {});
+    }, CLIPBOARD_CLEAR_DELAY_MS);
+  };
 
   const confirmNewProfileName = async (templateForSeed?: string) => {
     if (profiles.some((p) => p.name === draftName)) {
@@ -125,13 +164,19 @@ function ProfilesRoute() {
           setDialog({ kind: "tagManagement" });
         }}
         onExportAll={() => {
-          setPassphrase(generateDemoPassphrase());
-          setDialog({ kind: "export", target: "全プロファイル" });
+          setPassphrase(generatePassphrase());
+          setDialog({ kind: "export", target: "全プロファイル", profileId: null });
         }}
-        onImport={() => {
+        onImport={async () => {
+          const path = await openFileDialog({ multiple: false, filters: EXPORT_FILE_FILTERS });
+          if (!path || Array.isArray(path)) return;
           setImportPassphrase("");
           setImportPassphraseError(undefined);
-          setDialog({ kind: "importPassphrase" });
+          setDialog({
+            kind: "importPassphrase",
+            sourcePath: path,
+            fileName: path.split(/[\\/]/).pop() ?? path,
+          });
         }}
         onToggleFavorite={(id) => appState.toggleFavorite(id)}
         onRowClick={(id) => appState.setActiveProfileId(id)}
@@ -139,8 +184,8 @@ function ProfilesRoute() {
         onDuplicateProfile={(id, newName) => appState.duplicateProfile(id, newName)}
         onExportProfile={(id) => {
           const target = profiles.find((p) => p.id === id)?.name ?? "";
-          setPassphrase(generateDemoPassphrase());
-          setDialog({ kind: "export", target });
+          setPassphrase(generatePassphrase());
+          setDialog({ kind: "export", target, profileId: id });
         }}
         onDeleteProfile={(id) => appState.deleteProfile(id)}
         onProfileTagsChange={(id, tags) => {
@@ -248,48 +293,51 @@ function ProfilesRoute() {
         onOpenChange={(open) => !open && closeDialog()}
         target={dialog.kind === "export" ? dialog.target : ""}
         passphrase={passphrase}
-        onCopy={() => {
-          navigator.clipboard.writeText(passphrase).catch(() => {});
+        onCopy={() => copyPassphraseWithAutoClear(passphrase)}
+        onRegenerate={() => {
+          // 保留中のクリアタイマーは新しいパスフレーズには無関係(値を比較して
+          // クリアするため無くても安全だが、無駄なタイマーを積まないための整理)。
+          cancelClipboardClear();
+          setPassphrase(generatePassphrase());
         }}
-        onRegenerate={() => setPassphrase(generateDemoPassphrase())}
-        onExport={() => {
-          console.log("export with passphrase", passphrase);
-          closeDialog();
+        onExport={async () => {
+          if (dialog.kind !== "export") return;
+          const { profileId } = dialog;
+          const defaultPath = `${profileId === null ? "sensitivemasker_all" : dialog.target}.smx`;
+          const destPath = await saveFileDialog({ defaultPath, filters: EXPORT_FILE_FILTERS });
+          if (!destPath) return;
+          try {
+            if (profileId === null) await appState.exportAll(passphrase, destPath);
+            else await appState.exportProfile(profileId, passphrase, destPath);
+            toast.success("エクスポートが完了しました");
+            // クリップボードの自動クリアはダイアログを閉じても継続する(コピーした
+            // パスフレーズを他所に控える目的で閉じた場合もクリアされるべきため)。
+            closeDialog();
+          } catch {
+            // 失敗の通知はappState側のtoastが行う。ダイアログは開いたままにし、
+            // 別の保存先で再試行できるようにする。
+          }
         }}
       />
 
       <ImportPassphraseDialog
         open={dialog.kind === "importPassphrase"}
         onOpenChange={(open) => !open && closeDialog()}
-        fileName={DEMO_IMPORT_FILE_NAME}
+        fileName={dialog.kind === "importPassphrase" ? dialog.fileName : ""}
         passphrase={importPassphrase}
         onPassphraseChange={(value) => {
           setImportPassphrase(value);
           setImportPassphraseError(undefined);
         }}
         errorMessage={importPassphraseError}
-        onConfirm={() => {
-          if (importPassphrase.trim().length === 0) {
-            setImportPassphraseError("パスフレーズが正しくありません");
-            return;
+        onConfirm={async () => {
+          if (dialog.kind !== "importPassphrase") return;
+          try {
+            const preview = await appState.previewImport(dialog.sourcePath, importPassphrase);
+            setDialog({ kind: "importConfirm", rows: toImportPreviewRows(preview) });
+          } catch {
+            setImportPassphraseError("パスフレーズが誤っているか、対応していないファイル形式です");
           }
-          const resolvedProfileName = resolveUniqueName(
-            DEMO_IMPORT_PROFILE_NAME,
-            profiles.map((p) => p.name)
-          );
-          setDialog({
-            kind: "importConfirm",
-            resolvedProfileName,
-            rows: [
-              {
-                profileName: DEMO_IMPORT_PROFILE_NAME,
-                result:
-                  resolvedProfileName === DEMO_IMPORT_PROFILE_NAME
-                    ? "新規プロファイルとして追加されます"
-                    : `名前が重複するため「${resolvedProfileName}」として追加されます`,
-              },
-            ],
-          });
         }}
       />
 
@@ -298,10 +346,14 @@ function ProfilesRoute() {
         onOpenChange={(open) => !open && closeDialog()}
         rows={dialog.kind === "importConfirm" ? dialog.rows : []}
         onConfirm={async () => {
-          if (dialog.kind === "importConfirm") {
-            await appState.createProfile(dialog.resolvedProfileName);
+          try {
+            await appState.commitImport();
+          } finally {
+            // 成否に関わらずここで確認は終わる(失敗時の通知はappState側のtoastが行う。
+            // 確認済みのpreviewはcommit呼び出しの成否に関わらずサーバー側で消費済みのため、
+            // このダイアログを開いたままにしても同じ内容で再試行はできない)。
+            closeDialog();
           }
-          closeDialog();
         }}
       />
     </>
