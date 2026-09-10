@@ -1,11 +1,35 @@
 use std::sync::Mutex;
 
 use masking_core::RuleProfile;
-use profile_store::{ProfileStore, ProfileStoreError, ProfileSummary};
+use profile_store::{AppPaths, ProfileStore, ProfileStoreError, ProfileSummary};
 use tauri::Emitter;
 
 #[derive(Default)]
 pub struct ProfileStoreState(Mutex<Option<ProfileStore>>);
+
+/// SENSITIVEMASKER_DATA_DIRが設定されていればそこを、無ければOS標準の
+/// データディレクトリを使う。E2Eテストが実ユーザーの鍵/DBを書き換えないようにする
+/// ためのdebug build専用の迂回路(release buildではこの分岐自体が存在しない)。
+/// std::env::set_varはプロセス全体に影響しテスト間で競合しうるため、実際の環境変数
+/// 読み取りとロジック本体を分離し、後者だけを引数渡しでテストできるようにする
+/// (with_storeをtauri::State非依存にしたのと同じ方針)。
+#[cfg(debug_assertions)]
+fn resolve_paths_with_override(override_dir: Option<String>) -> Result<AppPaths, String> {
+    match override_dir {
+        Some(dir) => Ok(AppPaths::at(dir)),
+        None => AppPaths::resolve().map_err(|e| e.to_string()),
+    }
+}
+
+#[cfg(debug_assertions)]
+fn resolve_paths() -> Result<AppPaths, String> {
+    resolve_paths_with_override(std::env::var("SENSITIVEMASKER_DATA_DIR").ok())
+}
+
+#[cfg(not(debug_assertions))]
+fn resolve_paths() -> Result<AppPaths, String> {
+    AppPaths::resolve().map_err(|e| e.to_string())
+}
 
 // tauri::Stateに依存しない形にして単体テスト可能にする(masking.rsのmask_text_with_stores
 // と同じ方針)。呼び出し側は&tauri::State<'_, ProfileStoreState>のままDeref経由で渡せる。
@@ -20,11 +44,13 @@ fn with_store<T>(
 
 #[tauri::command]
 pub async fn is_store_initialized() -> Result<bool, String> {
-    profile_store::is_initialized().map_err(|e| e.to_string())
+    let paths = resolve_paths()?;
+    profile_store::is_initialized_at(&paths).map_err(|e| e.to_string())
 }
 
 fn open_into_state(state: &ProfileStoreState) -> Result<(), String> {
-    let store = ProfileStore::open().map_err(|e| e.to_string())?;
+    let paths = resolve_paths()?;
+    let store = ProfileStore::open_at(&paths).map_err(|e| e.to_string())?;
     *state.0.lock().unwrap_or_else(|e| e.into_inner()) = Some(store);
     Ok(())
 }
@@ -41,7 +67,8 @@ pub async fn open_store(state: tauri::State<'_, ProfileStoreState>) -> Result<()
 /// そのままProfileStoreStateに格納する(open_storeを別途呼ぶ必要はない)。
 #[tauri::command]
 pub async fn initialize_store(state: tauri::State<'_, ProfileStoreState>) -> Result<(), String> {
-    profile_store::init().map_err(|e| e.to_string())?;
+    let paths = resolve_paths()?;
+    profile_store::init_at(&paths).map_err(|e| e.to_string())?;
     open_into_state(&state)
 }
 
@@ -179,5 +206,22 @@ mod tests {
         let state = ProfileStoreState::default();
         let err = with_store(&state, |store| store.list_profiles()).expect_err("未初期化のはず");
         assert_eq!(err, ProfileStoreError::NotInitialized.to_string());
+    }
+
+    #[test]
+    fn resolve_paths_with_override_uses_given_directory_when_present() {
+        let paths = resolve_paths_with_override(Some("e2e-test-data".to_string()))
+            .expect("overrideありなら常に成功するはず");
+        let expected_base = std::path::Path::new("e2e-test-data");
+        assert_eq!(paths.key_path, expected_base.join("key.bin"));
+        assert_eq!(paths.db_path, expected_base.join("profiles.db"));
+    }
+
+    #[test]
+    fn resolve_paths_with_override_falls_back_to_os_data_dir_when_absent() {
+        let paths =
+            resolve_paths_with_override(None).expect("OS標準パスの解決自体は失敗しないはず");
+        assert!(paths.key_path.ends_with("key.bin"));
+        assert!(paths.db_path.ends_with("profiles.db"));
     }
 }
