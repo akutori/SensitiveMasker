@@ -1,6 +1,7 @@
 mod export_import;
 mod masking;
 mod profiles;
+mod tray;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -10,7 +11,12 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage(masking::MaskingState::default())
         .manage(profiles::ProfileStoreState::default())
-        .manage(export_import::PendingImportState::default());
+        .manage(export_import::PendingImportState::default())
+        .setup(|app| {
+            tray::setup(app)?;
+            Ok(())
+        })
+        .on_window_event(tray::handle_window_event);
 
     // e2e-testing feature + debug buildの両方を要求する(release buildでは
     // featureを指定しても依存自体がコンパイル対象に入らないためこのブロック自体が
