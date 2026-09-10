@@ -1,6 +1,7 @@
 import { useState } from "react";
 import type { Meta, StoryObj } from "@storybook/react-vite";
 import { Button } from "@/components/ui/button";
+import type { ImportRuleDto } from "@/lib/profile-ipc";
 import {
   ImportConfirmDialog,
   type ImportPreviewRow,
@@ -16,17 +17,85 @@ const meta = {
 export default meta;
 type Story = StoryObj<typeof meta>;
 
+const WORK_RULES: ImportRuleDto[] = [
+  {
+    name: "内線番号",
+    pattern_type: "literal",
+    pattern: "0120",
+    mode: "sequential",
+    fixed_value: null,
+    prefix: "EXT",
+    enabled: true,
+  },
+  {
+    name: "社内IPアドレス",
+    pattern_type: "regex",
+    pattern: "203\\.0\\.113\\.\\d{1,3}",
+    mode: "sequential",
+    fixed_value: null,
+    prefix: "IP",
+    enabled: true,
+  },
+];
+
+const PERSONAL_RULES: ImportRuleDto[] = [
+  {
+    name: "メールアドレス",
+    pattern_type: "regex",
+    pattern: "[\\w.+-]+@example\\.com",
+    mode: "fixed",
+    fixed_value: "[MASKED_EMAIL]",
+    prefix: null,
+    enabled: true,
+  },
+];
+
+// 無効ルールが薄く表示されることを確認するためのサンプル(旧パスワードルール)。
+const SIP_RULES: ImportRuleDto[] = [
+  {
+    name: "SIP URI",
+    pattern_type: "regex",
+    pattern: "sip:[\\w.]+@203\\.0\\.113\\.\\d{1,3}",
+    mode: "sequential",
+    fixed_value: null,
+    prefix: "SIP",
+    enabled: true,
+  },
+  {
+    name: "旧パスワードルール",
+    pattern_type: "literal",
+    pattern: "hunter2",
+    mode: "fixed",
+    fixed_value: "[PASSWORD]",
+    prefix: null,
+    enabled: false,
+  },
+];
+
+const SAMPLE_RULES: ImportRuleDto[] = [
+  {
+    name: "電話番号",
+    pattern_type: "literal",
+    pattern: "0120",
+    mode: "sequential",
+    fixed_value: null,
+    prefix: "TEL",
+    enabled: true,
+  },
+];
+
 const MULTIPLE_ROWS: ImportPreviewRow[] = [
-  { profileName: "work", result: "そのまま作成" },
-  { profileName: "personal", result: "そのまま作成" },
+  { profileName: "work", result: "そのまま作成", rules: WORK_RULES },
+  { profileName: "personal", result: "そのまま作成", rules: PERSONAL_RULES },
   {
     profileName: "SIP監視用",
     result: "'SIP監視用 (インポート)' としてリネーム(重複のため)",
+    rules: SIP_RULES,
   },
 ];
 
 const SINGLE_ROW: ImportPreviewRow[] = [
-  { profileName: "検証用サンプル", result: "そのまま作成" },
+  { profileName: "検証用サンプル", result: "そのまま作成", rules: SAMPLE_RULES },
 ];
 
 function DemoTrigger(props: { rows: ImportPreviewRow[]; label: string }) {

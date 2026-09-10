@@ -1,5 +1,6 @@
 use std::sync::Mutex;
 
+use masking_core::{Mode, PatternType, Rule, RuleProfile};
 use profile_store::{AllImportEntry, ImportPreview, SecretString};
 use tauri::Emitter;
 
@@ -15,6 +16,7 @@ pub struct PendingImportState(Mutex<Option<ImportPreview>>);
 pub enum ImportPreviewDto {
     Single {
         name: String,
+        rules: Vec<ImportRuleDto>,
     },
     All {
         active_profile_name: Option<String>,
@@ -27,23 +29,57 @@ pub struct ImportEntryDto {
     pub original_name: String,
     pub resolved_name: String,
     pub renamed: bool,
+    pub rules: Vec<ImportRuleDto>,
+}
+
+/// インポート確認画面でルールの中身を表示するためのDTO(SMX-1対応)。
+/// 「構文的に有効だが実データの書式と食い違う」細工されたルールに、確定前に
+/// 気付けるようにするための情報であり、確定前に必ず提示する。
+#[derive(Debug, serde::Serialize)]
+pub struct ImportRuleDto {
+    pub name: String,
+    pub pattern_type: PatternType,
+    pub pattern: String,
+    pub mode: Mode,
+    pub fixed_value: Option<String>,
+    pub prefix: Option<String>,
+    pub enabled: bool,
+}
+
+fn to_rule_dtos(profile: &RuleProfile) -> Vec<ImportRuleDto> {
+    profile.rules().iter().map(to_rule_dto).collect()
+}
+
+fn to_rule_dto(rule: &Rule) -> ImportRuleDto {
+    ImportRuleDto {
+        name: rule.name().to_string(),
+        pattern_type: rule.pattern_type(),
+        pattern: rule.pattern().to_string(),
+        mode: rule.mode(),
+        fixed_value: rule.fixed_value().map(str::to_string),
+        prefix: rule.prefix().map(str::to_string),
+        enabled: rule.enabled(),
+    }
 }
 
 fn to_dto(preview: &ImportPreview) -> ImportPreviewDto {
     match preview {
-        ImportPreview::Single { name, .. } => ImportPreviewDto::Single { name: name.clone() },
-        ImportPreview::All { active_profile_name, entries, .. } => ImportPreviewDto::All {
+        ImportPreview::Single { name, exported } => {
+            ImportPreviewDto::Single { name: name.clone(), rules: to_rule_dtos(&exported.profile) }
+        }
+        ImportPreview::All { active_profile_name, entries, exported } => ImportPreviewDto::All {
             active_profile_name: active_profile_name.clone(),
-            entries: entries.iter().map(to_entry_dto).collect(),
+            entries: entries.iter().zip(exported).map(|(entry, exp)| to_entry_dto(entry, &exp.profile)).collect(),
         },
     }
 }
 
-fn to_entry_dto(entry: &AllImportEntry) -> ImportEntryDto {
+fn to_entry_dto(entry: &AllImportEntry, profile: &RuleProfile) -> ImportEntryDto {
     ImportEntryDto {
         original_name: entry.original_name.clone(),
         resolved_name: entry.resolved_name.clone(),
         renamed: entry.renamed,
+        rules: to_rule_dtos(profile),
     }
 }
 
@@ -159,6 +195,21 @@ mod tests {
         store
     }
 
+    fn init_store_with_two_profiles(dir: &std::path::Path) -> ProfileStore {
+        let paths = AppPaths::at(dir);
+        profile_store::init_at(&paths).unwrap();
+        let mut store = ProfileStore::open_at(&paths).unwrap();
+        let rule_a =
+            Rule::new("Aルール", PatternType::Literal, "AAA", Mode::Sequential, None, Some("A".to_string()), true, None)
+                .unwrap();
+        let rule_b =
+            Rule::new("Bルール", PatternType::Literal, "BBB", Mode::Sequential, None, Some("B".to_string()), true, None)
+                .unwrap();
+        store.create_profile(&RuleProfile::new("プロファイルA", None, vec![rule_a]).unwrap()).unwrap();
+        store.create_profile(&RuleProfile::new("プロファイルB", None, vec![rule_b]).unwrap()).unwrap();
+        store
+    }
+
     #[test]
     fn export_then_preview_then_commit_round_trips_into_a_different_store() {
         let source_dir = tempfile::tempdir().unwrap();
@@ -189,7 +240,15 @@ mod tests {
         )
         .expect("正しいパスフレーズでのpreviewは成功するはず");
         match dto {
-            ImportPreviewDto::Single { name } => assert_eq!(name, "元プロファイル"),
+            ImportPreviewDto::Single { name, rules } => {
+                assert_eq!(name, "元プロファイル");
+                // SMX-1対応: 確認前にルールの中身(名前・パターン・有効/無効)が
+                // 見える必要があるため、DTOに含まれることをここで固定する。
+                assert_eq!(rules.len(), 1);
+                assert_eq!(rules[0].name, "電話番号");
+                assert_eq!(rules[0].pattern, "0120");
+                assert!(rules[0].enabled);
+            }
             ImportPreviewDto::All { .. } => panic!("単一プロファイルのエクスポートのはず"),
         }
 
@@ -198,6 +257,55 @@ mod tests {
         let names = with_store(&dest_state, |s| s.list_profiles()).unwrap();
         assert_eq!(names.len(), 1);
         assert_eq!(names[0].name, "元プロファイル");
+    }
+
+    #[test]
+    fn preview_import_all_associates_each_entrys_rules_with_its_own_profile() {
+        let source_dir = tempfile::tempdir().unwrap();
+        let dest_dir = tempfile::tempdir().unwrap();
+        let export_file = tempfile::NamedTempFile::new().unwrap();
+
+        let source_store = init_store_with_two_profiles(source_dir.path());
+        let source_state = ProfileStoreState::with_store_for_test(source_store);
+        export_all_to_file_impl(
+            &source_state,
+            "correct horse battery staple".to_string(),
+            export_file.path().to_str().unwrap(),
+        )
+        .expect("エクスポートは成功するはず");
+
+        let dest_paths = AppPaths::at(dest_dir.path());
+        profile_store::init_at(&dest_paths).unwrap();
+        let dest_store = ProfileStore::open_at(&dest_paths).unwrap();
+        let dest_state = ProfileStoreState::with_store_for_test(dest_store);
+        let pending = PendingImportState::default();
+
+        let dto = preview_import_impl(
+            &dest_state,
+            &pending,
+            export_file.path().to_str().unwrap(),
+            "correct horse battery staple".to_string(),
+        )
+        .expect("正しいパスフレーズでのpreviewは成功するはず");
+
+        // SMX-1対応: entries[i]とexported[i]のインデックス対応(zip)に依存しているため、
+        // 名前でエントリを探した上でそのルールが正しく自分自身のものであることを固定する
+        // (取り違えがあれば、内容の入れ替わりとして検出できる)。
+        match dto {
+            ImportPreviewDto::All { entries, .. } => {
+                assert_eq!(entries.len(), 2);
+                let a = entries.iter().find(|e| e.original_name == "プロファイルA").expect("プロファイルAが見つかるはず");
+                assert_eq!(a.rules.len(), 1);
+                assert_eq!(a.rules[0].name, "Aルール");
+                assert_eq!(a.rules[0].pattern, "AAA");
+
+                let b = entries.iter().find(|e| e.original_name == "プロファイルB").expect("プロファイルBが見つかるはず");
+                assert_eq!(b.rules.len(), 1);
+                assert_eq!(b.rules[0].name, "Bルール");
+                assert_eq!(b.rules[0].pattern, "BBB");
+            }
+            ImportPreviewDto::Single { .. } => panic!("全体エクスポートのはず"),
+        }
     }
 
     #[test]

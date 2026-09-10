@@ -107,14 +107,28 @@ export async function exportAllToFile(passphrase: string, destPath: string): Pro
   await invoke("export_all_to_file", { passphrase, destPath });
 }
 
+// インポート確認画面でルールの中身を表示するための型(SMX-1対応)。
+// 「構文的に有効だが実データの書式と食い違う」細工されたルールに、確定前に
+// 気付けるようにするための情報であり、確定前に必ず提示する。
+export interface ImportRuleDto {
+  name: string;
+  pattern_type: "literal" | "regex";
+  pattern: string;
+  mode: "fixed" | "sequential";
+  fixed_value: string | null;
+  prefix: string | null;
+  enabled: boolean;
+}
+
 export interface ImportEntryDto {
   original_name: string;
   resolved_name: string;
   renamed: boolean;
+  rules: ImportRuleDto[];
 }
 
 export type ImportPreviewDto =
-  | { kind: "single"; name: string }
+  | { kind: "single"; name: string; rules: ImportRuleDto[] }
   | { kind: "all"; active_profile_name: string | null; entries: ImportEntryDto[] };
 
 export async function previewImport(sourcePath: string, passphrase: string): Promise<ImportPreviewDto> {

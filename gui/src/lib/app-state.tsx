@@ -51,13 +51,14 @@ export const SMX_FILE_FILTERS = [{ name: "SensitiveMasker Export", extensions: [
 
 export function toImportPreviewRows(preview: ImportPreviewDto): ImportPreviewRow[] {
   if (preview.kind === "single") {
-    return [{ profileName: preview.name, result: "新規プロファイルとして追加されます" }];
+    return [{ profileName: preview.name, result: "新規プロファイルとして追加されます", rules: preview.rules }];
   }
   return preview.entries.map((entry) => ({
     profileName: entry.original_name,
     result: entry.renamed
       ? `名前が重複するため「${entry.resolved_name}」として追加されます`
       : "新規プロファイルとして追加されます",
+    rules: entry.rules,
   }));
 }
 

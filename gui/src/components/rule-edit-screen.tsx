@@ -46,11 +46,11 @@ const EMPTY_RULE_VALUES: RuleFormValues = {
   description: "",
 };
 
-function patternTypeLabel(patternType: PatternType) {
+export function patternTypeLabel(patternType: PatternType) {
   return patternType === "regex" ? "正規表現" : "リテラル";
 }
 
-function modeLabel(mode: RuleMode) {
+export function modeLabel(mode: RuleMode) {
   return mode === "sequential" ? "連番" : "固定";
 }
 
