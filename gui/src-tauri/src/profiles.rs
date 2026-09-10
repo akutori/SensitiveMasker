@@ -31,12 +31,12 @@ fn resolve_paths_with_override(override_dir: Option<String>) -> Result<AppPaths,
 }
 
 #[cfg(debug_assertions)]
-fn resolve_paths() -> Result<AppPaths, String> {
+pub(crate) fn resolve_paths() -> Result<AppPaths, String> {
     resolve_paths_with_override(std::env::var("SENSITIVEMASKER_DATA_DIR").ok())
 }
 
 #[cfg(not(debug_assertions))]
-fn resolve_paths() -> Result<AppPaths, String> {
+pub(crate) fn resolve_paths() -> Result<AppPaths, String> {
     AppPaths::resolve().map_err(|e| e.to_string())
 }
 

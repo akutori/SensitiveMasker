@@ -26,6 +26,7 @@ import {
   setFavorite as ipcSetFavorite,
   setProfileTags as ipcSetProfileTags,
   updateProfile as ipcUpdateProfile,
+  isExportImportError,
   type ImportPreviewDto,
   type ProfileDetail,
 } from "./profile-ipc";
@@ -112,6 +113,23 @@ async function reportAndRethrow<T>(message: string, action: () => Promise<T>): P
   try {
     return await action();
   } catch (error) {
+    console.error(message, error);
+    toast.error(message);
+    throw error;
+  }
+}
+
+// reportAndRethrowのエクスポート専用版。保存先パス・拡張子・サイズ等の事前検証で
+// 弾かれた場合(kind: "invalid_input")は、原因を隠す固定文言ではなく実際の理由を
+// 表示する(例:「アプリのデータフォルダには保存できません」がここで初めてユーザーに
+// 届く。これが無いとパスフレーズとは無関係な失敗が「エクスポートに失敗しました」と
+// しか表示されず原因を特定できない)。
+async function reportExportErrorAndRethrow<T>(action: () => Promise<T>): Promise<T> {
+  try {
+    return await action();
+  } catch (error) {
+    const message =
+      isExportImportError(error) && error.kind === "invalid_input" ? error.message : "エクスポートに失敗しました";
     console.error(message, error);
     toast.error(message);
     throw error;
@@ -294,13 +312,13 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
           return next;
         }),
       exportProfile: (id, passphrase, destPath) =>
-        reportAndRethrow("エクスポートに失敗しました", async () => {
+        reportExportErrorAndRethrow(async () => {
           const name = findNameById(id);
           if (!name) throw new Error(`profile not found: ${id}`);
           await ipcExportProfileToFile(name, passphrase, destPath);
         }),
       exportAll: (passphrase, destPath) =>
-        reportAndRethrow("エクスポートに失敗しました", async () => {
+        reportExportErrorAndRethrow(async () => {
           await ipcExportAllToFile(passphrase, destPath);
         }),
       // ここは意図的にreportAndRethrow(汎用トースト)を使わない: 誤ったパスフレーズは

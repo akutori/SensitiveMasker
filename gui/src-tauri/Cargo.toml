@@ -29,6 +29,9 @@ profile-store = { version = "0.1.0", path = "../../crates/profile-store" }
 tauri-plugin-wdio = { version = "1.4.0", optional = true }
 tauri-plugin-wdio-webdriver = { version = "1.4.0", optional = true }
 tauri-plugin-dialog = "2.7.3"
+# パスの文字列比較(大文字小文字・シンボリックリンク・ドライブマッピング等の別名表現)
+# ではなくOSのファイル識別子で実体同一性を判定するための小さな専業クレート。
+same-file = "1"
 
 [features]
 # 依存自体をデフォルトから外すためのfeature。有効化してもlib.rs側でさらに

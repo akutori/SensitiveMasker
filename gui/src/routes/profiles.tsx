@@ -10,6 +10,7 @@ import { ExportModal } from "@/components/export-modal";
 import { ImportPassphraseDialog } from "@/components/import-passphrase-dialog";
 import { ImportConfirmDialog, type ImportPreviewRow } from "@/components/import-confirm-dialog";
 import { useAppState, SMX_FILE_FILTERS, toImportPreviewRows } from "@/lib/app-state";
+import { isExportImportError } from "@/lib/profile-ipc";
 
 export const Route = createFileRoute("/profiles")({
   component: ProfilesRoute,
@@ -328,8 +329,14 @@ function ProfilesRoute() {
                 ? { kind: "importConfirm", rows: toImportPreviewRows(preview) }
                 : current
             );
-          } catch {
-            setImportPassphraseError("パスフレーズが誤っているか、対応していないファイル形式です");
+          } catch (error) {
+            // パス・拡張子・サイズ等、パスフレーズを試す前の事前検証で弾かれた場合は
+            // その具体的な理由を示す(パスフレーズとは無関係なため誤案内を避ける)。
+            setImportPassphraseError(
+              isExportImportError(error) && error.kind === "invalid_input"
+                ? error.message
+                : "パスフレーズが誤っているか、対応していないファイル形式です"
+            );
           }
         }}
       />

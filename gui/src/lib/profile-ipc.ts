@@ -120,6 +120,20 @@ export interface ImportRuleDto {
   enabled: boolean;
 }
 
+// Rust側のExportImportErrorに対応する型。invalid_inputはパスフレーズによる復号を
+// 試みる前の事前検証(パス形式・拡張子・サイズ・保存先)で弾かれたことを示すため、
+// 呼び出し元はこれをパスフレーズ入力エラーとして表示してはならない。
+export interface ExportImportError {
+  kind: "invalid_input" | "failed";
+  message: string;
+}
+
+export function isExportImportError(error: unknown): error is ExportImportError {
+  if (typeof error !== "object" || error === null) return false;
+  const { kind, message } = error as Record<string, unknown>;
+  return (kind === "invalid_input" || kind === "failed") && typeof message === "string";
+}
+
 export interface ImportEntryDto {
   original_name: string;
   resolved_name: string;
