@@ -350,7 +350,9 @@ function ProfilesRoute() {
         onExport={async () => {
           if (dialog.kind !== "export") return;
           const { profileId } = dialog;
-          const defaultPath = `${profileId === null ? "sensitivemasker_all" : dialog.target}.smx`;
+          // プロファイル名を既定ファイル名に使うと、暗号文の外側(ファイル名・最近使った
+          // ファイルの履歴)に平文メタデータとして残ってしまうため、汎用名にする。
+          const defaultPath = `${profileId === null ? "sensitivemasker_all" : "sensitivemasker_export"}.smx`;
           const destPath = await saveFileDialog({ defaultPath, filters: SMX_FILE_FILTERS });
           if (!destPath) return;
           try {
