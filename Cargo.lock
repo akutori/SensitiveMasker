@@ -627,6 +627,7 @@ dependencies = [
  "cipher 0.5.2",
  "cpufeatures 0.3.1",
  "rand_core 0.10.1",
+ "zeroize",
 ]
 
 [[package]]
@@ -652,6 +653,7 @@ dependencies = [
  "chacha20 0.10.2",
  "cipher 0.5.2",
  "poly1305 0.9.1",
+ "zeroize",
 ]
 
 [[package]]
@@ -3766,6 +3768,7 @@ checksum = "6e2d0073b297041425c7c3df6eb4792d598a15323fe63346852b092eca02904c"
 dependencies = [
  "cpufeatures 0.3.1",
  "universal-hash 0.6.1",
+ "zeroize",
 ]
 
 [[package]]
@@ -3940,6 +3943,7 @@ dependencies = [
  "chacha20poly1305 0.11.0",
  "dirs 7.0.0",
  "masking-core",
+ "poly1305 0.9.1",
  "rand 0.10.2",
  "rusqlite",
  "secrecy",

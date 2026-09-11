@@ -6,7 +6,7 @@
 //! 「name列は'personal'のままだが内容は'work'のルール」という取り違えが無警告で成立する)。
 
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
-use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
+use chacha20poly1305::{ChaCha20Poly1305, Nonce};
 use rand::RngExt;
 use secrecy::{ExposeSecret, SecretBox};
 
@@ -26,7 +26,11 @@ pub struct Encrypted {
 }
 
 pub fn encrypt(key: &SecretBox<[u8; KEY_LEN]>, plaintext: &[u8], aad: &[u8]) -> Encrypted {
-    let cipher = ChaCha20Poly1305::new(&Key::from(*key.expose_secret()));
+    // new_from_sliceはSecretBoxが保持するメモリを借用するだけでコピーを作らない
+    // (new(&Key::from(...))だと引数のKeyが無名の一時変数となり、zeroize不可能な
+    // 鍵バイト列のコピーがスタックに残ってしまう)。
+    let cipher = ChaCha20Poly1305::new_from_slice(key.expose_secret().as_slice())
+        .expect("SecretBox<[u8; KEY_LEN]>の長さは32バイトで固定のため失敗しない");
     let mut nonce_bytes = [0u8; NONCE_LEN];
     rand::rng().fill(&mut nonce_bytes);
     let nonce = Nonce::from(nonce_bytes);
@@ -42,7 +46,8 @@ pub fn decrypt(
     nonce: &[u8],
     aad: &[u8],
 ) -> Result<Vec<u8>, CryptoError> {
-    let cipher = ChaCha20Poly1305::new(&Key::from(*key.expose_secret()));
+    let cipher = ChaCha20Poly1305::new_from_slice(key.expose_secret().as_slice())
+        .expect("SecretBox<[u8; KEY_LEN]>の長さは32バイトで固定のため失敗しない");
     // nonceは保存データ(DBの列)由来なので、破損等でサイズが不正な可能性がある。
     // ここでpanicせず、他の復号失敗と同じCryptoError扱いにする。
     let nonce = Nonce::try_from(nonce).map_err(|_| CryptoError::DecryptionFailed)?;

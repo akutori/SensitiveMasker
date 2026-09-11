@@ -4,12 +4,14 @@
 //! 誤って`{:?}`(Debug)やログ出力に渡した際に鍵が丸ごと露出してしまうため。
 
 use std::fs;
+use std::io::Read;
 #[cfg(unix)]
 use std::io::Write;
 use std::path::Path;
 
 use rand::RngExt;
 use secrecy::SecretBox;
+use zeroize::Zeroize;
 
 pub const KEY_LEN: usize = 32;
 
@@ -24,15 +26,18 @@ pub enum KeyError {
 }
 
 pub fn generate_and_save_key(key_path: &Path) -> Result<SecretBox<[u8; KEY_LEN]>, KeyError> {
-    let mut key = [0u8; KEY_LEN];
-    rand::rng().fill(&mut key);
+    // 先にヒープを確保してから乱数を直接書き込むことで、生の鍵バイト列が
+    // (zeroizeできない)スタック上のコピーとして残らないようにする。
+    let mut key = Box::new([0u8; KEY_LEN]);
+    rand::rng().fill(key.as_mut());
     if let Err(err) = save_key(key_path, &key) {
         // 権限制限に失敗した鍵ファイルを弱い権限のまま残さない(次回起動時に「初期化済み」と
         // 誤判定され、検出・修復の機会が無いまま使われ続けてしまうため)。
         let _ = fs::remove_file(key_path);
+        key.as_mut().zeroize();
         return Err(err);
     }
-    Ok(SecretBox::new(Box::new(key)))
+    Ok(SecretBox::new(key))
 }
 
 fn save_key(key_path: &Path, key: &[u8; KEY_LEN]) -> Result<(), KeyError> {
@@ -44,10 +49,22 @@ fn save_key(key_path: &Path, key: &[u8; KEY_LEN]) -> Result<(), KeyError> {
 }
 
 pub fn load_key(key_path: &Path) -> Result<SecretBox<[u8; KEY_LEN]>, KeyError> {
-    let bytes = fs::read(key_path)?;
-    let actual = bytes.len();
-    let key: [u8; KEY_LEN] = bytes.try_into().map_err(|_| KeyError::InvalidLength { actual })?;
-    Ok(SecretBox::new(Box::new(key)))
+    // fs::read()でVec<u8>へ読み込んでから[u8; KEY_LEN]に変換すると、Vecの
+    // capacityがKEY_LENと一致しない場合にshrink相当のreallocが発生し、
+    // 鍵バイト列を保持していた旧バッファがzeroizeされずに残ってしまう。
+    // ファイルサイズを事前に確認した上でBox<[u8; KEY_LEN]>へ直接read_exactし、
+    // 鍵バイト列がSecretBoxの管理するメモリ以外に一切コピーされないようにする。
+    let mut file = fs::File::open(key_path)?;
+    let actual = usize::try_from(file.metadata()?.len()).unwrap_or(usize::MAX);
+    if actual != KEY_LEN {
+        return Err(KeyError::InvalidLength { actual });
+    }
+    let mut key = Box::new([0u8; KEY_LEN]);
+    if let Err(err) = file.read_exact(key.as_mut()) {
+        key.as_mut().zeroize();
+        return Err(err.into());
+    }
+    Ok(SecretBox::new(key))
 }
 
 /// Unixでは作成時点でモードを指定できるため、「書き込み後に権限を絞る」窓が生じない。
