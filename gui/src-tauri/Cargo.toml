@@ -34,9 +34,12 @@ tauri-plugin-dialog = "2.7.3"
 same-file = "1"
 # クリップボードの書き込み/読み取り/クリアをRust側で行うための公式プラグイン。
 # navigator.clipboard.readText()と異なりウィンドウのフォーカスやWeb権限プロンプトに
-# 依存しない。arboardをラップしており、Windowsのクリップボード履歴/クラウド同期からの
-# 除外には対応しない(このクレート・arboardのいずれも当該APIを提供しないため)。
+# 依存しない。読み取り/クリア、および非Windows環境での書き込みはこちらを経由する。
 tauri-plugin-clipboard-manager = "2"
+# Windows環境での書き込み時にSetExtWindows(exclude_from_history/exclude_from_cloud)で
+# クリップボード履歴・クラウド同期からの除外を行うために直接依存する。
+# tauri-plugin-clipboard-manager 2.3.3が解決するバージョンと合わせ、重複を避ける。
+arboard = "3.6.1"
 
 [features]
 # 依存自体をデフォルトから外すためのfeature。有効化してもlib.rs側でさらに
