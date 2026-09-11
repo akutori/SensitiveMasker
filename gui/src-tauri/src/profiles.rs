@@ -94,12 +94,31 @@ pub async fn get_profile(
     with_store(&state, |store| store.get_profile(&name))
 }
 
+// profile: RuleProfileと直接型付けすると、この関数本体が実行される前にTauri自身の
+// 引数デシリアライズで全ルールの正規表現が既にコンパイルされてしまい、件数上限を
+// 適用する機会が無い(tauri-macros生成コードで実際に確認済み)。生JSONとして受け取り、
+// 正規表現へ一切触れない構造的チェックを先に行ってから型付きデシリアライズする。
+fn check_rule_count(profile_json: &serde_json::Value) -> Result<(), String> {
+    if let Some(rules) = profile_json.get("rules").and_then(serde_json::Value::as_array) {
+        if rules.len() > profile_store::MAX_RULES_PER_PROFILE {
+            return Err(format!(
+                "ルール数が上限({}件)を超えています(受信: {}件)",
+                profile_store::MAX_RULES_PER_PROFILE,
+                rules.len()
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn create_profile(
     app: tauri::AppHandle,
     state: tauri::State<'_, ProfileStoreState>,
-    profile: RuleProfile,
+    profile: serde_json::Value,
 ) -> Result<i64, String> {
+    check_rule_count(&profile)?;
+    let profile: RuleProfile = serde_json::from_value(profile).map_err(|e| e.to_string())?;
     let id = with_store(&state, |store| store.create_profile(&profile))?;
     let _ = app.emit("profiles-changed", ());
     Ok(id)
@@ -178,8 +197,10 @@ pub async fn update_profile(
     app: tauri::AppHandle,
     state: tauri::State<'_, ProfileStoreState>,
     old_name: String,
-    profile: RuleProfile,
+    profile: serde_json::Value,
 ) -> Result<(), String> {
+    check_rule_count(&profile)?;
+    let profile: RuleProfile = serde_json::from_value(profile).map_err(|e| e.to_string())?;
     // アクティブプロファイルの読み取りと保存を同一のwith_store呼び出し(=同一のmutex
     // クリティカルセクション)内で行う。2回に分けると、その間に他のコマンド呼び出し
     // (set_active_profileによる切り替え等)が割り込み、判定時点と保存完了時点とで
@@ -395,6 +416,31 @@ mod tests {
     fn rule_weakening_notice_is_silent_when_there_is_no_active_profile() {
         let after = RuleProfile::new("work", None, vec![]).unwrap();
         assert!(rule_weakening_notice(None, "work", &after).is_none());
+    }
+
+    fn rules_payload(count: usize) -> serde_json::Value {
+        serde_json::json!({ "rules": vec![serde_json::Value::Null; count] })
+    }
+
+    #[test]
+    fn check_rule_count_accepts_a_payload_at_the_limit() {
+        assert!(check_rule_count(&rules_payload(profile_store::MAX_RULES_PER_PROFILE)).is_ok());
+    }
+
+    #[test]
+    fn check_rule_count_rejects_a_payload_over_the_limit() {
+        let err = check_rule_count(&rules_payload(profile_store::MAX_RULES_PER_PROFILE + 1))
+            .expect_err("上限超過は拒否されるはず");
+        assert!(err.contains(&(profile_store::MAX_RULES_PER_PROFILE + 1).to_string()));
+    }
+
+    #[test]
+    fn check_rule_count_is_silent_when_rules_field_is_missing_or_not_an_array() {
+        // 構造が不正な場合の判定は型付きデシリアライズ側の責務とし、ここでは
+        // 「配列として数えられる場合のみ件数を見る」という緩い判定に留める
+        // (masker CLI側のload_rules_from_jsonと同じ方針)。
+        assert!(check_rule_count(&serde_json::json!({})).is_ok());
+        assert!(check_rule_count(&serde_json::json!({ "rules": "not-an-array" })).is_ok());
     }
 
     #[test]
