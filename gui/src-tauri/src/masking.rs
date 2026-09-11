@@ -48,9 +48,15 @@ fn mask_text_with_stores(
 pub async fn mask_text(
     state: tauri::State<'_, MaskingState>,
     profile_id: String,
-    profile: RuleProfile,
+    profile: serde_json::Value,
     text: String,
-) -> Result<MaskTextResult, ()> {
+) -> Result<MaskTextResult, String> {
+    // profile: RuleProfileと直接型付けすると、この関数本体が実行される前にTauri自身の
+    // 引数デシリアライズで全ルールの正規表現が既にコンパイルされてしまい、
+    // profiles.rsのcreate_profile/update_profileと同じ理由でルール数上限を適用できない。
+    crate::profiles::check_rule_count(&profile)?;
+    let profile: RuleProfile = serde_json::from_value(profile).map_err(|e| e.to_string())?;
+
     // poison時も後続の呼び出しを永久に失敗させないよう、中身を取り出して継続する
     // (release buildのpanic=abortではpanic自体がプロセスごと終了するため、この回復が
     // 意味を持つのはdebug build時のみ)。

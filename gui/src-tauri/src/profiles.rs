@@ -98,7 +98,7 @@ pub async fn get_profile(
 // 引数デシリアライズで全ルールの正規表現が既にコンパイルされてしまい、件数上限を
 // 適用する機会が無い(tauri-macros生成コードで実際に確認済み)。生JSONとして受け取り、
 // 正規表現へ一切触れない構造的チェックを先に行ってから型付きデシリアライズする。
-fn check_rule_count(profile_json: &serde_json::Value) -> Result<(), String> {
+pub(crate) fn check_rule_count(profile_json: &serde_json::Value) -> Result<(), String> {
     if let Some(rules) = profile_json.get("rules").and_then(serde_json::Value::as_array) {
         if rules.len() > profile_store::MAX_RULES_PER_PROFILE {
             return Err(format!(
