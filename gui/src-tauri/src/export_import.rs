@@ -180,23 +180,21 @@ fn to_entry_dto(entry: &AllImportEntry, profile: &RuleProfile) -> ImportEntryDto
 fn export_profile_to_file_impl(
     state: &ProfileStoreState,
     name: &str,
-    passphrase: String,
+    passphrase: SecretString,
     dest_path: &str,
 ) -> Result<(), ExportImportError> {
     let dest_path = validate_export_dest_path(dest_path).map_err(ExportImportError::InvalidInput)?;
-    let bytes = with_store(state, |store| store.export_profile(name, SecretString::from(passphrase)))
-        .map_err(ExportImportError::Failed)?;
+    let bytes = with_store(state, |store| store.export_profile(name, passphrase)).map_err(ExportImportError::Failed)?;
     std::fs::write(&dest_path, bytes).map_err(|_| ExportImportError::Failed(GENERIC_IO_ERROR.to_string()))
 }
 
 fn export_all_to_file_impl(
     state: &ProfileStoreState,
-    passphrase: String,
+    passphrase: SecretString,
     dest_path: &str,
 ) -> Result<(), ExportImportError> {
     let dest_path = validate_export_dest_path(dest_path).map_err(ExportImportError::InvalidInput)?;
-    let bytes = with_store(state, |store| store.export_all(SecretString::from(passphrase)))
-        .map_err(ExportImportError::Failed)?;
+    let bytes = with_store(state, |store| store.export_all(passphrase)).map_err(ExportImportError::Failed)?;
     std::fs::write(&dest_path, bytes).map_err(|_| ExportImportError::Failed(GENERIC_IO_ERROR.to_string()))
 }
 
@@ -204,7 +202,7 @@ fn preview_import_impl(
     state: &ProfileStoreState,
     pending: &PendingImportState,
     source_path: &str,
-    passphrase: String,
+    passphrase: SecretString,
 ) -> Result<ImportPreviewDto, ExportImportError> {
     let source_path = validate_import_source_path(source_path).map_err(ExportImportError::InvalidInput)?;
     let metadata = std::fs::metadata(&source_path)
@@ -213,8 +211,7 @@ fn preview_import_impl(
         return Err(ExportImportError::InvalidInput("ファイルサイズが大きすぎます".to_string()));
     }
     let data = std::fs::read(&source_path).map_err(|_| ExportImportError::Failed(GENERIC_IO_ERROR.to_string()))?;
-    let preview = with_store(state, |store| store.preview_import(&data, SecretString::from(passphrase)))
-        .map_err(ExportImportError::Failed)?;
+    let preview = with_store(state, |store| store.preview_import(&data, passphrase)).map_err(ExportImportError::Failed)?;
     let dto = to_dto(&preview);
     *pending.0.lock().unwrap_or_else(|e| e.into_inner()) = Some(preview);
     Ok(dto)
@@ -234,7 +231,7 @@ fn commit_pending_import_impl(state: &ProfileStoreState, pending: &PendingImport
 pub async fn export_profile_to_file(
     state: tauri::State<'_, ProfileStoreState>,
     name: String,
-    passphrase: String,
+    passphrase: SecretString,
     dest_path: String,
 ) -> Result<(), ExportImportError> {
     export_profile_to_file_impl(&state, &name, passphrase, &dest_path)
@@ -243,7 +240,7 @@ pub async fn export_profile_to_file(
 #[tauri::command]
 pub async fn export_all_to_file(
     state: tauri::State<'_, ProfileStoreState>,
-    passphrase: String,
+    passphrase: SecretString,
     dest_path: String,
 ) -> Result<(), ExportImportError> {
     export_all_to_file_impl(&state, passphrase, &dest_path)
@@ -256,7 +253,7 @@ pub async fn preview_import(
     state: tauri::State<'_, ProfileStoreState>,
     pending: tauri::State<'_, PendingImportState>,
     source_path: String,
-    passphrase: String,
+    passphrase: SecretString,
 ) -> Result<ImportPreviewDto, ExportImportError> {
     preview_import_impl(&state, &pending, &source_path, passphrase)
 }
@@ -278,6 +275,10 @@ mod tests {
     use super::*;
     use masking_core::{Mode, PatternType, Rule, RuleProfile};
     use profile_store::{AppPaths, ProfileStore};
+
+    fn passphrase(s: &str) -> SecretString {
+        SecretString::from(s.to_owned())
+    }
 
     fn init_store_with_one_profile(dir: &std::path::Path, profile_name: &str) -> ProfileStore {
         let paths = AppPaths::at(dir);
@@ -327,7 +328,7 @@ mod tests {
         export_profile_to_file_impl(
             &source_state,
             "元プロファイル",
-            "correct horse battery staple".to_string(),
+            passphrase("correct horse battery staple"),
             export_file.path().to_str().unwrap(),
         )
         .expect("エクスポートは成功するはず");
@@ -342,7 +343,7 @@ mod tests {
             &dest_state,
             &pending,
             export_file.path().to_str().unwrap(),
-            "correct horse battery staple".to_string(),
+            passphrase("correct horse battery staple"),
         )
         .expect("正しいパスフレーズでのpreviewは成功するはず");
         match dto {
@@ -377,7 +378,7 @@ mod tests {
         let source_state = ProfileStoreState::with_store_for_test(source_store);
         export_all_to_file_impl(
             &source_state,
-            "correct horse battery staple".to_string(),
+            passphrase("correct horse battery staple"),
             export_file.path().to_str().unwrap(),
         )
         .expect("エクスポートは成功するはず");
@@ -392,7 +393,7 @@ mod tests {
             &dest_state,
             &pending,
             export_file.path().to_str().unwrap(),
-            "correct horse battery staple".to_string(),
+            passphrase("correct horse battery staple"),
         )
         .expect("正しいパスフレーズでのpreviewは成功するはず");
 
@@ -427,7 +428,7 @@ mod tests {
         export_profile_to_file_impl(
             &source_state,
             "元プロファイル",
-            "correct horse battery staple".to_string(),
+            passphrase("correct horse battery staple"),
             export_file.path().to_str().unwrap(),
         )
         .unwrap();
@@ -437,7 +438,7 @@ mod tests {
             &source_state,
             &pending,
             export_file.path().to_str().unwrap(),
-            "wrong passphrase".to_string(),
+            passphrase("wrong passphrase"),
         )
         .expect_err("誤ったパスフレーズは失敗するはず");
         assert!(!err.message().is_empty());
@@ -596,7 +597,7 @@ mod tests {
         let oversized = tempfile::Builder::new().suffix(".smx").tempfile().unwrap();
         std::fs::write(oversized.path(), vec![0u8; (MAX_IMPORT_FILE_BYTES + 1) as usize]).unwrap();
 
-        let err = preview_import_impl(&state, &pending, oversized.path().to_str().unwrap(), "any".to_string())
+        let err = preview_import_impl(&state, &pending, oversized.path().to_str().unwrap(), passphrase("any"))
             .expect_err("上限を超えるファイルは拒否されるはず");
         assert_eq!(err.message(), "ファイルサイズが大きすぎます");
         // パスフレーズを試す前の事前検証で弾かれているため、フロントエンドが
