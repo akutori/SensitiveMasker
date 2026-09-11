@@ -149,8 +149,9 @@ async function reportExportErrorAndRethrow<T>(action: () => Promise<T>): Promise
   try {
     return await action();
   } catch (error) {
-    const message =
-      isExportImportError(error) && error.kind === "invalid_input" ? error.message : "エクスポートに失敗しました";
+    // インポート側と同じ理由でexport.kindによる絞り込みをしない(ERR-1対応)。
+    // Rust側は原因ごとに具体的なメッセージを返すため、それをそのまま使う。
+    const message = isExportImportError(error) ? error.message : "エクスポートに失敗しました";
     console.error(message, error);
     toast.error(message);
     throw error;

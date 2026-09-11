@@ -397,10 +397,13 @@ function ProfilesRoute() {
             // 復号は完了済みでこの先パスフレーズ自体は不要になるため、state上に残さない。
             setImportPassphrase("");
           } catch (error) {
-            // パス・拡張子・サイズ等、パスフレーズを試す前の事前検証で弾かれた場合は
-            // その具体的な理由を示す(パスフレーズとは無関係なため誤案内を避ける)。
+            // Rust側は復号失敗・フォーマット不一致・規模超過・名前重複等を原因ごとに
+            // 別々の具体的なメッセージとして返す(ERR-1対応: 1つの汎用文言に一本化すると、
+            // 正しいパスフレーズでも「誤っている」という誤案内になり、正当なバックアップ
+            // ファイルを誤って破棄しかねない)。ExportImportError以外の想定外の例外
+            // (Tauri IPC自体の失敗等)の場合のみ汎用文言にフォールバックする。
             setImportPassphraseError(
-              isExportImportError(error) && error.kind === "invalid_input"
+              isExportImportError(error)
                 ? error.message
                 : "パスフレーズが誤っているか、対応していないファイル形式です"
             );
