@@ -17,6 +17,7 @@ import {
   isStoreInitialized,
   listProfiles,
   listTags,
+  onActiveProfileRulesWeakened,
   onProfilesChanged,
   onTagsChanged,
   openStore,
@@ -208,9 +209,22 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
     const unlistenTags = onTagsChanged(() => {
       refreshTags();
     });
+    // アクティブプロファイルの既存の有効ルールが無言で無力化された場合の簡易な手がかり。
+    // 正規の編集操作でも表示される(改ざん耐性のある記録ではなく、その場で見える
+    // 通知であることが目的のため)。
+    const unlistenRulesWeakened = onActiveProfileRulesWeakened(({ profileName, weakenedRuleNames }) => {
+      // 一括インポート等で多数のルールが一度に無力化された場合でもトーストが
+      // 読めないほど長くならないよう、表示件数に上限を設ける(最大500件想定)。
+      const MAX_NAMES_IN_TOAST = 5;
+      const shown = weakenedRuleNames.slice(0, MAX_NAMES_IN_TOAST).join("、");
+      const rest = weakenedRuleNames.length - MAX_NAMES_IN_TOAST;
+      const label = rest > 0 ? `${shown} 他${rest}件` : shown;
+      toast.warning(`プロファイル「${profileName}」のルールが変更されました(${label})`);
+    });
     return () => {
       unlistenProfiles.then((f) => f());
       unlistenTags.then((f) => f());
+      unlistenRulesWeakened.then((f) => f());
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [initialized]);

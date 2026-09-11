@@ -162,3 +162,21 @@ export function onProfilesChanged(handler: () => void): Promise<() => void> {
 export function onTagsChanged(handler: () => void): Promise<() => void> {
   return listen("tags-changed", handler);
 }
+
+export interface ActiveProfileRulesWeakenedPayload {
+  profileName: string;
+  weakenedRuleNames: string[];
+}
+
+// update_profileの呼び出し元(通常の編集操作、または直接IPCを叩く経路の両方を問わず)が
+// アクティブプロファイルの既存の有効ルールを無効化・削除、またはマスク挙動を左右する
+// 内容(pattern等)を書き換えた場合にRust側から届く。マスクルールが無言で無力化される
+// のに気付く簡易な手がかりとして使う(SensitiveMasker側の設計、改ざん耐性のある記録
+// ではなく即時の通知であることが重要)。
+export function onActiveProfileRulesWeakened(
+  handler: (payload: ActiveProfileRulesWeakenedPayload) => void
+): Promise<() => void> {
+  return listen<ActiveProfileRulesWeakenedPayload>("active-profile-rules-weakened", (event) =>
+    handler(event.payload)
+  );
+}
