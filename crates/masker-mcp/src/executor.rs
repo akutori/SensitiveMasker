@@ -94,13 +94,30 @@ fn kill_first_child_tree(child: &mut std::process::Child) {
     #[cfg(windows)]
     {
         let pid = child.id().to_string();
-        let _ = Command::new("taskkill").args(["/F", "/T", "/PID", &pid]).output();
+        // PATH解決に依存すると、PATH上のtaskkillより前にある別の(悪意ある、または単に
+        // 別の)同名実行ファイルが誤って実行されうる。SystemRoot(Windowsが必ず設定する
+        // 環境変数)から実体の絶対パスを組み立てる。取得できない場合は、既存のkill失敗時
+        // (プロセスが見つからない等)と同様にベストエフォートとして諦める。
+        if let Some(taskkill) = taskkill_path() {
+            let _ = Command::new(taskkill).args(["/F", "/T", "/PID", &pid]).output();
+        }
     }
     #[cfg(unix)]
     {
         let pid = child.id();
         let _ = Command::new("kill").args(["-KILL", &format!("-{pid}")]).output();
     }
+}
+
+#[cfg(windows)]
+fn taskkill_path() -> Option<std::path::PathBuf> {
+    let system_root = std::env::var("SystemRoot").ok()?;
+    Some(taskkill_path_from_system_root(&system_root))
+}
+
+#[cfg(windows)]
+fn taskkill_path_from_system_root(system_root: &str) -> std::path::PathBuf {
+    std::path::PathBuf::from(system_root).join("System32").join("taskkill.exe")
 }
 
 /// `second_child`(`masker mask --stream`)を終了させる。自身では子プロセスを持たないため、
@@ -381,6 +398,13 @@ mod tests {
             let text = String::from_utf8_lossy(&output.stdout);
             assert!(!text.contains("PING.EXE"), "ping.exeが終了せず残っている: {text}");
         }
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn taskkill_path_is_built_under_system32_of_the_given_system_root() {
+        let path = taskkill_path_from_system_root(r"C:\Windows");
+        assert_eq!(path, std::path::PathBuf::from(r"C:\Windows\System32\taskkill.exe"));
     }
 
     #[tokio::test]
