@@ -3,7 +3,7 @@ use std::sync::Mutex;
 
 use masking_core::{Mode, PatternType, Rule, RuleProfile};
 use profile_store::{AllImportEntry, AppPaths, ImportPreview, SecretString};
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 
 use crate::profiles::{resolve_paths, with_store, ProfileStoreState};
 
@@ -294,14 +294,29 @@ pub async fn export_all_to_file(
 
 /// DBはまだ変更しない。復号結果はPendingImportStateに保持し、フロントエンドには
 /// 表示に必要な要約(名前・リネーム有無)のみを返す(ルール本体を往復させないため)。
+///
+/// 悪意ある.smxファイルは、パスフレーズの正誤を検証する前に最大2^22相当(≒4GiB)の
+/// メモリ確保を要求しうる(export.rsのMAX_WORK_FACTOR_LOG_N参照。CRYPTO-2対応)。
+/// この処理を非同期ランタイムのワーカースレッド上でそのまま実行すると、そのスレッドが
+/// 長時間ブロックされ、同じプールを共有する他の全Tauriコマンドの処理まで止まりうる
+/// (with_storeのMutex自体は他コマンドと競合するだけだが、ワーカースレッド枯渇は
+/// Mutexと無関係なコマンドも巻き込む、より広い影響であるため)。専用のブロッキング
+/// スレッドプール(tauri::async_runtime::spawn_blocking)で実行することで避ける。
+/// tauri::Stateは'staticではなくこのスレッドへ直接持ち込めないため、AppHandle
+/// (Clone可能)経由でスレッド内から改めて状態を取得する。
 #[tauri::command]
 pub async fn preview_import(
-    state: tauri::State<'_, ProfileStoreState>,
-    pending: tauri::State<'_, PendingImportState>,
+    app: tauri::AppHandle,
     source_path: String,
     passphrase: SecretString,
 ) -> Result<ImportPreviewDto, ExportImportError> {
-    preview_import_impl(&state, &pending, &source_path, passphrase)
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<ProfileStoreState>();
+        let pending = app.state::<PendingImportState>();
+        preview_import_impl(&state, &pending, &source_path, passphrase)
+    })
+    .await
+    .map_err(|_| ExportImportError::Failed(GENERIC_IO_ERROR.to_string()))?
 }
 
 #[tauri::command]

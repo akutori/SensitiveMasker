@@ -316,17 +316,29 @@ impl ProfileStore {
                     .iter()
                     .zip(exported.iter())
                     .map(|(entry, exported)| {
+                        // AAD(entry.resolved_name)・書き込み先のname列(同)と、暗号文に
+                        // 閉じ込める平文profile_nameを常に一致させる。名前衝突でリネーム
+                        // された場合、ファイル内の元の名前のままシリアライズすると、
+                        // 暗号文の自己申告とAAD/DB上の名前が食い違う状態が生まれる
+                        // (CRYPTO-1対応: 元プロファイル削除後に、信頼している名前が
+                        // インポート由来のルール集合を指すようになりうる)。
+                        let renamed_profile = RuleProfile::new(
+                            entry.resolved_name.clone(),
+                            exported.profile.description().map(str::to_string),
+                            exported.profile.rules().to_vec(),
+                        )
+                        .map_err(|e| ProfileStoreError::InvalidProfileName(e.to_string()))?;
                         let json = Zeroizing::new(
-                            serde_json::to_vec(&exported.profile).expect("RuleProfileのシリアライズは失敗しない"),
+                            serde_json::to_vec(&renamed_profile).expect("RuleProfileのシリアライズは失敗しない"),
                         );
-                        PreparedEntry {
+                        Ok(PreparedEntry {
                             resolved_name: entry.resolved_name.clone(),
                             encrypted: crypto::encrypt(&self.key, &json, entry.resolved_name.as_bytes()),
                             is_favorite: exported.is_favorite,
                             tags: exported.tags.clone(),
-                        }
+                        })
                     })
-                    .collect();
+                    .collect::<Result<Vec<PreparedEntry>, ProfileStoreError>>()?;
 
                 let tx = self.conn.transaction()?;
                 for p in &prepared {
@@ -1331,6 +1343,35 @@ mod tests {
         assert!(names.contains(&"work".to_string()), "元のworkは変更されず残っているはず");
         assert!(names.contains(&"work (インポート)".to_string()));
         assert!(names.contains(&"personal".to_string()));
+    }
+
+    #[test]
+    fn import_all_embeds_the_resolved_name_in_the_stored_plaintext_after_a_rename() {
+        // CRYPTO-1: リネームされたエントリについて、暗号文内(復号後の平文)の
+        // profile_nameがAAD/DB上のname列(resolved_name)と食い違わないことを確認する。
+        // AAD自体は元々resolved_nameで一致していたため、この不一致があっても復号自体は
+        // 成功してしまう(認証はcipheretextとAADの対応のみを保証し、中身の内容までは
+        // 保証しない)ため、実際にget_profileした結果のprofile_nameを見て確認する。
+        let (_dir_a, paths_a) = temp_paths();
+        init_at(&paths_a).unwrap();
+        let mut store_a = ProfileStore::open_at(&paths_a).unwrap();
+        store_a.create_profile(&sample_profile("work")).unwrap();
+        let exported = store_a.export_all(passphrase("pw")).unwrap();
+
+        let (_dir_b, paths_b) = temp_paths();
+        init_at(&paths_b).unwrap();
+        let mut store_b = ProfileStore::open_at(&paths_b).unwrap();
+        store_b.create_profile(&sample_profile("work")).unwrap(); // 衝突させる
+
+        let preview = store_b.preview_import(&exported, passphrase("pw")).unwrap();
+        store_b.commit_import(preview).unwrap();
+
+        let renamed = store_b.get_profile("work (インポート)").unwrap();
+        assert_eq!(
+            renamed.profile_name(),
+            "work (インポート)",
+            "暗号文内のprofile_nameもresolved_nameと一致するはず"
+        );
     }
 
     #[test]
