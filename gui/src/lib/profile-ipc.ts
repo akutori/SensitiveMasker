@@ -7,6 +7,7 @@ export interface ProfileSummaryDto {
   id: number;
   name: string;
   rule_count: number;
+  enabled_rule_count: number;
   is_favorite: boolean;
   is_active: boolean;
   updated_at: string;
@@ -139,18 +140,23 @@ export interface ImportEntryDto {
   resolved_name: string;
   renamed: boolean;
   rules: ImportRuleDto[];
+  tags: string[];
 }
 
 export type ImportPreviewDto =
-  | { kind: "single"; name: string; rules: ImportRuleDto[] }
-  | { kind: "all"; active_profile_name: string | null; entries: ImportEntryDto[] };
+  | { kind: "single"; name: string; rules: ImportRuleDto[]; tags: string[] }
+  | { kind: "all"; will_activate_profile_name: string | null; entries: ImportEntryDto[] };
 
 export async function previewImport(sourcePath: string, passphrase: string): Promise<ImportPreviewDto> {
   return invoke<ImportPreviewDto>("preview_import", { sourcePath, passphrase });
 }
 
-export async function commitPendingImport(): Promise<void> {
-  await invoke("commit_pending_import");
+export interface CommitImportResultDto {
+  activated_profile_name: string | null;
+}
+
+export async function commitPendingImport(): Promise<CommitImportResultDto> {
+  return invoke<CommitImportResultDto>("commit_pending_import");
 }
 
 // フォーカスの有無に関わらず、変更を検知したウィンドウ側で最新状態を取り直すためのイベント。

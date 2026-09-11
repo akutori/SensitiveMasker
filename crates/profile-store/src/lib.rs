@@ -61,6 +61,10 @@ pub enum ProfileStoreError {
     TagAlreadyExists(String),
     #[error("タグ '{0}' が見つかりません")]
     TagNotFound(String),
+    #[error("タグ名が不正です: {0}")]
+    InvalidTagName(String),
+    #[error("プロファイル名が不正です: {0}")]
+    InvalidProfileName(String),
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
@@ -68,6 +72,9 @@ pub struct ProfileSummary {
     pub id: i64,
     pub name: String,
     pub rule_count: usize,
+    // 総ルール数が1件以上あるのに有効なルールが1件も無い(=このプロファイルは
+    // 実質何もマスクしない)場合に一覧上で気付けるようにするための件数。
+    pub enabled_rule_count: usize,
     pub is_favorite: bool,
     pub is_active: bool,
     pub updated_at: String,
@@ -91,8 +98,11 @@ pub enum ImportPreview {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ImportOutcome {
-    Single { name: String },
-    All { entries: Vec<AllImportEntry> },
+    // activated: このコミットの結果、取り込んだこのプロファイルがアクティブになったか
+    // (取り込み先にアクティブが未設定だった場合のみtrue)。無言でのアクティブ化を
+    // 呼び出し側が気付けるようにするための情報。
+    Single { name: String, activated: bool },
+    All { entries: Vec<AllImportEntry>, activated_profile_name: Option<String> },
 }
 
 pub fn is_initialized() -> Result<bool, ProfileStoreError> {
@@ -284,11 +294,12 @@ impl ProfileStore {
 
                 let tx = self.conn.transaction()?;
                 insert_profile_row(&tx, &name, &encrypted, exported.is_favorite, &exported.tags)?;
-                if read_active_profile_name(&tx)?.is_none() {
+                let activated = read_active_profile_name(&tx)?.is_none();
+                if activated {
                     upsert_active_profile_name(&tx, &name)?;
                 }
                 tx.commit()?;
-                Ok(ImportOutcome::Single { name })
+                Ok(ImportOutcome::Single { name, activated })
             }
             ImportPreview::All { active_profile_name, entries, exported } => {
                 // 暗号化はself.keyの借用で完結させ、トランザクション(self.connの可変借用)開始前に
@@ -323,16 +334,18 @@ impl ProfileStore {
                 // アクティブプロファイルの扱い: 取り込み先に既にアクティブなプロファイルが
                 // 設定されている場合は変更しない。未設定の場合のみ、ファイル内の値を
                 // (衝突でリネームされていれば解決後の名前に読み替えて)採用する。
+                let mut activated_profile_name = None;
                 if read_active_profile_name(&tx)?.is_none() {
                     if let Some(original) = &active_profile_name {
                         if let Some(entry) = entries.iter().find(|e| &e.original_name == original) {
                             upsert_active_profile_name(&tx, &entry.resolved_name)?;
+                            activated_profile_name = Some(entry.resolved_name.clone());
                         }
                     }
                 }
 
                 tx.commit()?;
-                Ok(ImportOutcome::All { entries })
+                Ok(ImportOutcome::All { entries, activated_profile_name })
             }
         }
     }
@@ -365,13 +378,14 @@ impl ProfileStore {
 
         rows.into_iter()
             .map(|(id, name, ciphertext, nonce, is_favorite, updated_at)| {
-                let rule_count = self.decrypt_rule_count(&ciphertext, &nonce, &name)?;
+                let counts = self.decrypt_rule_counts(&ciphertext, &nonce, &name)?;
                 let tags = tags_for_profile_id(&self.conn, id)?;
                 Ok(ProfileSummary {
                     is_active: Some(&name) == active_name.as_ref(),
                     id,
                     name,
-                    rule_count,
+                    rule_count: counts.total,
+                    enabled_rule_count: counts.enabled,
                     is_favorite,
                     updated_at,
                     tags,
@@ -434,6 +448,7 @@ impl ProfileStore {
     }
 
     pub fn create_tag(&mut self, name: &str) -> Result<(), ProfileStoreError> {
+        masking_core::validate_display_name(name).map_err(ProfileStoreError::InvalidTagName)?;
         let exists: bool =
             self.conn.query_row("SELECT EXISTS(SELECT 1 FROM tags WHERE name = ?1)", [name], |row| row.get(0))?;
         if exists {
@@ -444,6 +459,7 @@ impl ProfileStore {
     }
 
     pub fn rename_tag(&mut self, old_name: &str, new_name: &str) -> Result<(), ProfileStoreError> {
+        masking_core::validate_display_name(new_name).map_err(ProfileStoreError::InvalidTagName)?;
         let tx = self.conn.transaction()?;
 
         let exists: bool =
@@ -538,11 +554,18 @@ impl ProfileStore {
     /// 行うと、悪意あるルールを含むプロファイルを一度取り込んだ場合に起動・一覧更新の
     /// たびコンパイルコストが再発してしまう(SMX-4対応)。ルール件数だけが必要な場合は
     /// `serde_json::Value`として構造的に数えるだけに留め、regexには一切触れない。
-    fn decrypt_rule_count(&self, ciphertext: &[u8], nonce: &[u8], name: &str) -> Result<usize, ProfileStoreError> {
+    fn decrypt_rule_counts(&self, ciphertext: &[u8], nonce: &[u8], name: &str) -> Result<RuleCounts, ProfileStoreError> {
         let plaintext = crypto::decrypt(&self.key, ciphertext, nonce, name.as_bytes())?;
         let value: serde_json::Value =
             serde_json::from_slice(&plaintext).map_err(|e| ProfileStoreError::CorruptProfileData(e.to_string()))?;
-        Ok(rule_count_of(&value))
+        Ok(RuleCounts { total: rule_count_of(&value), enabled: enabled_rule_count_of(&value) })
+    }
+
+    /// 現在アクティブなプロファイルが設定されているか(値そのものは不要な場面向けの
+    /// 軽量版。インポートのプレビュー画面で「実行するとアクティブになる」を正しく
+    /// 判定するために使う。復号を伴わない)。
+    pub fn has_active_profile(&self) -> Result<bool, ProfileStoreError> {
+        Ok(read_active_profile_name(&self.conn)?.is_some())
     }
 
     /// 指定したプロファイルのルール・お気に入り・タグをまとめて読み出す
@@ -645,8 +668,21 @@ fn check_import_size_limits(json: &[u8]) -> Result<(), ProfileStoreError> {
     Ok(())
 }
 
+struct RuleCounts {
+    total: usize,
+    enabled: usize,
+}
+
 fn rule_count_of(profile: &serde_json::Value) -> usize {
     profile.get("rules").and_then(serde_json::Value::as_array).map_or(0, Vec::len)
+}
+
+// RuleDtoの"enabled"は#[serde(default = "default_enabled")]でtrueが既定のため、
+// フィールド自体が無い場合もtrue(有効)として数える。
+fn enabled_rule_count_of(profile: &serde_json::Value) -> usize {
+    profile.get("rules").and_then(serde_json::Value::as_array).map_or(0, |rules| {
+        rules.iter().filter(|r| r.get("enabled").and_then(serde_json::Value::as_bool).unwrap_or(true)).count()
+    })
 }
 
 /// タグ名自体はget-or-createで解決するため衝突しないが、1プロファイルの`tags`内で
@@ -655,6 +691,10 @@ fn rule_count_of(profile: &serde_json::Value) -> usize {
 /// 無視する(タグを2回指定しても1回指定と同じ結果になるだけで、エラーにはしない)。
 fn attach_tags(conn: &Connection, profile_id: i64, tags: &[String]) -> Result<(), ProfileStoreError> {
     for tag_name in tags {
+        // set_profile_tags(ユーザー入力)だけでなく、インポート経由のタグ(ファイル内の
+        // 任意の文字列)もここを通るため、この関数自身で検証する。呼び出し元での
+        // チェック漏れがあってもDBへの書き込み前に必ず1箇所で弾かれるようにするため。
+        masking_core::validate_display_name(tag_name).map_err(ProfileStoreError::InvalidTagName)?;
         conn.execute("INSERT INTO tags (name) VALUES (?1) ON CONFLICT(name) DO NOTHING", [tag_name])?;
         let tag_id: i64 = conn.query_row("SELECT id FROM tags WHERE name = ?1", [tag_name], |row| row.get(0))?;
         conn.execute(
@@ -675,6 +715,13 @@ fn insert_profile_row(
     is_favorite: bool,
     tags: &[String],
 ) -> Result<(), ProfileStoreError> {
+    // 全体インポートの衝突解決(bulk::resolve_name)はサフィックスを付与するだけで
+    // 双方向書式文字等は追加しないが、既に上限文字数ぎりぎりの名前だと付与後に
+    // 長さ上限を超えうる。タグと同じくこの書き込み直前の1箇所で検証することで、
+    // 呼び出し元(単一インポート・全体インポートの衝突解決後いずれも)を問わず
+    // 上限超過の書き込みを防ぐ。
+    masking_core::validate_display_name(name).map_err(ProfileStoreError::InvalidProfileName)?;
+
     let exists: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM profiles WHERE name = ?1)", [name], |row| row.get(0))?;
     if exists {
         return Err(ProfileStoreError::ProfileAlreadyExists(name.to_string()));
@@ -1042,10 +1089,47 @@ mod tests {
         assert_eq!(summaries.len(), 2);
         let alpha = summaries.iter().find(|s| s.name == "alpha").unwrap();
         assert_eq!(alpha.rule_count, 1);
+        assert_eq!(alpha.enabled_rule_count, 1, "sample_profileのルールは有効のはず");
         assert!(alpha.is_active, "最初に作成したalphaがアクティブなはず");
         assert!(!alpha.is_favorite);
         let beta = summaries.iter().find(|s| s.name == "beta").unwrap();
         assert!(!beta.is_active);
+    }
+
+    #[test]
+    fn list_profiles_reports_zero_enabled_rules_when_all_are_disabled() {
+        let (_dir, paths) = temp_paths();
+        init_at(&paths).unwrap();
+        let mut store = ProfileStore::open_at(&paths).unwrap();
+        let disabled_rule = Rule::new(
+            "ip",
+            PatternType::Regex,
+            r"\d+\.\d+\.\d+\.\d+",
+            Mode::Sequential,
+            None,
+            Some("__MASK_IP_".to_string()),
+            false,
+            None,
+        )
+        .unwrap();
+        store.create_profile(&RuleProfile::new("all-disabled", None, vec![disabled_rule]).unwrap()).unwrap();
+
+        let summary = store.list_profiles().unwrap().into_iter().find(|s| s.name == "all-disabled").unwrap();
+
+        assert_eq!(summary.rule_count, 1, "総ルール数は無効ルールも数えるはず");
+        assert_eq!(summary.enabled_rule_count, 0, "無効ルールは有効数に数えないはず");
+    }
+
+    #[test]
+    fn has_active_profile_reflects_whether_one_is_set() {
+        let (_dir, paths) = temp_paths();
+        init_at(&paths).unwrap();
+        let mut store = ProfileStore::open_at(&paths).unwrap();
+        assert!(!store.has_active_profile().unwrap(), "作成前はアクティブ未設定のはず");
+
+        store.create_profile(&sample_profile("work")).unwrap();
+
+        assert!(store.has_active_profile().unwrap(), "最初の作成でアクティブになるはず");
     }
 
     #[test]
@@ -1066,7 +1150,8 @@ mod tests {
         assert!(matches!(&preview, ImportPreview::Single { name, .. } if name == "work"));
         let outcome = store_b.commit_import(preview).unwrap();
 
-        assert_eq!(outcome, ImportOutcome::Single { name: "work".to_string() });
+        // store_bは新規のためアクティブ未設定 → このインポートでactivated=trueになるはず。
+        assert_eq!(outcome, ImportOutcome::Single { name: "work".to_string(), activated: true });
         assert_eq!(store_b.get_profile("work").unwrap().rules().len(), 1);
     }
 
@@ -1183,7 +1268,9 @@ mod tests {
         let ImportPreview::All { entries, .. } = &preview else { panic!("Allを期待") };
         assert!(entries.iter().all(|e| !e.renamed), "空のDBへのインポートはリネームされないはず");
 
-        store_b.commit_import(preview).unwrap();
+        let outcome = store_b.commit_import(preview).unwrap();
+        let ImportOutcome::All { activated_profile_name, .. } = outcome else { panic!("Allを期待") };
+        assert_eq!(activated_profile_name, Some("personal".to_string()));
 
         let summaries = store_b.list_profiles().unwrap();
         assert_eq!(summaries.len(), 2);
@@ -1206,7 +1293,9 @@ mod tests {
         store_b.create_profile(&sample_profile("existing")).unwrap();
 
         let preview = store_b.preview_import(&exported, passphrase("pw")).unwrap();
-        store_b.commit_import(preview).unwrap();
+        let outcome = store_b.commit_import(preview).unwrap();
+        let ImportOutcome::All { activated_profile_name, .. } = outcome else { panic!("Allを期待") };
+        assert_eq!(activated_profile_name, None, "既にアクティブがある場合はactivated情報も無いはず");
 
         let active = store_b.active_profile().unwrap().unwrap();
         assert_eq!(active.profile_name(), "existing", "既にアクティブがある場合は上書きされないはず");
@@ -1240,6 +1329,34 @@ mod tests {
         assert!(names.contains(&"work".to_string()), "元のworkは変更されず残っているはず");
         assert!(names.contains(&"work (インポート)".to_string()));
         assert!(names.contains(&"personal".to_string()));
+    }
+
+    #[test]
+    fn import_all_rejects_a_collision_rename_that_would_exceed_the_length_limit() {
+        // 衝突解決のサフィックス(" (インポート)")自体は攻撃者由来ではないが、既に
+        // 上限文字数ぎりぎりの名前に付与すると上限を超えうる。insert_profile_row側の
+        // 検証で拒否され、かつ1トランザクションのため他のプロファイルも巻き込まれて
+        // 作成されないことを確認する(全体は1トランザクションにまとめる既存方針通り)。
+        let at_limit_name = "a".repeat(masking_core::MAX_DISPLAY_NAME_LENGTH);
+
+        let (_dir_a, paths_a) = temp_paths();
+        init_at(&paths_a).unwrap();
+        let mut store_a = ProfileStore::open_at(&paths_a).unwrap();
+        store_a.create_profile(&sample_profile(&at_limit_name)).unwrap();
+        store_a.create_profile(&sample_profile("personal")).unwrap();
+        let exported = store_a.export_all(passphrase("pw")).unwrap();
+
+        let (_dir_b, paths_b) = temp_paths();
+        init_at(&paths_b).unwrap();
+        let mut store_b = ProfileStore::open_at(&paths_b).unwrap();
+        store_b.create_profile(&sample_profile(&at_limit_name)).unwrap(); // 衝突させる
+
+        let preview = store_b.preview_import(&exported, passphrase("pw")).unwrap();
+        let err = store_b.commit_import(preview).expect_err("リネーム後に上限を超えるので拒否されるはず");
+        assert!(matches!(err, ProfileStoreError::InvalidProfileName(_)));
+
+        let names: Vec<String> = store_b.list_profiles().unwrap().into_iter().map(|s| s.name).collect();
+        assert_eq!(names, vec![at_limit_name], "1件でも失敗した場合、他のpersonalも作成されないはず");
     }
 
     #[test]
@@ -1628,6 +1745,46 @@ mod tests {
         store.rename_tag("sip", "voip").unwrap();
 
         assert_eq!(store.list_tags().unwrap(), vec!["voip".to_string()]);
+    }
+
+    #[test]
+    fn create_tag_with_a_bidi_override_character_is_rejected() {
+        let (_dir, paths) = temp_paths();
+        init_at(&paths).unwrap();
+        let mut store = ProfileStore::open_at(&paths).unwrap();
+
+        let err = store.create_tag("sip\u{202E}").expect_err("双方向書式文字を含むタグ名は拒否されるはず");
+        assert!(matches!(err, ProfileStoreError::InvalidTagName(_)));
+        assert!(store.list_tags().unwrap().is_empty());
+    }
+
+    #[test]
+    fn rename_tag_to_an_invalid_name_is_rejected() {
+        let (_dir, paths) = temp_paths();
+        init_at(&paths).unwrap();
+        let mut store = ProfileStore::open_at(&paths).unwrap();
+        store.create_tag("sip").unwrap();
+
+        let too_long = "a".repeat(masking_core::MAX_DISPLAY_NAME_LENGTH + 1);
+        let err = store.rename_tag("sip", &too_long).expect_err("長さ上限超過は拒否されるはず");
+        assert!(matches!(err, ProfileStoreError::InvalidTagName(_)));
+        assert_eq!(store.list_tags().unwrap(), vec!["sip".to_string()], "リネーム失敗時は元の名前のままのはず");
+    }
+
+    #[test]
+    fn set_profile_tags_with_an_invalid_tag_name_is_rejected() {
+        // インポート由来のタグ(attach_tags経由)も同じ検証を通ることの間接的な確認
+        // (attach_tagsはprivateなため、公開APIのset_profile_tags経由で検証する)。
+        let (_dir, paths) = temp_paths();
+        init_at(&paths).unwrap();
+        let mut store = ProfileStore::open_at(&paths).unwrap();
+        store.create_profile(&sample_profile("work")).unwrap();
+
+        let err = store
+            .set_profile_tags("work", &["sip".to_string(), "sip\u{202E}".to_string()])
+            .expect_err("不正なタグ名を含む場合は拒否されるはず");
+        assert!(matches!(err, ProfileStoreError::InvalidTagName(_)));
+        assert!(store.list_tags().unwrap().is_empty(), "1件でも不正ならトランザクション全体がロールバックするはず");
     }
 
     #[test]

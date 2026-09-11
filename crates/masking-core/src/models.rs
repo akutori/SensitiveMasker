@@ -7,6 +7,37 @@ use thiserror::Error;
 /// 大量のルールを持つプロファイルでのコンパイルコスト積み上げを抑える(SMX-4対応)。
 const REGEX_SIZE_LIMIT_BYTES: usize = 1 << 20; // 1MiB
 
+/// プロファイル名・ルール名・タグ名に共通の長さ上限(文字数)。
+pub const MAX_DISPLAY_NAME_LENGTH: usize = 100;
+
+/// 制御文字(改行・タブ等)およびUnicode双方向書式文字(RLO等)を拒否する。後者は
+/// 確認画面上でテキストの表示順を偽装でき、インポート確認ダイアログのような
+/// 「内容を見て判断する」UIの前提を崩すため(インポートしたプロファイル名・ルール名・
+/// タグ名を対象にした監査指摘への対応)。
+fn find_disallowed_char(value: &str) -> Option<char> {
+    value.chars().find(|c| {
+        c.is_control()
+            || matches!(c,
+                '\u{061C}' // ALM
+                | '\u{200E}' | '\u{200F}' // LRM, RLM
+                | '\u{202A}'..='\u{202E}' // LRE, RLE, PDF, LRO, RLO
+                | '\u{2066}'..='\u{2069}' // LRI, RLI, FSI, PDI
+            )
+    })
+}
+
+/// プロファイル名・ルール名・タグ名に共通の検証(呼び出し側で各エラー型に包む)。
+pub fn validate_display_name(value: &str) -> Result<(), String> {
+    let len = value.chars().count();
+    if len > MAX_DISPLAY_NAME_LENGTH {
+        return Err(format!("長すぎます({len}文字、上限{MAX_DISPLAY_NAME_LENGTH}文字)"));
+    }
+    if let Some(c) = find_disallowed_char(value) {
+        return Err(format!("使用できない文字が含まれています(U+{:04X})", c as u32));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PatternType {
@@ -23,6 +54,8 @@ pub enum Mode {
 
 #[derive(Debug, Error)]
 pub enum RuleError {
+    #[error("ルール名 '{name}' が不正です: {reason}")]
+    InvalidName { name: String, reason: String },
     #[error("ルール '{name}': mode='fixed' の場合は 'fixed_value' が必須です")]
     MissingFixedValue { name: String },
     #[error("ルール '{name}': mode='sequential' の場合は 'prefix' が必須です")]
@@ -84,6 +117,9 @@ impl Rule {
         let name = name.into();
         let pattern = pattern.into();
 
+        if let Err(reason) = validate_display_name(&name) {
+            return Err(RuleError::InvalidName { name, reason });
+        }
         if mode == Mode::Fixed && fixed_value.as_deref().unwrap_or("").is_empty() {
             return Err(RuleError::MissingFixedValue { name });
         }
@@ -175,6 +211,8 @@ pub enum RuleProfileError {
     // 置換値が誤って混線する。よって構築時点で重複を拒否する。
     #[error("プロファイル内でルール名が重複しています: '{name}'")]
     DuplicateRuleName { name: String },
+    #[error("プロファイル名が不正です: {reason}")]
+    InvalidProfileName { reason: String },
 }
 
 // RuleProfile::newの検証(ルール名の重複拒否)をdeserialize経由でも必ず通すための橋渡し用DTO。
@@ -200,6 +238,11 @@ impl RuleProfile {
         description: Option<String>,
         rules: Vec<Rule>,
     ) -> Result<Self, RuleProfileError> {
+        let profile_name = profile_name.into();
+        if let Err(reason) = validate_display_name(&profile_name) {
+            return Err(RuleProfileError::InvalidProfileName { reason });
+        }
+
         let mut seen_names = std::collections::HashSet::new();
         for rule in &rules {
             if !seen_names.insert(rule.name()) {
@@ -299,6 +342,55 @@ mod tests {
     }
 
     #[test]
+    fn rule_name_exceeding_the_length_limit_is_rejected() {
+        let too_long = "a".repeat(MAX_DISPLAY_NAME_LENGTH + 1);
+        let err = Rule::new(too_long, PatternType::Literal, "x", Mode::Fixed, Some("x".to_string()), None, true, None)
+            .expect_err("長さ上限超過は拒否されるはず");
+        assert!(matches!(err, RuleError::InvalidName { .. }));
+    }
+
+    #[test]
+    fn rule_name_at_the_length_limit_is_accepted() {
+        let at_limit = "a".repeat(MAX_DISPLAY_NAME_LENGTH);
+        let rule =
+            Rule::new(at_limit, PatternType::Literal, "x", Mode::Fixed, Some("x".to_string()), None, true, None);
+        assert!(rule.is_ok());
+    }
+
+    #[test]
+    fn rule_name_containing_a_control_character_is_rejected() {
+        let err = Rule::new(
+            "r1\u{0007}",
+            PatternType::Literal,
+            "x",
+            Mode::Fixed,
+            Some("x".to_string()),
+            None,
+            true,
+            None,
+        )
+        .expect_err("制御文字を含む名前は拒否されるはず");
+        assert!(matches!(err, RuleError::InvalidName { .. }));
+    }
+
+    #[test]
+    fn rule_name_containing_a_bidi_override_character_is_rejected() {
+        // U+202E (RIGHT-TO-LEFT OVERRIDE): 確認画面での表示順を偽装しうる。
+        let err = Rule::new(
+            "r1\u{202E}",
+            PatternType::Literal,
+            "x",
+            Mode::Fixed,
+            Some("x".to_string()),
+            None,
+            true,
+            None,
+        )
+        .expect_err("双方向書式文字を含む名前は拒否されるはず");
+        assert!(matches!(err, RuleError::InvalidName { .. }));
+    }
+
+    #[test]
     fn regex_pattern_type_rejects_patterns_that_compile_to_an_excessive_size() {
         // ネストした繰り返しでコンパイル後サイズを膨張させる。"(?:a{200}){200}"は
         // regexクレートの既定size_limit(10MiB)なら受理されるが、このプロジェクトが
@@ -392,5 +484,18 @@ mod tests {
         }"#;
         let result: Result<RuleProfile, _> = serde_json::from_str(json);
         assert!(result.is_err(), "ルール名の重複はdeserializeでも拒否されるべき");
+    }
+
+    #[test]
+    fn profile_name_exceeding_the_length_limit_is_rejected() {
+        let too_long = "a".repeat(MAX_DISPLAY_NAME_LENGTH + 1);
+        let err = RuleProfile::new(too_long, None, vec![]).expect_err("長さ上限超過は拒否されるはず");
+        assert!(matches!(err, RuleProfileError::InvalidProfileName { .. }));
+    }
+
+    #[test]
+    fn profile_name_containing_a_bidi_override_character_is_rejected() {
+        let err = RuleProfile::new("p\u{202E}", None, vec![]).expect_err("双方向書式文字を含む名前は拒否されるはず");
+        assert!(matches!(err, RuleProfileError::InvalidProfileName { .. }));
     }
 }

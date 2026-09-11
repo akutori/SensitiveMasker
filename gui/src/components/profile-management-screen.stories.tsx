@@ -32,6 +32,7 @@ const INITIAL_PROFILES: Profile[] = [
     isFavorite: true,
     updatedAt: "2026-09-01",
     ruleCount: 5,
+    enabledRuleCount: 5,
     tags: ["SIP", "案件A"],
   },
   {
@@ -41,6 +42,7 @@ const INITIAL_PROFILES: Profile[] = [
     isFavorite: false,
     updatedAt: "2026-08-20",
     ruleCount: 3,
+    enabledRuleCount: 1,
     tags: ["SIP", "案件B"],
   },
   {
@@ -50,6 +52,7 @@ const INITIAL_PROFILES: Profile[] = [
     isFavorite: false,
     updatedAt: "2026-07-10",
     ruleCount: 2,
+    enabledRuleCount: 0,
     tags: ["案件A"],
   },
 ];

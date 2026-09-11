@@ -39,6 +39,7 @@ export interface Profile {
   isFavorite: boolean;
   updatedAt: string;
   ruleCount: number;
+  enabledRuleCount: number;
   tags: string[];
 }
 
@@ -51,17 +52,34 @@ export interface Tag {
 // ダイアログとも共用する(拡張子は常に.smx)。
 export const SMX_FILE_FILTERS = [{ name: "SensitiveMasker Export", extensions: ["smx"] }];
 
+// タグの無警告追加(監査指摘)・アクティブ化の無警告発生(同)の両方に確定前に
+// 気付けるよう、件数・有無をresult文言に含める。
+function tagsSuffix(tags: string[]): string {
+  return tags.length > 0 ? `(タグ: ${tags.join("、")})` : "";
+}
+
 export function toImportPreviewRows(preview: ImportPreviewDto): ImportPreviewRow[] {
   if (preview.kind === "single") {
-    return [{ profileName: preview.name, result: "新規プロファイルとして追加されます", rules: preview.rules }];
+    return [
+      {
+        profileName: preview.name,
+        result: `新規プロファイルとして追加されます${tagsSuffix(preview.tags)}`,
+        rules: preview.rules,
+      },
+    ];
   }
-  return preview.entries.map((entry) => ({
-    profileName: entry.original_name,
-    result: entry.renamed
+  return preview.entries.map((entry) => {
+    const base = entry.renamed
       ? `名前が重複するため「${entry.resolved_name}」として追加されます`
-      : "新規プロファイルとして追加されます",
-    rules: entry.rules,
-  }));
+      : "新規プロファイルとして追加されます";
+    const activated =
+      preview.will_activate_profile_name === entry.resolved_name ? "、アクティブになります" : "";
+    return {
+      profileName: entry.original_name,
+      result: `${base}${activated}${tagsSuffix(entry.tags)}`,
+      rules: entry.rules,
+    };
+  });
 }
 
 export interface AppStateValue {
@@ -168,6 +186,7 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
         isFavorite: s.is_favorite,
         updatedAt: s.updated_at,
         ruleCount: s.rule_count,
+        enabledRuleCount: s.enabled_rule_count,
         tags: s.tags,
       }))
     );
@@ -341,8 +360,14 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
       previewImport: (sourcePath, passphrase) => ipcPreviewImport(sourcePath, passphrase),
       commitImport: () =>
         reportAndRethrow("インポートに失敗しました", async () => {
-          await ipcCommitPendingImport();
+          const { activated_profile_name } = await ipcCommitPendingImport();
           await Promise.all([refreshProfiles(), refreshTags()]);
+          // アクティブ未設定だった場合、無言でインポート内容がアクティブ化されうる
+          // (監査指摘対応)。プレビュー画面でも事前に示されるが、実際に確定した
+          // 結果としてここでも改めて知らせる。
+          if (activated_profile_name) {
+            toast.info(`プロファイル「${activated_profile_name}」がアクティブになりました`);
+          }
         }),
 
       tags,

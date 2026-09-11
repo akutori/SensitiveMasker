@@ -110,9 +110,14 @@ pub enum ImportPreviewDto {
     Single {
         name: String,
         rules: Vec<ImportRuleDto>,
+        tags: Vec<String>,
     },
     All {
-        active_profile_name: Option<String>,
+        // ファイル内のactive_profile_nameをそのまま返すのではなく、取り込み先の現在の
+        // 状態(既にアクティブが設定済みかどうか)も踏まえて「このインポートを実行すると
+        // 実際にどのプロファイルがアクティブになるか」を返す(既にアクティブがあれば
+        // 常にNone)。commit_import側の判定と同じ条件を確認前に見せるための情報。
+        will_activate_profile_name: Option<String>,
         entries: Vec<ImportEntryDto>,
     },
 }
@@ -123,6 +128,7 @@ pub struct ImportEntryDto {
     pub resolved_name: String,
     pub renamed: bool,
     pub rules: Vec<ImportRuleDto>,
+    pub tags: Vec<String>,
 }
 
 /// インポート確認画面でルールの中身を表示するためのDTO(SMX-1対応)。
@@ -155,24 +161,45 @@ fn to_rule_dto(rule: &Rule) -> ImportRuleDto {
     }
 }
 
-fn to_dto(preview: &ImportPreview) -> ImportPreviewDto {
+fn to_dto(preview: &ImportPreview, destination_has_active_profile: bool) -> ImportPreviewDto {
     match preview {
-        ImportPreview::Single { name, exported } => {
-            ImportPreviewDto::Single { name: name.clone(), rules: to_rule_dtos(&exported.profile) }
-        }
-        ImportPreview::All { active_profile_name, entries, exported } => ImportPreviewDto::All {
-            active_profile_name: active_profile_name.clone(),
-            entries: entries.iter().zip(exported).map(|(entry, exp)| to_entry_dto(entry, &exp.profile)).collect(),
+        ImportPreview::Single { name, exported } => ImportPreviewDto::Single {
+            name: name.clone(),
+            rules: to_rule_dtos(&exported.profile),
+            tags: exported.tags.clone(),
         },
+        ImportPreview::All { active_profile_name, entries, exported } => {
+            // commit_import側の実際の判定(取り込み先に既にアクティブがあれば変更しない)と
+            // 同じ条件をここでも評価する。ここでNoneにしても、実際にcommit_importへ渡す
+            // previewそのもの(ImportPreview::All.active_profile_name)は変更しない
+            // (表示用の判定と実際のコミット時の判定は独立に評価する設計を保つため)。
+            let will_activate_profile_name = (!destination_has_active_profile)
+                .then(|| active_profile_name.as_ref())
+                .flatten()
+                .and_then(|original| entries.iter().find(|e| &e.original_name == original))
+                .map(|entry| entry.resolved_name.clone());
+            ImportPreviewDto::All {
+                will_activate_profile_name,
+                entries: entries
+                    .iter()
+                    .zip(exported)
+                    .map(|(entry, exp)| to_entry_dto(entry, &exp.profile, &exp.tags))
+                    .collect(),
+            }
+        }
     }
 }
 
-fn to_entry_dto(entry: &AllImportEntry, profile: &RuleProfile) -> ImportEntryDto {
+// ExportedProfile自体はprofile-store内部限定の型(privateなbulkモジュール定義)のため
+// 名指しできず、.profile/.tagsのフィールド射影を個別の引数として受け取る(既存のprofile
+// 引数の扱いと同じ理由)。
+fn to_entry_dto(entry: &AllImportEntry, profile: &RuleProfile, tags: &[String]) -> ImportEntryDto {
     ImportEntryDto {
         original_name: entry.original_name.clone(),
         resolved_name: entry.resolved_name.clone(),
         renamed: entry.renamed,
         rules: to_rule_dtos(profile),
+        tags: tags.to_vec(),
     }
 }
 
@@ -212,19 +239,38 @@ fn preview_import_impl(
     }
     let data = std::fs::read(&source_path).map_err(|_| ExportImportError::Failed(GENERIC_IO_ERROR.to_string()))?;
     let preview = with_store(state, |store| store.preview_import(&data, passphrase)).map_err(ExportImportError::Failed)?;
-    let dto = to_dto(&preview);
+    let has_active = with_store(state, |store| store.has_active_profile()).map_err(ExportImportError::Failed)?;
+    let dto = to_dto(&preview, has_active);
     *pending.0.lock().unwrap_or_else(|e| e.into_inner()) = Some(preview);
     Ok(dto)
 }
 
-fn commit_pending_import_impl(state: &ProfileStoreState, pending: &PendingImportState) -> Result<(), String> {
+/// インポート確定後、実際にどのプロファイルがアクティブになったか(無ければNone)。
+/// 無言でのアクティブ化(update_profileと同じ問題意識)に気付けるようにするための情報。
+#[derive(Debug, serde::Serialize)]
+pub struct CommitImportResultDto {
+    pub activated_profile_name: Option<String>,
+}
+
+fn commit_pending_import_impl(
+    state: &ProfileStoreState,
+    pending: &PendingImportState,
+) -> Result<CommitImportResultDto, String> {
     let preview = pending
         .0
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .take()
         .ok_or_else(|| "確認待ちのインポートがありません".to_string())?;
-    with_store(state, |store| store.commit_import(preview).map(|_| ()))
+    let outcome = with_store(state, |store| store.commit_import(preview))?;
+    Ok(match outcome {
+        profile_store::ImportOutcome::Single { name, activated } => {
+            CommitImportResultDto { activated_profile_name: activated.then_some(name) }
+        }
+        profile_store::ImportOutcome::All { activated_profile_name, .. } => {
+            CommitImportResultDto { activated_profile_name }
+        }
+    })
 }
 
 #[tauri::command]
@@ -263,11 +309,11 @@ pub async fn commit_pending_import(
     app: tauri::AppHandle,
     state: tauri::State<'_, ProfileStoreState>,
     pending: tauri::State<'_, PendingImportState>,
-) -> Result<(), String> {
-    commit_pending_import_impl(&state, &pending)?;
+) -> Result<CommitImportResultDto, String> {
+    let result = commit_pending_import_impl(&state, &pending)?;
     let _ = app.emit("profiles-changed", ());
     let _ = app.emit("tags-changed", ());
-    Ok(())
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -347,7 +393,7 @@ mod tests {
         )
         .expect("正しいパスフレーズでのpreviewは成功するはず");
         match dto {
-            ImportPreviewDto::Single { name, rules } => {
+            ImportPreviewDto::Single { name, rules, tags } => {
                 assert_eq!(name, "元プロファイル");
                 // SMX-1対応: 確認前にルールの中身(名前・パターン・有効/無効)が
                 // 見える必要があるため、DTOに含まれることをここで固定する。
@@ -355,11 +401,17 @@ mod tests {
                 assert_eq!(rules[0].name, "電話番号");
                 assert_eq!(rules[0].pattern, "0120");
                 assert!(rules[0].enabled);
+                assert!(tags.is_empty());
             }
             ImportPreviewDto::All { .. } => panic!("単一プロファイルのエクスポートのはず"),
         }
 
-        commit_pending_import_impl(&dest_state, &pending).expect("commitは成功するはず");
+        let result = commit_pending_import_impl(&dest_state, &pending).expect("commitは成功するはず");
+        assert_eq!(
+            result.activated_profile_name.as_deref(),
+            Some("元プロファイル"),
+            "取り込み先は新規ストアでアクティブ未設定のはず"
+        );
 
         let names = with_store(&dest_state, |s| s.list_profiles()).unwrap();
         assert_eq!(names.len(), 1);
@@ -401,17 +453,101 @@ mod tests {
         // 名前でエントリを探した上でそのルールが正しく自分自身のものであることを固定する
         // (取り違えがあれば、内容の入れ替わりとして検出できる)。
         match dto {
-            ImportPreviewDto::All { entries, .. } => {
+            ImportPreviewDto::All { entries, will_activate_profile_name } => {
                 assert_eq!(entries.len(), 2);
                 let a = entries.iter().find(|e| e.original_name == "プロファイルA").expect("プロファイルAが見つかるはず");
                 assert_eq!(a.rules.len(), 1);
                 assert_eq!(a.rules[0].name, "Aルール");
                 assert_eq!(a.rules[0].pattern, "AAA");
+                assert!(a.tags.is_empty());
 
                 let b = entries.iter().find(|e| e.original_name == "プロファイルB").expect("プロファイルBが見つかるはず");
                 assert_eq!(b.rules.len(), 1);
                 assert_eq!(b.rules[0].name, "Bルール");
                 assert_eq!(b.rules[0].pattern, "BBB");
+
+                // プロファイルAが先に作成されたため元ストアではアクティブ、取り込み先は
+                // 新規ストアでアクティブ未設定のため、このインポートを実行するとAが
+                // アクティブになることが事前にわかるはず(SMX-1関連LOW対応)。
+                assert_eq!(will_activate_profile_name.as_deref(), Some("プロファイルA"));
+            }
+            ImportPreviewDto::Single { .. } => panic!("全体エクスポートのはず"),
+        }
+    }
+
+    #[test]
+    fn preview_import_single_includes_tags() {
+        let source_dir = tempfile::tempdir().unwrap();
+        let dest_dir = tempfile::tempdir().unwrap();
+        let export_file = tempfile::Builder::new().suffix(".smx").tempfile().unwrap();
+
+        let mut source_store = init_store_with_one_profile(source_dir.path(), "元プロファイル");
+        source_store.set_profile_tags("元プロファイル", &["sip".to_string()]).unwrap();
+        let source_state = ProfileStoreState::with_store_for_test(source_store);
+        export_profile_to_file_impl(
+            &source_state,
+            "元プロファイル",
+            passphrase("correct horse battery staple"),
+            export_file.path().to_str().unwrap(),
+        )
+        .expect("エクスポートは成功するはず");
+
+        let dest_paths = AppPaths::at(dest_dir.path());
+        profile_store::init_at(&dest_paths).unwrap();
+        let dest_store = ProfileStore::open_at(&dest_paths).unwrap();
+        let dest_state = ProfileStoreState::with_store_for_test(dest_store);
+        let pending = PendingImportState::default();
+
+        let dto = preview_import_impl(
+            &dest_state,
+            &pending,
+            export_file.path().to_str().unwrap(),
+            passphrase("correct horse battery staple"),
+        )
+        .expect("正しいパスフレーズでのpreviewは成功するはず");
+
+        match dto {
+            // インポートで無警告のままグローバルなタグ集合へ追加されうる問題への対応
+            // (確定前にどのタグが付くか見えるようにする)。
+            ImportPreviewDto::Single { tags, .. } => assert_eq!(tags, vec!["sip".to_string()]),
+            ImportPreviewDto::All { .. } => panic!("単一プロファイルのエクスポートのはず"),
+        }
+    }
+
+    #[test]
+    fn preview_import_all_reports_no_activation_when_destination_already_has_an_active_profile() {
+        let source_dir = tempfile::tempdir().unwrap();
+        let dest_dir = tempfile::tempdir().unwrap();
+        let export_file = tempfile::Builder::new().suffix(".smx").tempfile().unwrap();
+
+        let source_store = init_store_with_two_profiles(source_dir.path());
+        let source_state = ProfileStoreState::with_store_for_test(source_store);
+        export_all_to_file_impl(
+            &source_state,
+            passphrase("correct horse battery staple"),
+            export_file.path().to_str().unwrap(),
+        )
+        .expect("エクスポートは成功するはず");
+
+        // 取り込み先には既にアクティブなプロファイルが存在する状態を作る。
+        let dest_store = init_store_with_one_profile(dest_dir.path(), "既存プロファイル");
+        let dest_state = ProfileStoreState::with_store_for_test(dest_store);
+        let pending = PendingImportState::default();
+
+        let dto = preview_import_impl(
+            &dest_state,
+            &pending,
+            export_file.path().to_str().unwrap(),
+            passphrase("correct horse battery staple"),
+        )
+        .expect("正しいパスフレーズでのpreviewは成功するはず");
+
+        match dto {
+            ImportPreviewDto::All { will_activate_profile_name, .. } => {
+                assert_eq!(
+                    will_activate_profile_name, None,
+                    "取り込み先に既にアクティブなプロファイルがある場合は表示しないはず"
+                );
             }
             ImportPreviewDto::Single { .. } => panic!("全体エクスポートのはず"),
         }

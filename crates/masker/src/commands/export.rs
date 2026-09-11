@@ -118,8 +118,18 @@ fn import_with_passphrase(
     }
 
     match store.commit_import(preview)? {
-        ImportOutcome::Single { name } => println!("プロファイル '{name}' をインポートしました"),
-        ImportOutcome::All { entries } => println!("{}件のプロファイルをインポートしました", entries.len()),
+        ImportOutcome::Single { name, activated } => {
+            println!("プロファイル '{name}' をインポートしました");
+            if activated {
+                println!("(アクティブなプロファイルが未設定だったため、'{name}' をアクティブにしました)");
+            }
+        }
+        ImportOutcome::All { entries, activated_profile_name } => {
+            println!("{}件のプロファイルをインポートしました", entries.len());
+            if let Some(name) = activated_profile_name {
+                println!("(アクティブなプロファイルが未設定だったため、'{name}' をアクティブにしました)");
+            }
+        }
     }
     Ok(())
 }

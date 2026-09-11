@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { TriangleAlert } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -28,6 +29,7 @@ export interface Profile {
   isFavorite: boolean;
   updatedAt: string;
   ruleCount: number;
+  enabledRuleCount: number;
   tags: string[];
 }
 
@@ -228,16 +230,32 @@ export function ProfileManagementScreen({
 
                 <div className="flex-1">
                   <div className="flex items-center gap-2 text-sm font-bold">
-                    {profile.name}
+                    <bdi>{profile.name}</bdi>
                     {profile.isActive && (
                       <span className="rounded-full bg-foreground px-2 py-0.5 text-xs font-normal text-background">
                         使用中
                       </span>
                     )}
                   </div>
-                  <div className="mt-1 text-xs text-foreground">
-                    更新: {profile.updatedAt} ・ ルール{profile.ruleCount}件
-                    {profile.tags.length > 0 && ` ・ ${profile.tags.join(", ")}`}
+                  <div className="mt-1 flex items-center gap-1 text-xs text-foreground">
+                    <span>
+                      更新: {profile.updatedAt} ・ ルール{profile.ruleCount}件
+                      {profile.enabledRuleCount < profile.ruleCount && `(有効${profile.enabledRuleCount}件)`}
+                      {profile.tags.length > 0 && (
+                        <>
+                          {" ・ "}
+                          <bdi>{profile.tags.join(", ")}</bdi>
+                        </>
+                      )}
+                    </span>
+                    {profile.ruleCount > 0 && profile.enabledRuleCount === 0 && (
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <TriangleAlert className="size-3.5 shrink-0 text-muted-foreground" />
+                        </TooltipTrigger>
+                        <TooltipContent>有効なルールが1件もありません(マスクされません)</TooltipContent>
+                      </Tooltip>
+                    )}
                   </div>
                 </div>
 

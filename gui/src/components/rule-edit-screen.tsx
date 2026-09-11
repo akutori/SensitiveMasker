@@ -117,10 +117,14 @@ function SortableRuleRow({
           className="mt-1"
         />
         <div className="min-w-0 flex-1">
-          <div className="text-sm font-medium">{rule.name}</div>
+          <div className="text-sm font-medium">
+            <bdi>{rule.name}</bdi>
+          </div>
           <div className="mt-0.5 text-xs text-foreground">
             {patternTypeLabel(rule.patternType)} / {modeLabel(rule.mode)} ・ 説明:{" "}
-            {rule.description}
+            {/* bdi: 双方向書式文字を含む名前・説明(インポート由来を含む)が、直後の
+                「(無効中)」表示の位置を偽装できないようにする。 */}
+            <bdi>{rule.description}</bdi>
             {!rule.enabled && "(無効中)"}
           </div>
         </div>

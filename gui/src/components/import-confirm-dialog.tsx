@@ -59,13 +59,20 @@ function RuleTable({ rules }: { rules: ImportRuleDto[] }) {
       <TableBody>
         {rules.map((rule) => (
           <TableRow key={rule.name} className={rule.enabled ? undefined : "opacity-50"}>
-            <TableCell className="whitespace-nowrap">{rule.name}</TableCell>
+            {/* bdi: インポート由来の名前・パターン等が双方向書式文字を含んでいても、
+                「状態」列(無効ルールに気付くというSMX-1対応の目的そのもの)の
+                表示位置を偽装できないようにする。 */}
+            <TableCell className="whitespace-nowrap">
+              <bdi>{rule.name}</bdi>
+            </TableCell>
             <TableCell className="whitespace-nowrap">{rule.enabled ? "有効" : "無効"}</TableCell>
             <TableCell className="whitespace-nowrap">{patternTypeLabel(rule.pattern_type)}</TableCell>
             <TableCell className="max-w-40 whitespace-nowrap overflow-hidden text-ellipsis font-mono text-xs">
-              {modeAndValue(rule)}
+              <bdi>{modeAndValue(rule)}</bdi>
             </TableCell>
-            <TableCell className="max-w-72 break-all font-mono text-xs">{rule.pattern}</TableCell>
+            <TableCell className="max-w-72 break-all font-mono text-xs">
+              <bdi>{rule.pattern}</bdi>
+            </TableCell>
           </TableRow>
         ))}
       </TableBody>
@@ -96,8 +103,12 @@ export function ImportConfirmDialog({
           {rows.map((row) => (
             <div key={row.profileName} className="p-3">
               <div className="mb-2 flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
-                <span className="font-medium">{row.profileName}</span>
-                <span className="text-sm text-muted-foreground">{row.result}</span>
+                <span className="font-medium">
+                  <bdi>{row.profileName}</bdi>
+                </span>
+                <span className="text-sm text-muted-foreground">
+                  <bdi>{row.result}</bdi>
+                </span>
               </div>
               <div className="overflow-hidden rounded-md border">
                 <RuleTable rules={row.rules} />

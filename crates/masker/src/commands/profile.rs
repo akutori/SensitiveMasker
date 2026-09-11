@@ -26,10 +26,14 @@ fn list(store: &ProfileStore) -> Result<(), CliError> {
     for s in &summaries {
         let active = if s.is_active { "*" } else { " " };
         let favorite = if s.is_favorite { "*" } else { " " };
-        println!(
-            "{active} {:<20} rules={:<4} favorite={favorite} updated_at={}",
-            s.name, s.rule_count, s.updated_at
-        );
+        // 総ルール数だけだと、全ルール無効化された(実質何もマスクしない)プロファイルが
+        // 一見普通に見えてしまう。有効件数が総数を下回る場合のみ併記する。
+        let rules = if s.enabled_rule_count < s.rule_count {
+            format!("rules={}(有効{})", s.rule_count, s.enabled_rule_count)
+        } else {
+            format!("rules={}", s.rule_count)
+        };
+        println!("{active} {:<20} {rules:<16} favorite={favorite} updated_at={}", s.name, s.updated_at);
     }
     Ok(())
 }

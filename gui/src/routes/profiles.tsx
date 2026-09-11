@@ -174,6 +174,7 @@ function ProfilesRoute() {
           isFavorite: p.isFavorite,
           updatedAt: p.updatedAt,
           ruleCount: p.ruleCount,
+          enabledRuleCount: p.enabledRuleCount,
           tags: p.tags,
         }))}
         searchQuery={searchQuery}
