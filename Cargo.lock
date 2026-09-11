@@ -2357,6 +2357,7 @@ dependencies = [
 name = "gui"
 version = "0.1.0"
 dependencies = [
+ "arboard",
  "masking-core",
  "profile-store",
  "same-file",

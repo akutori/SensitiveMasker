@@ -50,9 +50,35 @@ fn write_clipboard_text_impl<R: Runtime>(
     text: String,
 ) -> Result<(), String> {
     let mut pending = state.0.lock().unwrap_or_else(|e| e.into_inner());
-    app.clipboard().write_text(text.clone()).map_err(|_| CLIPBOARD_ERROR.to_string())?;
-    *pending = Some(text);
-    Ok(())
+    // 書き込み試行前にpendingへ反映する。Windows版のarboard呼び出しはテキスト書き込み後に
+    // 履歴/クラウド除外フォーマットの設定を行う2段階の処理で、後段だけ失敗してもErrが
+    // 返るため、成功後に反映する書き方だとテキストは実際にクリップボードへ残っているのに
+    // pendingが空のままになり得る。decide_outcomeは実際のクリップボード内容と比較してから
+    // 判定するため、書き込みが完全に失敗した場合にpendingだけ残っても誤ってクリアされない。
+    *pending = Some(text.clone());
+    write_to_os_clipboard(app, &text)
+}
+
+/// Windowsでは書き込みと同時にSetExtWindows(exclude_from_history/exclude_from_cloud)で
+/// クリップボード履歴・クラウド同期からの除外を行うため、tauri-plugin-clipboard-manager
+/// (内部でarboardをラップ)を経由せずarboardを直接呼ぶ。このWindows専用拡張traitはプラグイン
+/// からは呼べないため。読み取り・クリア、および非Windowsでの書き込みは対象外(プラグイン経由のまま)。
+#[cfg(windows)]
+fn write_to_os_clipboard<R: Runtime>(_app: &AppHandle<R>, text: &str) -> Result<(), String> {
+    use arboard::SetExtWindows;
+
+    let mut clipboard = arboard::Clipboard::new().map_err(|_| CLIPBOARD_ERROR.to_string())?;
+    clipboard
+        .set()
+        .exclude_from_cloud()
+        .exclude_from_history()
+        .text(text)
+        .map_err(|_| CLIPBOARD_ERROR.to_string())
+}
+
+#[cfg(not(windows))]
+fn write_to_os_clipboard<R: Runtime>(app: &AppHandle<R>, text: &str) -> Result<(), String> {
+    app.clipboard().write_text(text.to_string()).map_err(|_| CLIPBOARD_ERROR.to_string())
 }
 
 /// clear_clipboard_if_matchesの後、pending追跡をクリアしてよいかの判定(純粋関数)。
