@@ -93,3 +93,9 @@ export async function maskText(
     })),
   };
 }
+
+// マスク実行のたびに蓄積する「元の値→ダミー値」対応表(実在の機微情報を保持)を、
+// 入力欄のクリア操作に合わせて破棄する(プロセス終了まで無期限保持されないため)。
+export async function clearMappings(profileId: string): Promise<void> {
+  await invoke("clear_mappings", { profileId });
+}

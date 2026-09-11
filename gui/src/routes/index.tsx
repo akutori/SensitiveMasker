@@ -165,7 +165,11 @@ function MainRoute() {
 
       <ImportPassphraseDialog
         open={dialog.kind === "importPassphrase"}
-        onOpenChange={(open) => !open && closeDialog()}
+        onOpenChange={(open) => {
+          if (open) return;
+          closeDialog();
+          setPassphrase("");
+        }}
         fileName={dialog.kind === "importPassphrase" ? dialog.fileName : ""}
         passphrase={passphrase}
         onPassphraseChange={(value) => {
@@ -185,6 +189,8 @@ function MainRoute() {
                 ? { kind: "importConfirm", rows: toImportPreviewRows(preview) }
                 : current
             );
+            // 復号は完了済みでこの先パスフレーズ自体は不要になるため、state上に残さない。
+            setPassphrase("");
           } catch (error) {
             // パス・拡張子・サイズ等、パスフレーズを試す前の事前検証で弾かれた場合は
             // その具体的な理由を示す(パスフレーズとは無関係なため誤案内を避ける)。
@@ -199,7 +205,13 @@ function MainRoute() {
 
       <ImportConfirmDialog
         open={dialog.kind === "importConfirm"}
-        onOpenChange={(open) => !open && closeDialog()}
+        onOpenChange={(open) => {
+          if (open) return;
+          closeDialog();
+          // commit成功/失敗時はRust側で既に消費済みだが、キャンセル時はここで
+          // 明示的に破棄しない限り復号済みの平文が残り続けるため。
+          appState.clearPendingImport();
+        }}
         rows={dialog.kind === "importConfirm" ? dialog.rows : []}
         onConfirm={async () => {
           try {

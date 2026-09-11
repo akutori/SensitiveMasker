@@ -3,8 +3,9 @@ import { toast } from "sonner";
 import type { RuleListItem } from "@/components/rule-edit-screen";
 import type { ImportPreviewRow } from "@/components/import-confirm-dialog";
 import { DEMO_SAMPLE_TEXT, PROFILE_TEMPLATE_RULES } from "./demo-seed-data";
-import { maskText } from "./masking-ipc";
+import { maskText, clearMappings as ipcClearMappings } from "./masking-ipc";
 import {
+  clearPendingImport as ipcClearPendingImport,
   commitPendingImport as ipcCommitPendingImport,
   createProfile as ipcCreateProfile,
   createTag as ipcCreateTag,
@@ -106,6 +107,7 @@ export interface AppStateValue {
   exportAll: (passphrase: string, destPath: string) => Promise<void>;
   previewImport: (sourcePath: string, passphrase: string) => Promise<ImportPreviewDto>;
   commitImport: () => Promise<void>;
+  clearPendingImport: () => Promise<void>;
 
   tags: Tag[];
   createTag: (name: string) => Promise<void>;
@@ -369,6 +371,9 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
             toast.info(`プロファイル「${activated_profile_name}」がアクティブになりました`);
           }
         }),
+      // キャンセル操作からのみ呼ばれる想定(commit成功/失敗時はRust側で既に消費済み)。
+      // 失敗しても致命的ではない(プロセス内メモリの後始末のみ)ためトーストは出さない。
+      clearPendingImport: () => ipcClearPendingImport().catch(() => {}),
 
       tags,
       createTag: (name) =>
@@ -414,7 +419,14 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
           setStatusText(`アクティブプロファイル: ${activeProfile.name} ・ マスク実行に失敗しました`);
         }
       },
-      clearInput: () => setInputText(""),
+      clearInput: () => {
+        setInputText("");
+        // マスク実行のたびに蓄積する対応表(実在の機微情報を保持)を、クリア操作に
+        // 合わせて破棄する。失敗しても致命的ではないため(プロセス内メモリの
+        // 後始末のみ)トーストは出さない。
+        const activeProfile = profiles.find((p) => p.isActive);
+        if (activeProfile) ipcClearMappings(activeProfile.id).catch(() => {});
+      },
     }),
     [initialized, profiles, activeProfileId, tags, inputText, outputText, statusText]
   );

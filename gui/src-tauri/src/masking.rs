@@ -64,6 +64,16 @@ pub async fn mask_text(
     Ok(mask_text_with_stores(&mut stores, profile_id, &profile, &text))
 }
 
+/// マスク実行のたびに蓄積する「元の値→ダミー値」の対応表(実在の機微情報そのものを
+/// 保持している)を、GUIで入力欄をクリアした操作に合わせて破棄する。プロセスを
+/// 終了するまで無期限に保持され続けることへの対応。
+#[tauri::command]
+pub async fn clear_mappings(state: tauri::State<'_, MaskingState>, profile_id: String) -> Result<(), String> {
+    let mut stores = state.0.lock().unwrap_or_else(|e| e.into_inner());
+    stores.remove(&profile_id);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -119,6 +129,22 @@ mod tests {
         let second =
             mask_text_with_stores(&mut stores, "profile-1".to_string(), &profile, "10.0.0.1 10.0.0.9");
         assert_eq!(second.text, "__MASK_IP_1__ __MASK_IP_2__");
+    }
+
+    #[test]
+    fn clearing_a_profiles_mapping_resets_its_sequential_numbering() {
+        // クリア操作(clear_mappingsコマンド本体が行うのと同じHashMap::remove)が、
+        // 実在の値→ダミー値対応表を実際に破棄していることを、番号採番のリセットで確認する
+        // (対応表が残っていれば10.0.0.1は既知の値として2ではなく1のままにはならないはず)。
+        let mut stores = HashMap::new();
+        let rule = sequential_rule("ip", r"\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}", "__MASK_IP_");
+        let profile = RuleProfile::new("test", None, vec![rule]).unwrap();
+
+        mask_text_with_stores(&mut stores, "profile-1".to_string(), &profile, "10.0.0.1 10.0.0.9");
+        stores.remove("profile-1");
+
+        let after_clear = mask_text_with_stores(&mut stores, "profile-1".to_string(), &profile, "10.0.0.9");
+        assert_eq!(after_clear.text, "__MASK_IP_1__", "クリア後は既知の値として扱われず1から採番し直されるはず");
     }
 
     #[test]

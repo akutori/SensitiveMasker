@@ -12,6 +12,7 @@ fn main() {
     tauri_build::try_build(
         tauri_build::Attributes::new().app_manifest(tauri_build::AppManifest::new().commands(&[
             "mask_text",
+            "clear_mappings",
             "is_store_initialized",
             "open_store",
             "initialize_store",
@@ -31,6 +32,7 @@ fn main() {
             "export_all_to_file",
             "preview_import",
             "commit_pending_import",
+            "clear_pending_import",
             "write_clipboard_text",
             "clear_clipboard_if_matches",
         ])),

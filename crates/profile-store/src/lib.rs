@@ -15,6 +15,7 @@ use bulk::{ExportPayload, ExportedProfile};
 use masking_core::RuleProfile;
 use rusqlite::Connection;
 use secrecy::SecretBox;
+use zeroize::Zeroizing;
 
 pub use paths::{AppPaths, PathError};
 // masker/gui側がexport_profile/import_profileにパスフレーズを渡す際、profile-storeが
@@ -165,7 +166,7 @@ impl ProfileStore {
     /// マッピングテーブルのキー等で使うため)。
     pub fn create_profile(&mut self, profile: &RuleProfile) -> Result<i64, ProfileStoreError> {
         let name = profile.profile_name();
-        let json = serde_json::to_vec(profile).expect("RuleProfileのシリアライズは失敗しない");
+        let json = Zeroizing::new(serde_json::to_vec(profile).expect("RuleProfileのシリアライズは失敗しない"));
         let encrypted = crypto::encrypt(&self.key, &json, name.as_bytes());
 
         // INSERTと「アクティブ未設定なら自動的にアクティブにする」settings更新を1つの
@@ -199,7 +200,7 @@ impl ProfileStore {
     pub fn export_profile(&self, name: &str, passphrase: SecretString) -> Result<Vec<u8>, ProfileStoreError> {
         let exported = self.read_exported_profile(name)?;
         let payload = ExportPayload::Single { format_version: bulk::CURRENT_FORMAT_VERSION, profile: exported };
-        let json = serde_json::to_vec(&payload).expect("ExportPayloadのシリアライズは失敗しない");
+        let json = Zeroizing::new(serde_json::to_vec(&payload).expect("ExportPayloadのシリアライズは失敗しない"));
         Ok(export::encrypt_for_export(&json, passphrase)?)
     }
 
@@ -221,7 +222,7 @@ impl ProfileStore {
             active_profile_name,
             profiles,
         };
-        let json = serde_json::to_vec(&payload).expect("ExportPayloadのシリアライズは失敗しない");
+        let json = Zeroizing::new(serde_json::to_vec(&payload).expect("ExportPayloadのシリアライズは失敗しない"));
         Ok(export::encrypt_for_export(&json, passphrase)?)
     }
 
@@ -231,7 +232,7 @@ impl ProfileStore {
     /// 各エントリの名前衝突を`bulk::resolve_name`で解決した結果を返すのみで、エラーには
     /// ならない(実際のリネームは`commit_import`が行う)。
     pub fn preview_import(&self, data: &[u8], passphrase: SecretString) -> Result<ImportPreview, ProfileStoreError> {
-        let json = export::decrypt_import(data, passphrase)?;
+        let json = Zeroizing::new(export::decrypt_import(data, passphrase)?);
         check_import_size_limits(&json)?;
         let payload: ExportPayload =
             serde_json::from_slice(&json).map_err(|e| ProfileStoreError::CorruptProfileData(e.to_string()))?;
@@ -289,7 +290,7 @@ impl ProfileStore {
         match preview {
             ImportPreview::Single { name, exported } => {
                 let encrypted_json =
-                    serde_json::to_vec(&exported.profile).expect("RuleProfileのシリアライズは失敗しない");
+                    Zeroizing::new(serde_json::to_vec(&exported.profile).expect("RuleProfileのシリアライズは失敗しない"));
                 let encrypted = crypto::encrypt(&self.key, &encrypted_json, name.as_bytes());
 
                 let tx = self.conn.transaction()?;
@@ -315,8 +316,9 @@ impl ProfileStore {
                     .iter()
                     .zip(exported.iter())
                     .map(|(entry, exported)| {
-                        let json =
-                            serde_json::to_vec(&exported.profile).expect("RuleProfileのシリアライズは失敗しない");
+                        let json = Zeroizing::new(
+                            serde_json::to_vec(&exported.profile).expect("RuleProfileのシリアライズは失敗しない"),
+                        );
                         PreparedEntry {
                             resolved_name: entry.resolved_name.clone(),
                             encrypted: crypto::encrypt(&self.key, &json, entry.resolved_name.as_bytes()),
@@ -401,7 +403,7 @@ impl ProfileStore {
     /// 参照のため、名前変更の影響を受けない。
     pub fn update_profile(&mut self, old_name: &str, new_profile: &RuleProfile) -> Result<(), ProfileStoreError> {
         let new_name = new_profile.profile_name();
-        let json = serde_json::to_vec(new_profile).expect("RuleProfileのシリアライズは失敗しない");
+        let json = Zeroizing::new(serde_json::to_vec(new_profile).expect("RuleProfileのシリアライズは失敗しない"));
         let encrypted = crypto::encrypt(&self.key, &json, new_name.as_bytes());
 
         let tx = self.conn.transaction()?;
@@ -545,7 +547,7 @@ impl ProfileStore {
     }
 
     fn decrypt_profile(&self, ciphertext: &[u8], nonce: &[u8], name: &str) -> Result<RuleProfile, ProfileStoreError> {
-        let plaintext = crypto::decrypt(&self.key, ciphertext, nonce, name.as_bytes())?;
+        let plaintext = Zeroizing::new(crypto::decrypt(&self.key, ciphertext, nonce, name.as_bytes())?);
         serde_json::from_slice(&plaintext).map_err(|e| ProfileStoreError::CorruptProfileData(e.to_string()))
     }
 
@@ -555,7 +557,7 @@ impl ProfileStore {
     /// たびコンパイルコストが再発してしまう(SMX-4対応)。ルール件数だけが必要な場合は
     /// `serde_json::Value`として構造的に数えるだけに留め、regexには一切触れない。
     fn decrypt_rule_counts(&self, ciphertext: &[u8], nonce: &[u8], name: &str) -> Result<RuleCounts, ProfileStoreError> {
-        let plaintext = crypto::decrypt(&self.key, ciphertext, nonce, name.as_bytes())?;
+        let plaintext = Zeroizing::new(crypto::decrypt(&self.key, ciphertext, nonce, name.as_bytes())?);
         let value: serde_json::Value =
             serde_json::from_slice(&plaintext).map_err(|e| ProfileStoreError::CorruptProfileData(e.to_string()))?;
         Ok(RuleCounts { total: rule_count_of(&value), enabled: enabled_rule_count_of(&value) })

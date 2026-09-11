@@ -14,6 +14,9 @@ secrecy = { version = "0.10.3", features = ["serde"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 thiserror = "2.0.20"
+# バルクの平文JSON(プロファイル全体)をメモリ上に残さないため。secrecy経由で既に
+# 依存グラフに含まれているバージョンと合わせる。
+zeroize = "1"
 
 [dev-dependencies]
 tempfile = "3.27.0"

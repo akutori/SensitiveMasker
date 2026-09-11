@@ -316,6 +316,21 @@ pub async fn commit_pending_import(
     Ok(result)
 }
 
+/// 確認ダイアログのキャンセル・離脱時に呼ぶ。preview_importが復号した平文
+/// (ルール本体を含む)をプロセス内に残さないためと、キャンセル後にcommit_pending_import
+/// が呼ばれても確定しないようにするため(意思決定をRust側の状態にも反映する)。
+/// 保留中の内容が無い場合も含め常に成功する(呼び出し側は「無かったこと」を
+/// エラーとして扱う必要が無いように、副作用の無い操作として設計する)。
+fn clear_pending_import_impl(pending: &PendingImportState) {
+    *pending.0.lock().unwrap_or_else(|e| e.into_inner()) = None;
+}
+
+#[tauri::command]
+pub async fn clear_pending_import(pending: tauri::State<'_, PendingImportState>) -> Result<(), String> {
+    clear_pending_import_impl(&pending);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -596,6 +611,43 @@ mod tests {
         let pending = PendingImportState::default();
 
         let err = commit_pending_import_impl(&state, &pending).expect_err("previewを呼んでいないので失敗するはず");
+        assert_eq!(err, "確認待ちのインポートがありません");
+    }
+
+    #[test]
+    fn clear_pending_import_prevents_a_later_commit_from_succeeding() {
+        // キャンセル操作をclear_pending_importで反映した後は、それより後に
+        // commit_pending_importが呼ばれても(直接IPCを叩く経路を含め)確定しないはず。
+        let source_dir = tempfile::tempdir().unwrap();
+        let dest_dir = tempfile::tempdir().unwrap();
+        let export_file = tempfile::Builder::new().suffix(".smx").tempfile().unwrap();
+        let source_store = init_store_with_one_profile(source_dir.path(), "元プロファイル");
+        let source_state = ProfileStoreState::with_store_for_test(source_store);
+        export_profile_to_file_impl(
+            &source_state,
+            "元プロファイル",
+            passphrase("correct horse battery staple"),
+            export_file.path().to_str().unwrap(),
+        )
+        .unwrap();
+
+        let dest_paths = AppPaths::at(dest_dir.path());
+        profile_store::init_at(&dest_paths).unwrap();
+        let dest_store = ProfileStore::open_at(&dest_paths).unwrap();
+        let dest_state = ProfileStoreState::with_store_for_test(dest_store);
+        let pending = PendingImportState::default();
+        preview_import_impl(
+            &dest_state,
+            &pending,
+            export_file.path().to_str().unwrap(),
+            passphrase("correct horse battery staple"),
+        )
+        .expect("previewは成功するはず");
+
+        clear_pending_import_impl(&pending);
+
+        let err = commit_pending_import_impl(&dest_state, &pending)
+            .expect_err("キャンセル済みのはずなのでcommitは拒否されるはず");
         assert_eq!(err, "確認待ちのインポートがありません");
     }
 

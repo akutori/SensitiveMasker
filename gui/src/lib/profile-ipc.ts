@@ -159,6 +159,13 @@ export async function commitPendingImport(): Promise<CommitImportResultDto> {
   return invoke<CommitImportResultDto>("commit_pending_import");
 }
 
+// 確認ダイアログのキャンセル・離脱時に呼ぶ。preview_importが復号した平文を
+// プロセス内に残さないためと、キャンセル後にcommitPendingImportを呼んでも
+// 確定しないようにするため。
+export async function clearPendingImport(): Promise<void> {
+  await invoke("clear_pending_import");
+}
+
 // フォーカスの有無に関わらず、変更を検知したウィンドウ側で最新状態を取り直すためのイベント。
 // 今は単一ウィンドウだが、将来の別ウィンドウ化でそのまま使う想定(PoCで検証済み)。
 export function onProfilesChanged(handler: () => void): Promise<() => void> {

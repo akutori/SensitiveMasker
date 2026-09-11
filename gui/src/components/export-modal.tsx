@@ -1,4 +1,5 @@
-import { useId } from "react";
+import { useId, useLayoutEffect, useState } from "react";
+import { Eye, EyeOff } from "lucide-react";
 import {
   Dialog,
   DialogClose,
@@ -31,6 +32,16 @@ export function ExportModal({
   onExport,
 }: ExportModalProps) {
   const inputId = useId();
+  const [revealed, setRevealed] = useState(false);
+
+  // 開くたびに非表示から始める(前回の表示状態を引き継がない)。呼び出し元は
+  // このコンポーネント自体を条件付きレンダリングせずopenプロパティのみ切り替えるため、
+  // revealed自体はopen=falseの間も(Dialog内部の描画状態と無関係に)保持され続ける。
+  // useEffect(ペイント後に発火)だと前回revealed=trueのまま新しいパスフレーズが
+  // 一瞬平文で描画されてしまうため、useLayoutEffectでペイント前に補正する。
+  useLayoutEffect(() => {
+    if (open) setRevealed(false);
+  }, [open]);
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -44,10 +55,20 @@ export function ExportModal({
           <div className="flex gap-2">
             <Input
               id={inputId}
+              type={revealed ? "text" : "password"}
               value={passphrase}
               readOnly
               className="bg-muted"
             />
+            <Button
+              type="button"
+              variant="outline"
+              size="icon"
+              onClick={() => setRevealed((v) => !v)}
+              aria-label={revealed ? "パスフレーズを隠す" : "パスフレーズを表示"}
+            >
+              {revealed ? <EyeOff /> : <Eye />}
+            </Button>
             <Button variant="outline" onClick={onCopy}>
               コピー
             </Button>

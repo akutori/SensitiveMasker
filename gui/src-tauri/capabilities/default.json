@@ -9,6 +9,7 @@
     "dialog:allow-open",
     "dialog:allow-save",
     "allow-mask-text",
+    "allow-clear-mappings",
     "allow-is-store-initialized",
     "allow-open-store",
     "allow-initialize-store",
@@ -28,6 +29,7 @@
     "allow-export-all-to-file",
     "allow-preview-import",
     "allow-commit-pending-import",
+    "allow-clear-pending-import",
     "allow-write-clipboard-text",
     "allow-clear-clipboard-if-matches"
   ]

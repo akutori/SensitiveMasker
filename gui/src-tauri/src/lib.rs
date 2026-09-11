@@ -40,6 +40,7 @@ pub fn run() {
     builder
         .invoke_handler(tauri::generate_handler![
             masking::mask_text,
+            masking::clear_mappings,
             profiles::is_store_initialized,
             profiles::open_store,
             profiles::initialize_store,
@@ -59,6 +60,7 @@ pub fn run() {
             export_import::export_all_to_file,
             export_import::preview_import,
             export_import::commit_pending_import,
+            export_import::clear_pending_import,
             clipboard::write_clipboard_text,
             clipboard::clear_clipboard_if_matches,
         ])
