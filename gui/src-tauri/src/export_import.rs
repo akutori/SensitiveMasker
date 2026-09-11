@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use masking_core::{Mode, PatternType, Rule, RuleProfile};
-use profile_store::{AllImportEntry, AppPaths, ImportPreview, SecretString};
+use profile_store::{decrypt_import_payload, AllImportEntry, AppPaths, ImportPreview, SecretString};
 use tauri::{Emitter, Manager};
 
 use crate::profiles::{resolve_paths, with_store, ProfileStoreState};
@@ -238,7 +238,12 @@ fn preview_import_impl(
         return Err(ExportImportError::InvalidInput("ファイルサイズが大きすぎます".to_string()));
     }
     let data = std::fs::read(&source_path).map_err(|_| ExportImportError::Failed(GENERIC_IO_ERROR.to_string()))?;
-    let preview = with_store(state, |store| store.preview_import(&data, passphrase)).map_err(ExportImportError::Failed)?;
+    // パスフレーズ検証(scrypt、数百ms〜数秒)はストアのロックを握らずに行う。ロック内で
+    // 実行すると、他のプロファイル/タグ系コマンドがこの間ずっとブロックされてしまう
+    // (CRYPTO-2対応時に確認された残存範囲への対応)。
+    let payload = decrypt_import_payload(&data, passphrase).map_err(|e| ExportImportError::Failed(e.to_string()))?;
+    let preview =
+        with_store(state, |store| store.resolve_import_preview(payload)).map_err(ExportImportError::Failed)?;
     let has_active = with_store(state, |store| store.has_active_profile()).map_err(ExportImportError::Failed)?;
     let dto = to_dto(&preview, has_active);
     *pending.0.lock().unwrap_or_else(|e| e.into_inner()) = Some(preview);

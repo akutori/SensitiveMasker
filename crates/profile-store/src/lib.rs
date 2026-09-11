@@ -11,12 +11,13 @@ mod paths;
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-use bulk::{ExportPayload, ExportedProfile};
+use bulk::ExportedProfile;
 use masking_core::RuleProfile;
 use rusqlite::Connection;
 use secrecy::SecretBox;
 use zeroize::Zeroizing;
 
+pub use bulk::ExportPayload;
 pub use paths::{AppPaths, PathError};
 // masker/gui側がexport_profile/import_profileにパスフレーズを渡す際、profile-storeが
 // 実際に使っているsecrecyと同一の型を参照できるようにする(独自にsecrecy依存を追加させない)。
@@ -231,12 +232,22 @@ impl ProfileStore {
     /// `ProfileAlreadyExists`エラーになる(`create_profile`と同じ扱い)。全体の場合は
     /// 各エントリの名前衝突を`bulk::resolve_name`で解決した結果を返すのみで、エラーには
     /// ならない(実際のリネームは`commit_import`が行う)。
+    ///
+    /// `decrypt_import_payload`(DBに触れない、パスフレーズ検証のみ)と`resolve_import_preview`
+    /// (DBへの高速な読み取りのみ)をまとめて呼ぶ利便関数。ロックを握ったまま呼んでも問題ない
+    /// 呼び出し元(CLI等、単一スレッドで他の操作と競合しない)向け。GUIのように、ストアの
+    /// ロックを他のコマンドと共有していて、かつパスフレーズ検証(scrypt、数百ms〜数秒)を
+    /// その間ブロックしたくない場合は、2つを分けて呼ぶこと。
     pub fn preview_import(&self, data: &[u8], passphrase: SecretString) -> Result<ImportPreview, ProfileStoreError> {
-        let json = Zeroizing::new(export::decrypt_import(data, passphrase)?);
-        check_import_size_limits(&json)?;
-        let payload: ExportPayload =
-            serde_json::from_slice(&json).map_err(|e| ProfileStoreError::CorruptProfileData(e.to_string()))?;
+        let payload = decrypt_import_payload(data, passphrase)?;
+        self.resolve_import_preview(payload)
+    }
 
+    /// `preview_import`のうち、既に復号済みのペイロードから既存プロファイルとの名前衝突を
+    /// 解決する後半部分。DBへの高速なSELECTのみのため、ロックを握ったまま呼んでも
+    /// 他の操作への影響は小さい(`decrypt_import_payload`と分けて呼ぶことで、時間のかかる
+    /// パスフレーズ検証をロック外に追い出せる)。
+    pub fn resolve_import_preview(&self, payload: ExportPayload) -> Result<ImportPreview, ProfileStoreError> {
         match payload {
             ExportPayload::Single { format_version, profile } => {
                 check_format_version(format_version)?;
@@ -609,6 +620,17 @@ fn tags_for_profile_id(conn: &Connection, profile_id: i64) -> Result<Vec<String>
     .query_map([profile_id], |row| row.get(0))?
     .collect::<Result<_, _>>()
     .map_err(Into::into)
+}
+
+/// `export_profile`/`export_all`が生成したバイト列をパスフレーズで復号し、構造化された
+/// ペイロードを返す。DBには一切アクセスしない(ストアの`&self`を取らない)ため、呼び出し側は
+/// ストアのロックを握らずにこれを呼べる。パスフレーズ検証のscrypt処理は数百ms〜数秒
+/// かかりうるため、ロックを共有する他の操作(GUIの他のTauriコマンド等)を無関係に
+/// 巻き込んで待たせないようにするための分離(CRYPTO-2対応時に確認された残存範囲への対応)。
+pub fn decrypt_import_payload(data: &[u8], passphrase: SecretString) -> Result<ExportPayload, ProfileStoreError> {
+    let json = Zeroizing::new(export::decrypt_import(data, passphrase)?);
+    check_import_size_limits(&json)?;
+    serde_json::from_slice(&json).map_err(|e| ProfileStoreError::CorruptProfileData(e.to_string()))
 }
 
 fn check_format_version(found: u32) -> Result<(), ProfileStoreError> {
