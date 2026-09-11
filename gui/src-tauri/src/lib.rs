@@ -8,7 +8,6 @@ mod tray;
 pub fn run() {
     #[allow(unused_mut)]
     let mut builder = tauri::Builder::default()
-        .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         // フロントエンドからはこのプラグイン自身のコマンド(plugin:clipboard-manager|*)を
         // 一切invokeしない(clipboard::write_clipboard_text/clear_clipboard_if_matchesの
