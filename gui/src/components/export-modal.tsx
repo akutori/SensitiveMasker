@@ -59,7 +59,8 @@ export function ExportModal({
             className="text-sm text-muted-foreground"
             data-a11y-verified-contrast="dialog-overlay-geometry-false-positive"
           >
-            コピー後、一定時間でクリップボードの内容は自動的にクリアされます
+            コピー後、自動クリアを試みます(確実ではありません)。クリップボード履歴が
+            有効な環境では、クリア後も履歴には残ります。確実に消すには手動でクリアしてください。
           </p>
         </div>
 

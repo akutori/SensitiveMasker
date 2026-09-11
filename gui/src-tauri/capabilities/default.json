@@ -27,6 +27,8 @@
     "allow-export-profile-to-file",
     "allow-export-all-to-file",
     "allow-preview-import",
-    "allow-commit-pending-import"
+    "allow-commit-pending-import",
+    "allow-write-clipboard-text",
+    "allow-clear-clipboard-if-matches"
   ]
 }

@@ -1,3 +1,4 @@
+mod clipboard;
 mod export_import;
 mod masking;
 mod profiles;
@@ -9,9 +10,15 @@ pub fn run() {
     let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        // フロントエンドからはこのプラグイン自身のコマンド(plugin:clipboard-manager|*)を
+        // 一切invokeしない(clipboard::write_clipboard_text/clear_clipboard_if_matchesの
+        // 内部でRustから直接呼ぶのみ)。そのためcapabilitiesにclipboard-manager:*の許可は
+        // 不要(ACLはinvoke経由の呼び出しのみを対象とするため)。
+        .plugin(tauri_plugin_clipboard_manager::init())
         .manage(masking::MaskingState::default())
         .manage(profiles::ProfileStoreState::default())
         .manage(export_import::PendingImportState::default())
+        .manage(clipboard::ClipboardState::default())
         .setup(|app| {
             tray::setup(app)?;
             Ok(())
@@ -52,6 +59,8 @@ pub fn run() {
             export_import::export_all_to_file,
             export_import::preview_import,
             export_import::commit_pending_import,
+            clipboard::write_clipboard_text,
+            clipboard::clear_clipboard_if_matches,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

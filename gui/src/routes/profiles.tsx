@@ -11,6 +11,7 @@ import { ImportPassphraseDialog } from "@/components/import-passphrase-dialog";
 import { ImportConfirmDialog, type ImportPreviewRow } from "@/components/import-confirm-dialog";
 import { useAppState, SMX_FILE_FILTERS, toImportPreviewRows } from "@/lib/app-state";
 import { isExportImportError } from "@/lib/profile-ipc";
+import { writeClipboardText, clearClipboardIfMatches } from "@/lib/clipboard-ipc";
 
 export const Route = createFileRoute("/profiles")({
   component: ProfilesRoute,
@@ -77,6 +78,12 @@ function ProfilesRoute() {
   const [importPassphrase, setImportPassphrase] = useState("");
   const [importPassphraseError, setImportPassphraseError] = useState<string | undefined>();
   const clipboardClearTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // 直近でコピーに成功したパスフレーズ(自動クリア待ちの間だけ保持)。再生成時に
+  // その場でクリアするため、タイマーの生存とは別に値そのものを覚えておく。
+  const lastCopiedPassphrase = useRef<string | null>(null);
+  // コピー処理の完了(Rustへの書き込み確認)を待つ間に再生成された場合、後から
+  // 解決した古い呼び出しがタイマー・状態を上書きしないようにするための世代カウンタ。
+  const copyGeneration = useRef(0);
 
   const closeDialog = () => setDialog({ kind: "none" });
 
@@ -87,18 +94,64 @@ function ProfilesRoute() {
     }
   };
 
+  // 「確認できなかった」だけでは「まだ残っている」とは断定できない(他の内容に既に
+  // 上書きされていた場合も読み取り自体は失敗しうるため)。断定形の警告にしない。
+  const warnClipboardNotClearedAutomatically = () =>
+    toast.warning("クリップボードの内容を確認できませんでした。パスフレーズが残っている場合は手動でクリアしてください");
+
+  // 書き込み・確認・クリアは全てRust側のコマンドで行う。navigator.clipboard.readText()は
+  // ウィンドウのフォーカスとclipboard-read権限を要求し、コピー後に他アプリへ切り替える
+  // という最も一般的な操作フローで失敗するため使わない。
+  //
+  // copyGenerationは「この呼び出しが今なお最新の操作か」の判定に一本化して使う
+  // (書き込み完了時の判定だけでなく、30秒後のクリア結果が返ってきた時点でも同じ
+  // 判定に使う)。既に次のコピー/再生成が発生していれば、古い呼び出しの結果は
+  // (成功・失敗を問わず)警告や状態更新の対象にしない。
   const copyPassphraseWithAutoClear = (value: string) => {
-    navigator.clipboard.writeText(value).catch(() => {});
     cancelClipboardClear();
-    clipboardClearTimer.current = setTimeout(() => {
-      // 書き込み後に他の内容が上書きされている場合は消さない(意図しないクリアを防ぐ)。
-      navigator.clipboard
-        .readText()
-        .then((current) => {
-          if (current === value) return navigator.clipboard.writeText("");
-        })
-        .catch(() => {});
-    }, CLIPBOARD_CLEAR_DELAY_MS);
+    const generation = ++copyGeneration.current;
+    writeClipboardText(value)
+      .then(() => {
+        if (copyGeneration.current !== generation) return;
+        lastCopiedPassphrase.current = value;
+        toast.success("パスフレーズをコピーしました");
+        clipboardClearTimer.current = setTimeout(() => {
+          clipboardClearTimer.current = null;
+          clearClipboardIfMatches(value)
+            .then((result) => {
+              if (copyGeneration.current !== generation) return;
+              if (result.outcome === "skipped_unable_to_verify") {
+                warnClipboardNotClearedAutomatically();
+              }
+              lastCopiedPassphrase.current = null;
+            })
+            .catch(() => {
+              if (copyGeneration.current === generation) warnClipboardNotClearedAutomatically();
+            });
+        }, CLIPBOARD_CLEAR_DELAY_MS);
+      })
+      .catch(() => {
+        if (copyGeneration.current !== generation) return;
+        toast.error("クリップボードへのコピーに失敗しました");
+      });
+  };
+
+  // タイマーの取り消しだけでは、既にコピー済みの値はクリップボードに残り続ける
+  // ため、再生成時はその場でクリアを試みる。
+  const clearCopiedPassphraseNow = () => {
+    cancelClipboardClear();
+    const generation = ++copyGeneration.current;
+    const copied = lastCopiedPassphrase.current;
+    if (!copied) return;
+    lastCopiedPassphrase.current = null;
+    clearClipboardIfMatches(copied)
+      .then((result) => {
+        if (copyGeneration.current !== generation) return;
+        if (result.outcome === "skipped_unable_to_verify") warnClipboardNotClearedAutomatically();
+      })
+      .catch(() => {
+        if (copyGeneration.current === generation) warnClipboardNotClearedAutomatically();
+      });
   };
 
   const confirmNewProfileName = async (templateForSeed?: string) => {
@@ -282,9 +335,9 @@ function ProfilesRoute() {
         passphrase={passphrase}
         onCopy={() => copyPassphraseWithAutoClear(passphrase)}
         onRegenerate={() => {
-          // 保留中のクリアタイマーは新しいパスフレーズには無関係(値を比較して
-          // クリアするため無くても安全だが、無駄なタイマーを積まないための整理)。
-          cancelClipboardClear();
+          // 旧パスフレーズが既にコピーされていた場合、タイマーの取り消しだけでは
+          // クリップボードに残り続けるため、その場でクリアを試みる。
+          clearCopiedPassphraseNow();
           setPassphrase(generatePassphrase());
         }}
         onExport={async () => {
