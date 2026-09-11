@@ -64,6 +64,25 @@ fn create_restricted_file(path: &Path, key: &[u8; KEY_LEN]) -> Result<(), KeyErr
     Ok(())
 }
 
+// PATH解決に依存すると、PATH上のicaclsより前にある別の(悪意ある、または単に別の)
+// 同名実行ファイルが誤って実行されうる。SystemRoot(Windowsが必ず設定する環境変数)
+// から実体の絶対パスを組み立てる。取得できない場合はfail-safe defaultsの方針に従い、
+// 誤ったパスを推測で使わずエラーにする。
+#[cfg(windows)]
+fn icacls_path() -> Result<std::path::PathBuf, KeyError> {
+    let system_root = std::env::var("SystemRoot")
+        .map_err(|_| KeyError::Permission("SystemRoot環境変数を取得できません".to_string()))?;
+    Ok(icacls_path_from_system_root(&system_root))
+}
+
+// 実際の環境変数読み取りとパス構築ロジックを分離し、後者だけを引数渡しでテストできる
+// ようにする(resolve_paths_with_overrideと同じ方針。std::env::set_varはRust 2024で
+// unsafe化されておりテスト間で競合しうるため、テストで直接環境変数を書き換えない)。
+#[cfg(windows)]
+fn icacls_path_from_system_root(system_root: &str) -> std::path::PathBuf {
+    std::path::PathBuf::from(system_root).join("System32").join("icacls.exe")
+}
+
 /// Windowsはicacls(既存ファイル向け)を使うため、書き込み→権限制限の間に短い窓が生じる。
 /// icacls /inheritance:r で継承エントリ(SYSTEM/Administrators等)を除去し、/grant:r で
 /// 現在のユーザーのみにフルコントロールを与える(実機で動作確認済み)。
@@ -76,7 +95,7 @@ fn create_restricted_file(path: &Path, key: &[u8; KEY_LEN]) -> Result<(), KeyErr
     let username = std::env::var("USERNAME")
         .map_err(|_| KeyError::Permission("USERNAME環境変数を取得できません".to_string()))?;
 
-    let output = Command::new("icacls")
+    let output = Command::new(icacls_path()?)
         .arg(path)
         .arg("/inheritance:r")
         .arg("/grant:r")
@@ -146,12 +165,19 @@ mod tests {
         let key_path = dir.path().join("key.bin");
         generate_and_save_key(&key_path).unwrap();
 
-        let output = Command::new("icacls").arg(&key_path).output().unwrap();
+        let output = Command::new(icacls_path().unwrap()).arg(&key_path).output().unwrap();
         let stdout = String::from_utf8_lossy(&output.stdout);
         let username = std::env::var("USERNAME").unwrap();
 
         assert!(stdout.contains(&username), "現在のユーザーへの許可が無い: {stdout}");
         assert!(!stdout.contains("SYSTEM"), "SYSTEMへの継承が残っている: {stdout}");
         assert!(!stdout.contains("Administrators"), "Administratorsへの継承が残っている: {stdout}");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn icacls_path_is_built_under_system32_of_the_given_system_root() {
+        let path = icacls_path_from_system_root(r"C:\Windows");
+        assert_eq!(path, std::path::PathBuf::from(r"C:\Windows\System32\icacls.exe"));
     }
 }
