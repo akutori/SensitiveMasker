@@ -64,6 +64,19 @@ pub async fn mask_text(
     Ok(mask_text_with_stores(&mut stores, profile_id, &profile, &text))
 }
 
+/// トレイの「クリップボードをマスク」から呼ぶための薄いラッパー。`mask_text`
+/// コマンド(フロントエンドからの呼び出し)と同じ`MaskingState`(profile_idごとの
+/// MappingStore)を共有し、連番モードの採番をトレイ経由でも一貫させる。
+pub(crate) fn mask_text_for_tray(
+    state: &MaskingState,
+    profile_id: String,
+    profile: &RuleProfile,
+    text: &str,
+) -> String {
+    let mut stores = state.0.lock().unwrap_or_else(|e| e.into_inner());
+    mask_text_with_stores(&mut stores, profile_id, profile, text).text
+}
+
 /// マスク実行のたびに蓄積する「元の値→ダミー値」の対応表(実在の機微情報そのものを
 /// 保持している)を、GUIで入力欄をクリアした操作に合わせて破棄する。プロセスを
 /// 終了するまで無期限に保持され続けることへの対応。

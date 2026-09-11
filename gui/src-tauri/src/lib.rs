@@ -14,6 +14,10 @@ pub fn run() {
         // 内部でRustから直接呼ぶのみ)。そのためcapabilitiesにclipboard-manager:*の許可は
         // 不要(ACLはinvoke経由の呼び出しのみを対象とするため)。
         .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(tauri_plugin_notification::init())
+        // 第2引数(自動起動時の追加コマンドライン引数)は不要なのでNone。
+        // MacosLauncherはWindows/Linuxでは無視されるが型としては要求される。
+        .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, None))
         .manage(masking::MaskingState::default())
         .manage(profiles::ProfileStoreState::default())
         .manage(export_import::PendingImportState::default())

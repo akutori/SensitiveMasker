@@ -68,17 +68,23 @@ fn open_into_state(state: &ProfileStoreState) -> Result<(), String> {
 /// ProfileStoreStateはプロセス起動ごとに空(None)から始まるため、
 /// 起動直後に一度だけ呼んでメモリ上の状態を実体化する。
 #[tauri::command]
-pub async fn open_store(state: tauri::State<'_, ProfileStoreState>) -> Result<(), String> {
-    open_into_state(&state)
+pub async fn open_store(app: tauri::AppHandle, state: tauri::State<'_, ProfileStoreState>) -> Result<(), String> {
+    open_into_state(&state)?;
+    // アプリ起動直後、トレイのメニューはストアが開かれる前(常にプロファイル無し扱い)
+    // に構築されている。実際のプロファイル一覧・アクティブ状態を反映させる。
+    crate::tray::refresh_menu(&app);
+    Ok(())
 }
 
 /// 初回セットアップ(「始める」)用。鍵/DBの新規作成に続けて、開いたストアを
 /// そのままProfileStoreStateに格納する(open_storeを別途呼ぶ必要はない)。
 #[tauri::command]
-pub async fn initialize_store(state: tauri::State<'_, ProfileStoreState>) -> Result<(), String> {
+pub async fn initialize_store(app: tauri::AppHandle, state: tauri::State<'_, ProfileStoreState>) -> Result<(), String> {
     let paths = resolve_paths()?;
     profile_store::init_at(&paths).map_err(|e| e.to_string())?;
-    open_into_state(&state)
+    open_into_state(&state)?;
+    crate::tray::refresh_menu(&app);
+    Ok(())
 }
 
 #[tauri::command]
@@ -121,6 +127,7 @@ pub async fn create_profile(
     let profile: RuleProfile = serde_json::from_value(profile).map_err(|e| e.to_string())?;
     let id = with_store(&state, |store| store.create_profile(&profile))?;
     let _ = app.emit("profiles-changed", ());
+    crate::tray::refresh_menu(&app);
     Ok(id)
 }
 
@@ -215,6 +222,9 @@ pub async fn update_profile(
     if let Some(payload) = notice {
         let _ = app.emit("active-profile-rules-weakened", payload);
     }
+    // プロファイル名のリネームがトレイのプロファイル切り替えサブメニューの表示名にも
+    // 影響するため、更新後は必ず作り直す。
+    crate::tray::refresh_menu(&app);
     Ok(())
 }
 
@@ -226,6 +236,7 @@ pub async fn delete_profile(
 ) -> Result<(), String> {
     with_store(&state, |store| store.delete_profile(&name))?;
     let _ = app.emit("profiles-changed", ());
+    crate::tray::refresh_menu(&app);
     Ok(())
 }
 
@@ -237,6 +248,7 @@ pub async fn set_active_profile(
 ) -> Result<(), String> {
     with_store(&state, |store| store.set_active_profile(&name))?;
     let _ = app.emit("profiles-changed", ());
+    crate::tray::refresh_menu(&app);
     Ok(())
 }
 
