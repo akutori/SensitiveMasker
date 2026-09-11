@@ -63,8 +63,8 @@ fn load_rules_from_json(path: &Path) -> Result<Vec<Rule>, CliError> {
 
     // Vec<Rule>への型付きデシリアライズは各ルールの正規表現を実際にコンパイルする
     // (Rule::new経由)。それより前に、serde_json::Valueとして構造的に(regexへは
-    // 一切触れずに)件数だけを検査する(SMX-4対応: profile-store側のpreview_importと
-    // 同じ考え方を、外部からルール一括投入を受け付けるこの経路にも適用する)。
+    // 一切触れずに)件数だけを検査する(profile-store側のpreview_importと同じ考え方を、
+    // 外部からルール一括投入を受け付けるこの経路にも適用する)。
     if let Ok(serde_json::Value::Array(rules)) = serde_json::from_str::<serde_json::Value>(&text) {
         if rules.len() > profile_store::MAX_RULES_PER_PROFILE {
             return Err(CliError::TooManyRulesInJson {

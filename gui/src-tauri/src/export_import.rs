@@ -77,8 +77,8 @@ fn validate_export_dest_path_impl(dest_path: &str, app_paths: Result<AppPaths, S
 
 /// `candidate`が`boundary`自身か、その配下かを判定する。パス文字列の比較(大文字小文字・
 /// ジャンクション/シンボリックリンク・ドライブレターやUNC管理共有等の別名表現)では
-/// 回避されうることが敵対的検証で実機確認されたため、OSにファイルの実体を解決させる
-/// `same_file::is_same_file`で祖先を1つずつ比較する(経由したパスの綴りに依存しない)。
+/// 回避されうるため、OSにファイルの実体を解決させる`same_file::is_same_file`で
+/// 祖先を1つずつ比較する(経由したパスの綴りに依存しない)。
 /// 途中の祖先や`boundary`自体が何らかの理由(権限・一時的なロック等)で確認できない
 /// 場合は、「安全と確認できなかった」として拒否する(fail-safe defaults。前段の
 /// resolve_paths失敗時の扱いと一貫させる)。
@@ -131,7 +131,7 @@ pub struct ImportEntryDto {
     pub tags: Vec<String>,
 }
 
-/// インポート確認画面でルールの中身を表示するためのDTO(SMX-1対応)。
+/// インポート確認画面でルールの中身を表示するためのDTO。
 /// 「構文的に有効だが実データの書式と食い違う」細工されたルールに、確定前に
 /// 気付けるようにするための情報であり、確定前に必ず提示する。
 #[derive(Debug, serde::Serialize)]
@@ -239,8 +239,7 @@ fn preview_import_impl(
     }
     let data = std::fs::read(&source_path).map_err(|_| ExportImportError::Failed(GENERIC_IO_ERROR.to_string()))?;
     // パスフレーズ検証(scrypt、数百ms〜数秒)はストアのロックを握らずに行う。ロック内で
-    // 実行すると、他のプロファイル/タグ系コマンドがこの間ずっとブロックされてしまう
-    // (CRYPTO-2対応時に確認された残存範囲への対応)。
+    // 実行すると、他のプロファイル/タグ系コマンドがこの間ずっとブロックされてしまう。
     let payload = decrypt_import_payload(&data, passphrase).map_err(|e| ExportImportError::Failed(e.to_string()))?;
     let preview =
         with_store(state, |store| store.resolve_import_preview(payload)).map_err(ExportImportError::Failed)?;
@@ -301,7 +300,7 @@ pub async fn export_all_to_file(
 /// 表示に必要な要約(名前・リネーム有無)のみを返す(ルール本体を往復させないため)。
 ///
 /// 悪意ある.smxファイルは、パスフレーズの正誤を検証する前に最大2^22相当(≒4GiB)の
-/// メモリ確保を要求しうる(export.rsのMAX_WORK_FACTOR_LOG_N参照。CRYPTO-2対応)。
+/// メモリ確保を要求しうる(export.rsのMAX_WORK_FACTOR_LOG_N参照)。
 /// この処理を非同期ランタイムのワーカースレッド上でそのまま実行すると、そのスレッドが
 /// 長時間ブロックされ、同じプールを共有する他の全Tauriコマンドの処理まで止まりうる
 /// (with_storeのMutex自体は他コマンドと競合するだけだが、ワーカースレッド枯渇は
@@ -430,8 +429,8 @@ mod tests {
         match dto {
             ImportPreviewDto::Single { name, rules, tags } => {
                 assert_eq!(name, "元プロファイル");
-                // SMX-1対応: 確認前にルールの中身(名前・パターン・有効/無効)が
-                // 見える必要があるため、DTOに含まれることをここで固定する。
+                // 確認前にルールの中身(名前・パターン・有効/無効)が見える必要があるため、
+                // DTOに含まれることをここで固定する。
                 assert_eq!(rules.len(), 1);
                 assert_eq!(rules[0].name, "電話番号");
                 assert_eq!(rules[0].pattern, "0120");
@@ -484,8 +483,8 @@ mod tests {
         )
         .expect("正しいパスフレーズでのpreviewは成功するはず");
 
-        // SMX-1対応: entries[i]とexported[i]のインデックス対応(zip)に依存しているため、
-        // 名前でエントリを探した上でそのルールが正しく自分自身のものであることを固定する
+        // entries[i]とexported[i]のインデックス対応(zip)に依存しているため、名前で
+        // エントリを探した上でそのルールが正しく自分自身のものであることを固定する
         // (取り違えがあれば、内容の入れ替わりとして検出できる)。
         match dto {
             ImportPreviewDto::All { entries, will_activate_profile_name } => {
@@ -503,7 +502,7 @@ mod tests {
 
                 // プロファイルAが先に作成されたため元ストアではアクティブ、取り込み先は
                 // 新規ストアでアクティブ未設定のため、このインポートを実行するとAが
-                // アクティブになることが事前にわかるはず(SMX-1関連LOW対応)。
+                // アクティブになることが事前にわかるはず。
                 assert_eq!(will_activate_profile_name.as_deref(), Some("プロファイルA"));
             }
             ImportPreviewDto::Single { .. } => panic!("全体エクスポートのはず"),
@@ -709,8 +708,8 @@ mod tests {
             .expect("データフォルダ外への正常な保存は許可されるはず");
     }
 
-    // 敵対的検証で発覚: 字句上のstarts_with比較では、NTFSが大文字小文字を区別しない
-    // ことを利用して同一フォルダを別表記で指すだけで判定をすり抜けられた(実機で再現)。
+    // 字句上のstarts_with比較では、NTFSが大文字小文字を区別しないことを利用して
+    // 同一フォルダを別表記で指すだけで判定をすり抜けられるため、これを固定する。
     #[test]
     fn validate_export_dest_path_rejects_paths_that_differ_only_in_case() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -724,11 +723,11 @@ mod tests {
         assert!(err.contains("データフォルダ"), "予期しないエラー文言: {err}");
     }
 
-    // 敵対的検証で発覚: シンボリックリンク/ジャンクションでapp_dir外の場所からapp_dir内を
-    // 指させると、字句比較(canonicalize+starts_with)をすり抜け、実際の書き込みは
-    // リンク先(app_dir内の実ファイル)に届いてしまっていた(実機で再現)。ジャンクションは
+    // シンボリックリンク/ジャンクションでapp_dir外の場所からapp_dir内を指させると、
+    // 字句比較(canonicalize+starts_with)をすり抜け、実際の書き込みはリンク先
+    // (app_dir内の実ファイル)に届いてしまうため、これを固定する。ジャンクションは
     // (シンボリックリンクと異なり)開発者モード・管理者権限が無くても作成できるため、
-    // こちらを使って検証する(実際の敵対的検証もこの方式で再現している)。
+    // こちらを使って検証する。
     #[test]
     fn validate_export_dest_path_rejects_junctions_into_app_data_dir() {
         let real_data_dir = tempfile::tempdir().unwrap();
@@ -759,9 +758,9 @@ mod tests {
         assert!(err.contains("データフォルダ"), "予期しないエラー文言: {err}");
     }
 
-    // 敵対的検証で発覚: resolve_paths()自体が失敗した場合に.ok()で握り潰し、データ
-    // フォルダ保護チェックごと無効化されるfail-open設計になっていた(CLAUDE.mdの
-    // fail-safe defaults方針に反する)。
+    // resolve_paths()自体が失敗した場合を.ok()で握り潰すと、データフォルダ保護
+    // チェックごと無効化されるfail-open設計になる(CLAUDE.mdのfail-safe defaults
+    // 方針に反する)ため、これを固定する。
     #[test]
     fn validate_export_dest_path_fails_closed_when_app_data_dir_cannot_be_resolved() {
         let dir = tempfile::tempdir().unwrap();
@@ -771,10 +770,10 @@ mod tests {
             .expect_err("データフォルダの場所を解決できない場合は安全側に倒して拒否するはず");
     }
 
-    // 敵対的検証で発覚(3巡目): resolve_paths()自体の失敗はfail-closedにした一方、
-    // same_file::is_same_file単体の失敗(比較対象を開けない等)は.unwrap_or(false)で
-    // 「同じファイルではない」に丸めておりfail-openだった。app_dirの実体が何らかの
-    // 理由で確認できない場合も安全側に倒して拒否することを確認する。
+    // resolve_paths()自体の失敗はfail-closedにする一方、same_file::is_same_file単体の
+    // 失敗(比較対象を開けない等)を.unwrap_or(false)で「同じファイルではない」に丸めると
+    // fail-openになる。app_dirの実体が何らかの理由で確認できない場合も安全側に倒して
+    // 拒否することを確認する。
     #[test]
     fn validate_export_dest_path_fails_closed_when_app_data_dir_does_not_exist_on_disk() {
         let parent = tempfile::tempdir().unwrap();

@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// 正規表現1件あたりのコンパイル後サイズ上限。regexクレートの既定(10MiB)より厳しくし、
-/// 大量のルールを持つプロファイルでのコンパイルコスト積み上げを抑える(SMX-4対応)。
+/// 大量のルールを持つプロファイルでのコンパイルコスト積み上げを抑える。
 const REGEX_SIZE_LIMIT_BYTES: usize = 1 << 20; // 1MiB
 
 /// プロファイル名・ルール名・タグ名に共通の長さ上限(文字数)。
@@ -128,7 +128,7 @@ impl Rule {
         }
         if pattern_type == PatternType::Regex {
             // 既定のsize_limit(10MiB)のままだと、大量のルールを持つプロファイルを
-            // インポート/作成された場合にコンパイルコストが積み上がりうる(SMX-4対応)。
+            // インポート/作成された場合にコンパイルコストが積み上がりうる。
             // 実用上のマスクルール(電話番号・IP等)は数KB程度で収まるため実害は無い。
             if let Err(source) = regex::RegexBuilder::new(&pattern).size_limit(REGEX_SIZE_LIMIT_BYTES).build() {
                 return Err(RuleError::InvalidRegex { name, source });
@@ -394,9 +394,7 @@ mod tests {
     fn regex_pattern_type_rejects_patterns_that_compile_to_an_excessive_size() {
         // ネストした繰り返しでコンパイル後サイズを膨張させる。"(?:a{200}){200}"は
         // regexクレートの既定size_limit(10MiB)なら受理されるが、このプロジェクトが
-        // 課す1MiB制限では拒否されることを事前に確認済みのパターン(SMX-4対応:
-        // 大量のルールを持つプロファイルをインポート/作成された場合のコンパイル
-        // コスト積み上げを、単一ルールの時点で早期に防ぐ)。
+        // 課す1MiB制限では拒否されることを確認済みのパターン。
         let err = Rule::new(
             "r1",
             PatternType::Regex,

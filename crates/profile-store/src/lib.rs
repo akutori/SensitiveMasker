@@ -330,9 +330,8 @@ impl ProfileStore {
                         // AAD(entry.resolved_name)・書き込み先のname列(同)と、暗号文に
                         // 閉じ込める平文profile_nameを常に一致させる。名前衝突でリネーム
                         // された場合、ファイル内の元の名前のままシリアライズすると、
-                        // 暗号文の自己申告とAAD/DB上の名前が食い違う状態が生まれる
-                        // (CRYPTO-1対応: 元プロファイル削除後に、信頼している名前が
-                        // インポート由来のルール集合を指すようになりうる)。
+                        // 暗号文の自己申告とAAD/DB上の名前が食い違う状態が生まれ、元プロファイル
+                        // 削除後に、信頼している名前がインポート由来のルール集合を指すようになりうる。
                         let renamed_profile = RuleProfile::new(
                             entry.resolved_name.clone(),
                             exported.profile.description().map(str::to_string),
@@ -577,7 +576,7 @@ impl ProfileStore {
     /// `list_profiles`専用の軽量パス。`RuleProfile`への型付きデシリアライズは各ルールの
     /// 正規表現を実際にコンパイルする(`Rule::new`経由)ため、一覧表示のたびに全件で
     /// 行うと、悪意あるルールを含むプロファイルを一度取り込んだ場合に起動・一覧更新の
-    /// たびコンパイルコストが再発してしまう(SMX-4対応)。ルール件数だけが必要な場合は
+    /// たびコンパイルコストが再発してしまう。ルール件数だけが必要な場合は
     /// `serde_json::Value`として構造的に数えるだけに留め、regexには一切触れない。
     fn decrypt_rule_counts(&self, ciphertext: &[u8], nonce: &[u8], name: &str) -> Result<RuleCounts, ProfileStoreError> {
         let plaintext = Zeroizing::new(crypto::decrypt(&self.key, ciphertext, nonce, name.as_bytes())?);
@@ -626,7 +625,7 @@ fn tags_for_profile_id(conn: &Connection, profile_id: i64) -> Result<Vec<String>
 /// ペイロードを返す。DBには一切アクセスしない(ストアの`&self`を取らない)ため、呼び出し側は
 /// ストアのロックを握らずにこれを呼べる。パスフレーズ検証のscrypt処理は数百ms〜数秒
 /// かかりうるため、ロックを共有する他の操作(GUIの他のTauriコマンド等)を無関係に
-/// 巻き込んで待たせないようにするための分離(CRYPTO-2対応時に確認された残存範囲への対応)。
+/// 巻き込んで待たせないようにするための分離。
 pub fn decrypt_import_payload(data: &[u8], passphrase: SecretString) -> Result<ExportPayload, ProfileStoreError> {
     let json = Zeroizing::new(export::decrypt_import(data, passphrase)?);
     check_import_size_limits(&json)?;
@@ -643,7 +642,7 @@ fn check_format_version(found: u32) -> Result<(), ProfileStoreError> {
 const MAX_PROFILES_PER_IMPORT: usize = 200;
 /// 1プロファイルあたりのルール数上限。`.smx`インポートだけでなく、CLIの
 /// `masker profile create --from-json`等、外部から一括でルール集合を受け取る
-/// 経路全てで同じ値を再利用する(SMX-4対応)。
+/// 経路全てで同じ値を再利用する。
 pub const MAX_RULES_PER_PROFILE: usize = 500;
 const MAX_TOTAL_RULES_PER_IMPORT: usize = 2000;
 
@@ -651,18 +650,16 @@ const MAX_TOTAL_RULES_PER_IMPORT: usize = 2000;
 /// `Rule::new`経由)を行う前に、プロファイル数・ルール数を`serde_json::Value`として
 /// 構造的に(regexへは一切触れずに)検査する。巨大な数のルールを仕込んだ悪意ある
 /// ファイルによるコンパイルコストの積み上げを、型付きデシリアライズ自体が走る前に
-/// 防ぐため(SMX-4対応)。JSON自体が不正な形の場合はここでは何も拒否せず、後続の
+/// 防ぐため。JSON自体が不正な形の場合はここでは何も拒否せず、後続の
 /// 型付きデシリアライズが持つ`CorruptProfileData`に判断を委ねる。
 fn check_import_size_limits(json: &[u8]) -> Result<(), ProfileStoreError> {
     let Ok(value) = serde_json::from_slice::<serde_json::Value>(json) else {
         return Ok(());
     };
 
-    // 敵対的検証で発覚: 以前は"profiles"キーの有無だけで単一/全体を判定していたため、
-    // kind:"single"のペイロードに空の"profiles":[]を1つ追加するだけでチェック全体を
-    // すり抜けられた(実際のExportPayloadデシリアライズは"kind"タグでのみ判別し、
-    // 余分な"profiles"キーは無視するため)。実際のデシリアライズと同じ"kind"タグで
-    // 判別することで、この種の取り違えを構造的に無くす。
+    // 単一/全体の判別は、実際のExportPayloadデシリアライズと同じ"kind"タグを基準にする
+    // ("profiles"キーの有無等の周辺的な手がかりで代用すると、実際のデシリアライズが
+    // 無視する余分なキーを足すだけで判定をすり抜けられる)。
     let rule_counts: Vec<usize> = match value.get("kind").and_then(serde_json::Value::as_str) {
         Some("all") => {
             let profiles = value.get("profiles").and_then(serde_json::Value::as_array);
@@ -828,7 +825,7 @@ mod tests {
         RuleProfile::new(name, None, vec![rule]).unwrap()
     }
 
-    // SMX-4のルール数上限テスト用。literalルールは正規表現コンパイルを伴わないため、
+    // ルール数上限テスト用。literalルールは正規表現コンパイルを伴わないため、
     // 大量生成してもテスト自体は高速なまま。
     fn profile_with_n_rules(name: &str, n: usize) -> RuleProfile {
         let rules = (0..n)
@@ -1369,7 +1366,7 @@ mod tests {
 
     #[test]
     fn import_all_embeds_the_resolved_name_in_the_stored_plaintext_after_a_rename() {
-        // CRYPTO-1: リネームされたエントリについて、暗号文内(復号後の平文)の
+        // リネームされたエントリについて、暗号文内(復号後の平文)の
         // profile_nameがAAD/DB上のname列(resolved_name)と食い違わないことを確認する。
         // AAD自体は元々resolved_nameで一致していたため、この不一致があっても復号自体は
         // 成功してしまう(認証はcipheretextとAADの対応のみを保証し、中身の内容までは
@@ -1552,10 +1549,10 @@ mod tests {
         check_import_size_limits(&json).expect("通常規模のインポートは許可されるはず");
     }
 
-    // 敵対的検証で発覚: kind:"single"のペイロードに空の"profiles":[]を1つ混ぜるだけで、
-    // 実際に使われる"profile"(単数)側のルール数チェックが丸ごとすり抜けられていた
+    // kind:"single"のペイロードに空の"profiles":[]を混ぜても、実際に使われる
+    // "profile"(単数)側のルール数チェックがすり抜けられないことを固定する回帰テスト
     // (実際のExportPayloadデシリアライズは"kind"タグでのみ判別し、余分な"profiles"
-    // キーは無視するため)。この具体的な回避パターンを固定する回帰テスト。
+    // キーは無視するため)。
     #[test]
     fn check_import_size_limits_is_not_fooled_by_a_decoy_profiles_key_on_a_single_payload() {
         let rules: Vec<serde_json::Value> =

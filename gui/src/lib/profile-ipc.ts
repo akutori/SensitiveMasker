@@ -108,7 +108,7 @@ export async function exportAllToFile(passphrase: string, destPath: string): Pro
   await invoke("export_all_to_file", { passphrase, destPath });
 }
 
-// インポート確認画面でルールの中身を表示するための型(SMX-1対応)。
+// インポート確認画面でルールの中身を表示するための型。
 // 「構文的に有効だが実データの書式と食い違う」細工されたルールに、確定前に
 // 気付けるようにするための情報であり、確定前に必ず提示する。
 export interface ImportRuleDto {

@@ -39,7 +39,7 @@ function modeAndValue(rule: ImportRuleDto) {
 
 // 横スクロールが必要になった場合でも、左側(ルール名・状態・種別・モード/値)は
 // スクロール前に見える位置に置き、パターンだけを右端(最も可変長で長くなりうる列)
-// にする。無効ルールに気付けることがSMX-1対応の目的そのものであるため、
+// にする。無効ルールに気付けることがこの画面の目的そのものであるため、
 // 「状態」列はスクロールしないと見えない位置に置かない。
 function RuleTable({ rules }: { rules: ImportRuleDto[] }) {
   if (rules.length === 0) {
@@ -60,7 +60,7 @@ function RuleTable({ rules }: { rules: ImportRuleDto[] }) {
         {rules.map((rule) => (
           <TableRow key={rule.name} className={rule.enabled ? undefined : "opacity-50"}>
             {/* bdi: インポート由来の名前・パターン等が双方向書式文字を含んでいても、
-                「状態」列(無効ルールに気付くというSMX-1対応の目的そのもの)の
+                「状態」列(無効ルールに気付くというこの画面の目的そのもの)の
                 表示位置を偽装できないようにする。 */}
             <TableCell className="whitespace-nowrap">
               <bdi>{rule.name}</bdi>
