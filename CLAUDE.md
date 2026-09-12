@@ -14,19 +14,24 @@
 
 - Rust(edition 2024)、Cargo workspace(各crateは`edition.workspace = true`でルートの`[workspace.package]`を継承)
 - **masking-core**: 副作用のない純粋ロジック。`serde`(モデル定義)、`regex`(マッチング)、`thiserror`(エラー型)
-- **profile-store**: SQLite永続化+暗号化+鍵管理。`rusqlite`(bundled)、`chacha20poly1305`(プロファイル本体の暗号化)、
-  `secrecy`(鍵の保持)、`age`(エクスポート/インポートのパスフレーズ再暗号化、未実装)、`rand`、`dirs`
+- **profile-store**: SQLite永続化+暗号化+鍵管理+export/import。`rusqlite`(bundled)、
+  `chacha20poly1305`+`poly1305`(zeroize feature有効化、プロファイル本体の暗号化)、
+  `secrecy`/`zeroize`(鍵・平文の保持と消去)、`age`(エクスポート/インポートのパスフレーズ再暗号化)、
+  `zxcvbn`(パスフレーズ強度判定)、`rand`、`dirs`
 - **masker**(CLI): `clap`
 - **masker-mcp**: `rmcp`(公式Rust SDK, stdioトランスポート)、`tokio`
-- **gui**: Tauri v2(フロントエンドフレームワーク未選定)
+- **gui**: Tauri v2。フロントエンドはReact 19 + TypeScript + Vite + TanStack Router + Tailwind CSS v4 +
+  shadcn/ui(Radix)、パッケージマネージャーは常にbun。Tauriプラグイン: `dialog`(ファイル選択)、
+  `clipboard-manager`+`arboard`(クリップボード)、`notification`(トレイのエラー通知)、
+  `autostart`(OSごとの自動起動)。E2Eテストは`tauri-plugin-wdio`(`e2e-testing` feature、配布ビルドには含めない)
 
 ## ディレクトリ構成
 
 ```mermaid
 flowchart TD
-    G["gui (Tauri, 未着手)"] --> CORE["masking-core<br>純粋関数のみ"]
-    C["crates/masker (clap CLI)"] --> CORE
-    M["crates/masker-mcp (rmcp)"] -->|サブプロセスとして<br>masker実行ファイルを呼ぶ| C
+    G["gui<br>Tauri + React"] --> CORE["masking-core<br>純粋関数のみ"]
+    C["crates/masker<br>clap CLI"] --> CORE
+    M["crates/masker-mcp<br>rmcp"] -->|サブプロセスとして<br>masker実行ファイルを呼ぶ| C
     G --> PS["profile-store<br>SQLite+暗号化+鍵管理"]
     C --> PS
     PS --> CORE
@@ -40,7 +45,11 @@ SensitiveMasker/
     profile-store/         # SQLite, 暗号化, 鍵ファイル管理, export/import
     masker/                 # CLIエントリポイント(バイナリ名 masker)
     masker-mcp/              # MCPサーバー(run_masked_commandツール)
-  gui/                      # Tauriアプリ(未作成)
+  gui/                      # Tauriアプリ
+    src/                     # React(コンポーネント・ルート・状態管理)
+    src-tauri/                # Tauriコマンド・トレイ・クリップボード連携
+    e2e/                       # WebDriverベースのE2Eテスト
+  docs/cli/README.md         # masker CLIのコマンド仕様
   poc/                      # 使い捨てのPoC用(workspaceのmemberに含めない)
 ```
 
@@ -61,17 +70,25 @@ SensitiveMasker/
 - ルールプロファイルはSQLite内で`chacha20poly1305`により対称暗号化して保存する(`rules_encrypted`+
   `nonce`列)。AAD(プロファイル名)を束ねる
 - 復号鍵は`secrecy::SecretBox`で保持し、DBと別ファイルに分離してOSファイル権限
-  (Unix chmod 600 / Windowsは`icacls`)で所有ユーザーのみに制限する
+  (Unix chmod 600 / Windowsは`icacls`絶対パス指定)で所有ユーザーのみに制限する
+- 鍵・平文JSON等の機微データは`zeroize`でdrop時に消去する。コピーを作ってから消すのではなく、
+  そもそもコピーを作らない設計(借用ベースの構築、事前確保したヒープへの直接書き込み)を優先する
 - OSキーチェーン(keyring/DPAPI/Keychain)は不採用
 - 未初期化(鍵/DB不在)時は`mask`等をエラーで停止する(fail-safe defaults)
-- エクスポート/インポートは`age`クレートによるパスフレーズ再暗号化(`age -p`相当、未実装)
+- エクスポート/インポートは`age`クレートによるパスフレーズ再暗号化(GUI側はアプリ生成の高エントロピー
+  パスフレーズ、CLI側は手入力。`zxcvbn`でスコアが低い場合は警告する)
 - 保存先パスのbundle identifierは`io.github.akutori.sensitivemasker`
   (`crates/profile-store/src/paths.rs`)。GUI側の`tauri.conf.json`の`identifier`と一致させる必要がある
+- GUI(Tauri)はACL(`capabilities/default.json`、`build.rs`で自動生成)で全コマンドを個別許可制にし、
+  CSP(`tauri.conf.json`)で外部への通信を遮断する
+- 外部実行ファイル(`icacls`/`taskkill`)はPATH解決に頼らず`%SystemRoot%`から絶対パスを組み立てて呼ぶ
 
 ## 開発手法
 
 - **masking-core**: TDD(Red-Green-Refactor)。肯定テストと否定テストを対にする
 - **profile-store**: 実ファイルI/O・実DBを使った結合テスト中心(モックしない)
+- **gui**: Component-Driven Development(Storybookで個別コンポーネントを検証してから画面に組み込む)。
+  主要フローは`gui/e2e/`のWebDriverベースE2Eテストで検証する
 - ロジックを伴う実装(機能追加・修正・リファクタリング)では`adversarial-verification` Skillの
   「実装計画 → 実装 → 敵対的検証 → 修正」ループに従う
 
