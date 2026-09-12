@@ -9,7 +9,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.0.1"
 edition = "2024"
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
