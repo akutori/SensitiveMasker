@@ -1,10 +1,31 @@
 # SensitiveMasker
 
+<div align="center">
+  <img src="gui/src-tauri/icons/icon.png" width="128" height="128" alt="アプリアイコン">
+</div>
+
 電話番号・パスワード・IPアドレス等の機微情報を含む任意のテキスト(ログ・コンソール出力等)を、
-外部LLMに貼り付ける前にローカルで自動マスキングするツールです。
+外部LLMに貼り付ける前にローカルで自動マスキングするデスクトップツールです(Windows/macOS/Linux対応)。
 
 GUI・CLI・MCPサーバーの3つのインターフェースを提供し、マスキングルールとロジックは全てから共有されます。
 ルールプロファイルはローカルのSQLiteに暗号化して保存され、外部への通信は一切行いません。
+
+アーキテクチャや開発方針の詳細は [CLAUDE.md](CLAUDE.md) を参照してください。
+
+## ダウンロード(配布版)
+
+開発環境なしで使いたい場合は、[GitHub Releases](https://github.com/akutori/SensitiveMasker/releases/latest)
+から各OS向けのファイルをダウンロードしてください。
+
+| ファイル | 内容 |
+|---|---|
+| `SensitiveMasker_*-setup.exe` / `*.msi`(Windows) | GUIインストーラー |
+| `SensitiveMasker_*_universal.dmg`(macOS) | GUIインストーラー(Universal Binary) |
+| `SensitiveMasker_*.deb` / `*.AppImage`(Linux) | GUIインストーラー / 単独実行ファイル |
+| `masker-<OS>`(`.exe`はWindowsのみ) | CLI単独実行ファイル |
+| `masker-mcp-<OS>`(`.exe`はWindowsのみ) | MCPサーバー単独実行ファイル |
+
+CLI・MCPサーバーはダウンロードしてそのまま実行できます(ビルド不要)。
 
 ## インターフェース
 
@@ -70,6 +91,25 @@ cd gui && bunx tsc --noEmit
 
 # E2Eテスト(WebDriver。e2e-testing featureでdebugビルドしてから実行する)
 cd gui && bun run e2e:build && bun run e2e
+```
+
+タグ(`v*`)をpushすると、GitHub Actions(`.github/workflows/release.yml`)がWindows/macOS/Linux向けの
+GUIインストーラーとCLI/MCPサーバーの実行ファイルをビルドし、GitHub Releasesに公開します。
+
+## ディレクトリ構成
+
+```
+crates/
+  masking-core/   # 副作用のないマスキングロジック(Functional Core)
+  profile-store/  # SQLite永続化・暗号化・鍵管理・export/import(Imperative Shell)
+  masker/         # clap CLI(バイナリ名 masker)
+  masker-mcp/     # MCPサーバー(run_masked_commandツール)
+gui/              # Tauri + React GUI
+  src/            # フロントエンド(コンポーネント・ルート・状態管理)
+  src-tauri/      # Tauriコマンド・トレイ・クリップボード連携
+  e2e/            # WebDriverベースのE2Eテスト
+docs/cli/         # masker CLIのコマンド仕様
+poc/              # 使い捨てのPoC用(workspaceのmemberに含めない)
 ```
 
 アーキテクチャ・技術スタック・セキュリティ設計・開発方針の詳細は [CLAUDE.md](CLAUDE.md) を参照してください。
