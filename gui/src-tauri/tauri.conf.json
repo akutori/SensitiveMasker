@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "gui",
+  "productName": "SensitiveMasker",
   "version": "0.1.0",
   "identifier": "io.github.akutori.sensitivemasker",
   "build": {
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "gui",
+        "title": "SensitiveMasker",
         "width": 800,
         "height": 600
       }
