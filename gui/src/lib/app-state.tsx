@@ -414,6 +414,14 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
           setStatusText(
             `アクティブプロファイル: ${activeProfile.name} ・ 直近のマスク実行でマッピング${totalMatches}件を置換`
           );
+          // 有効なルールはマッチ0件でもmatchCountsに残る(無効ルールのみ含まれない)。
+          // 意図しない正規表現ミス等に気付けるよう、実行のたびに知らせる。
+          const zeroMatchRules = matchCounts.filter((m) => m.count === 0);
+          if (zeroMatchRules.length > 0) {
+            toast.warning(
+              `マッチ件数が0件のルールがあります(${zeroMatchRules.map((m) => m.ruleName).join("、")})。意図した設定でない場合はルール設定を見直してください。`
+            );
+          }
         } catch (error) {
           console.error("mask_text failed", error);
           toast.error("マスク実行に失敗しました");
