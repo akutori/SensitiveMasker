@@ -74,13 +74,21 @@ jobs:
         run: |
           mkdir -p gui/src-tauri/binaries
           if [ "${{ matrix.platform }}" = "macos-latest" ]; then
-            # tauriのuniversal macOSビルドはexternalBinもuniversal(lipo済み)である
-            # ことを要求する(tauri-bundlerのsettings.rsで確認済み)。
+            # tauriの`--target universal-apple-darwin`は内部でaarch64/x86_64を別々に
+            # `cargo build --target <arch>`するため、build.rs(ACLマニフェスト生成)は
+            # 各アーキテクチャ実行時にそのアーキテクチャ名のexternalBinを個別に要求する。
+            # 最終のバンドル(.app)組み込み時にはuniversal(lipo済み)の方を使う
+            # (tauri-bundlerのsettings.rsで確認済み)ため、3種類とも配置する。
+            cargo build --release -p masker -p masker-mcp --target aarch64-apple-darwin
             cargo build --release -p masker -p masker-mcp --target x86_64-apple-darwin
+            cp target/aarch64-apple-darwin/release/masker gui/src-tauri/binaries/masker-aarch64-apple-darwin
+            cp target/aarch64-apple-darwin/release/masker-mcp gui/src-tauri/binaries/masker-mcp-aarch64-apple-darwin
+            cp target/x86_64-apple-darwin/release/masker gui/src-tauri/binaries/masker-x86_64-apple-darwin
+            cp target/x86_64-apple-darwin/release/masker-mcp gui/src-tauri/binaries/masker-mcp-x86_64-apple-darwin
             lipo -create -output gui/src-tauri/binaries/masker-universal-apple-darwin \
-              target/release/masker target/x86_64-apple-darwin/release/masker
+              target/aarch64-apple-darwin/release/masker target/x86_64-apple-darwin/release/masker
             lipo -create -output gui/src-tauri/binaries/masker-mcp-universal-apple-darwin \
-              target/release/masker-mcp target/x86_64-apple-darwin/release/masker-mcp
+              target/aarch64-apple-darwin/release/masker-mcp target/x86_64-apple-darwin/release/masker-mcp
           else
             TARGET_TRIPLE=$(rustc --print host-tuple)
             if [ "${{ matrix.platform }}" = "windows-latest" ]; then
