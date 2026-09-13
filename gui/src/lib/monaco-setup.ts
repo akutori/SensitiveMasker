@@ -13,11 +13,14 @@ self.MonacoEnvironment = {
 
 loader.config({ monaco });
 
-// Monaco標準のホバーツールチップ(ツールバーアイコンの説明)が狭い幅ではボタンに
-// 重なりクリックを妨げるため抑制する。plaintext専用でエディタ内容へのホバー情報は
-// 使わないため、無効化して問題ない。
+// Monaco標準のホバーツールチップ(ツールバーアイコンの説明、find widgetの
+// 閉じるボタンの「Close (Escape)」等)が狭い幅ではボタンに重なりクリック/
+// キー操作を妨げるため抑制する。plaintext専用でエディタ内容へのホバー情報は
+// 使わないため、無効化して問題ない。HoverServiceはhoverの描画先を`.monaco-editor`
+// の子孫ではなくレイアウトサービスの決めるコンテナ(実質document.body側)に
+// 付け替えるため、`.monaco-editor`配下に限定せずグローバルに無効化する。
 const style = document.createElement("style");
-style.textContent = `.monaco-editor .monaco-hover { display: none !important; }`;
+style.textContent = `.monaco-hover { display: none !important; }`;
 document.head.appendChild(style);
 
 const baseTheme: Pick<monaco.editor.IStandaloneThemeData, "base" | "inherit" | "rules"> = {
