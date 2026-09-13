@@ -106,17 +106,19 @@ export function MainScreen({
         </Button>
       </div>
 
-      <div className="mt-4 min-h-0 flex-1 overflow-y-auto">
-        <div className="grid gap-1.5">
-          <p className="text-sm">入力テキスト: (Ctrl+Fで検索、Ctrl+Hで置換)</p>
+      <div className="mt-4 flex min-h-0 flex-1 flex-col overflow-y-auto">
+        <div className="flex min-h-[100px] flex-1 flex-col gap-1.5">
+          <p className="shrink-0 text-sm">入力テキスト: (Ctrl+Fで検索、Ctrl+Hで置換)</p>
           <MaskedTextEditor
             value={inputText}
             onChange={onInputTextChange}
             ariaLabel="入力テキスト"
+            height="100%"
+            className="min-h-0 flex-1"
           />
         </div>
 
-        <div className="mt-2 flex flex-wrap items-center gap-2">
+        <div className="mt-2 flex shrink-0 flex-wrap items-center gap-2">
           <Button variant="outline" onClick={onLoadFromFile} disabled={!hasProfiles}>
             ファイルから
           </Button>
@@ -132,14 +134,18 @@ export function MainScreen({
           </Button>
         </div>
 
-        <div className="mt-5 border-t pt-4">
-          <p className="text-sm">出力(マスク後)テキスト:</p>
-          <div className="mt-1.5">
-            <MaskedTextEditor value={outputText} readOnly ariaLabel="出力(マスク後)テキスト" />
-          </div>
+        <div className="mt-5 flex min-h-[100px] flex-1 flex-col border-t pt-4">
+          <p className="shrink-0 text-sm">出力(マスク後)テキスト:</p>
+          <MaskedTextEditor
+            value={outputText}
+            readOnly
+            ariaLabel="出力(マスク後)テキスト"
+            height="100%"
+            className="mt-1.5 min-h-0 flex-1"
+          />
         </div>
 
-        <div className="mt-2 flex justify-end gap-2">
+        <div className="mt-2 flex shrink-0 justify-end gap-2">
           <Button variant="outline" onClick={onSaveToFile}>
             ファイルに保存
           </Button>
@@ -148,7 +154,7 @@ export function MainScreen({
           </Button>
         </div>
 
-        <div className="mt-4 rounded-md border border-border bg-muted px-3 py-2 text-sm text-foreground">
+        <div className="mt-4 shrink-0 rounded-md border border-border bg-muted px-3 py-2 text-sm text-foreground">
           {statusText}
         </div>
       </div>

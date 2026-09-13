@@ -1,4 +1,5 @@
 import Editor from "@monaco-editor/react";
+import { cn } from "cn";
 import "@/lib/monaco-setup";
 
 export interface MaskedTextEditorProps {
@@ -6,6 +7,8 @@ export interface MaskedTextEditorProps {
   onChange?: (value: string) => void;
   readOnly?: boolean;
   ariaLabel: string;
+  className?: string;
+  height?: string;
 }
 
 export function MaskedTextEditor({
@@ -13,11 +16,18 @@ export function MaskedTextEditor({
   onChange,
   readOnly = false,
   ariaLabel,
+  className,
+  height = "170px",
 }: MaskedTextEditorProps) {
   return (
-    <div className="overflow-hidden rounded-lg border border-input focus-within:border-ring focus-within:ring-3 focus-within:ring-ring/50">
+    <div
+      className={cn(
+        "overflow-hidden rounded-lg border border-input focus-within:border-ring focus-within:ring-3 focus-within:ring-ring/50",
+        className
+      )}
+    >
       <Editor
-        height="170px"
+        height={height}
         language="plaintext"
         value={value}
         onChange={(next) => onChange?.(next ?? "")}
