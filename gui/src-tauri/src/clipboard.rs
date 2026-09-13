@@ -118,6 +118,38 @@ pub async fn write_clipboard_text(
     write_clipboard_text_impl(&app, &state, text)
 }
 
+/// マスク済みテキスト等、秘匿情報ではない値をクリップボードへ書き込む。
+/// write_clipboard_text/ClipboardStateのpending追跡(終了時の自動クリア対象)には
+/// 含めない。これを共有すると、メイン画面で「クリップボードにコピー」した後トレイの
+/// 「終了」から抜けた場合、clear_pending_on_exitがまだ一致している値を秘匿情報の
+/// 消し忘れと誤認し、無警告でクリップボードを空にしてしまう(実際に確認済みの不具合)。
+/// tray.rsのmask_clipboardが元々プラグインを直接呼びこの追跡を経由しないのと
+/// 同じ理由でこの関数を共有する。
+///
+/// pending追跡には加わらないが、Mutex自体はwrite_clipboard_text_impl/
+/// clear_clipboard_if_matches_implと共有してロックする。これが無いと、
+/// 「secretコピー→自動クリアタイマーがread→(ここでuntracked書き込みが割り込む)→
+/// タイマーがwrite("")」という並びで、たった今書いたマスク結果を誤って消しうる
+/// (read-compare-writeの間に割り込まれるTOCTOU)。同じMutexを保持することで、
+/// この一連の操作全体を他のクリップボード操作と直列化する。
+pub(crate) fn write_untracked<R: Runtime>(
+    app: &AppHandle<R>,
+    state: &ClipboardState,
+    text: &str,
+) -> Result<(), String> {
+    let _guard = state.0.lock().unwrap_or_else(|e| e.into_inner());
+    app.clipboard().write_text(text.to_string()).map_err(|_| CLIPBOARD_ERROR.to_string())
+}
+
+#[tauri::command]
+pub async fn write_clipboard_text_untracked(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, ClipboardState>,
+    text: String,
+) -> Result<(), String> {
+    write_untracked(&app, &state, &text)
+}
+
 /// 現在のクリップボードの内容がexpectedのままであればクリアする。読み取り・比較・
 /// クリアをRust側で完結させることで、navigator.clipboard.readText()が要求する
 /// ウィンドウフォーカス・clipboard-read権限に依存しない(フォーカスが外れている状態が

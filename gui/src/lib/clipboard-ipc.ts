@@ -13,6 +13,13 @@ export async function writeClipboardText(text: string): Promise<void> {
   await invoke("write_clipboard_text", { text });
 }
 
+// マスク済みテキスト等、秘匿情報ではない値のコピー専用。write_clipboard_textと違い
+// ClipboardStateの追跡(アプリ終了時の自動クリア対象)に含めない。パスフレーズ等の
+// 秘匿情報にはwriteClipboardTextを使うこと。
+export async function writeClipboardTextUntracked(text: string): Promise<void> {
+  await invoke("write_clipboard_text_untracked", { text });
+}
+
 // 現在のクリップボードの内容がexpectedのままであればクリアする。読み取り・比較・
 // クリアをRust側で完結させ、navigator.clipboard.readText()が要求するウィンドウ
 // フォーカス・clipboard-read権限に依存しないようにする。

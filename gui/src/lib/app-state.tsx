@@ -4,6 +4,8 @@ import type { RuleListItem } from "@/components/rule-edit-screen";
 import type { ImportPreviewRow } from "@/components/import-confirm-dialog";
 import { PROFILE_TEMPLATE_RULES } from "./demo-seed-data";
 import { maskText, clearMappings as ipcClearMappings } from "./masking-ipc";
+import { writeTextFile as ipcWriteTextFile } from "./text-file-ipc";
+import { writeClipboardTextUntracked as ipcWriteClipboardTextUntracked } from "./clipboard-ipc";
 import {
   clearPendingImport as ipcClearPendingImport,
   commitPendingImport as ipcCommitPendingImport,
@@ -89,6 +91,7 @@ export interface AppStateValue {
 
   profiles: Profile[];
   activeProfileId: string | null;
+  reloadProfiles: () => Promise<void>;
   setActiveProfileId: (id: string) => Promise<void>;
   createProfile: (name: string, templateValue?: string) => Promise<string>;
   duplicateProfile: (id: string, newName: string) => Promise<string>;
@@ -120,6 +123,8 @@ export interface AppStateValue {
   statusText: string;
   runMask: () => void;
   clearInput: () => void;
+  saveOutputToFile: (destPath: string) => Promise<void>;
+  copyOutputToClipboard: () => Promise<void>;
 }
 
 const AppStateContext = createContext<AppStateValue | null>(null);
@@ -152,6 +157,22 @@ async function reportExportErrorAndRethrow<T>(action: () => Promise<T>): Promise
     // インポート側と同じ理由でexport.kindによる絞り込みをしない。
     // Rust側は原因ごとに具体的なメッセージを返すため、それをそのまま使う。
     const message = isExportImportError(error) ? error.message : "エクスポートに失敗しました";
+    console.error(message, error);
+    toast.error(message);
+    throw error;
+  }
+}
+
+// reportAndRethrowのファイル書き込み専用版。write_text_fileの失敗はRust側が既に
+// 安全に表示できる具体的な文言(例:「アプリのデータフォルダには保存できません」)を
+// 返しており(export_import.rsのreject_if_inside_app_data_dir参照)、そのままでは
+// 単なるプレーンな文字列としてinvokeが reject するため、reportExportErrorAndRethrow
+// と同じ理由で固定文言に置き換えず実際の理由を表示する。
+async function reportFileErrorAndRethrow<T>(action: () => Promise<T>): Promise<T> {
+  try {
+    return await action();
+  } catch (error) {
+    const message = typeof error === "string" ? error : "ファイルへの保存に失敗しました";
     console.error(message, error);
     toast.error(message);
     throw error;
@@ -266,6 +287,10 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
 
       profiles,
       activeProfileId,
+      reloadProfiles: () =>
+        reportAndRethrow("プロファイル一覧の再読み込みに失敗しました", async () => {
+          await Promise.all([refreshProfiles(), refreshTags()]);
+        }),
       setActiveProfileId: (id) =>
         reportAndRethrow("プロファイルの切り替えに失敗しました", async () => {
           const name = findNameById(id);
@@ -436,6 +461,14 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
         const activeProfile = profiles.find((p) => p.isActive);
         if (activeProfile) ipcClearMappings(activeProfile.id).catch(() => {});
       },
+      saveOutputToFile: (destPath) =>
+        reportFileErrorAndRethrow(async () => {
+          await ipcWriteTextFile(destPath, outputText);
+        }),
+      copyOutputToClipboard: () =>
+        reportAndRethrow("クリップボードへのコピーに失敗しました", async () => {
+          await ipcWriteClipboardTextUntracked(outputText);
+        }),
     }),
     [initialized, profiles, activeProfileId, tags, inputText, outputText, statusText]
   );

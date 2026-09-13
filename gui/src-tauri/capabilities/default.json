@@ -30,6 +30,9 @@
     "allow-commit-pending-import",
     "allow-clear-pending-import",
     "allow-write-clipboard-text",
-    "allow-clear-clipboard-if-matches"
+    "allow-write-clipboard-text-untracked",
+    "allow-clear-clipboard-if-matches",
+    "allow-read-text-file",
+    "allow-write-text-file"
   ]
 }

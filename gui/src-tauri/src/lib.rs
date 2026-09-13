@@ -2,6 +2,7 @@ mod clipboard;
 mod export_import;
 mod masking;
 mod profiles;
+mod text_file_io;
 mod tray;
 #[cfg(windows)]
 mod webview_setup;
@@ -69,7 +70,10 @@ pub fn run() {
             export_import::commit_pending_import,
             export_import::clear_pending_import,
             clipboard::write_clipboard_text,
+            clipboard::write_clipboard_text_untracked,
             clipboard::clear_clipboard_if_matches,
+            text_file_io::read_text_file,
+            text_file_io::write_text_file,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

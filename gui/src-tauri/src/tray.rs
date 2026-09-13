@@ -194,7 +194,8 @@ fn mask_clipboard<R: Runtime>(app: &AppHandle<R>) {
     let masking_state = app.state::<crate::masking::MaskingState>();
     let masked = crate::masking::mask_text_for_tray(&masking_state, profile_id.to_string(), &profile, &text);
 
-    if app.clipboard().write_text(masked).is_err() {
+    let clipboard_state = app.state::<crate::clipboard::ClipboardState>();
+    if crate::clipboard::write_untracked(app, &clipboard_state, &masked).is_err() {
         notify_error(app, "マスク結果をクリップボードへ書き込めませんでした");
     }
 }
