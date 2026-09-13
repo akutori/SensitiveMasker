@@ -26,10 +26,44 @@ GUI・CLI・MCPサーバーの3つのインターフェースを提供し、マ�
 | `masker-mcp-<OS>`(`.exe`はWindowsのみ) | MCPサーバー単独実行ファイル |
 
 GUIインストーラーには`masker`/`masker-mcp`も同梱されており、インストール先ディレクトリに
-そのまま配置されます(例: Windowsは`C:\Program Files\SensitiveMasker\masker.exe`)。
-CLIをターミナルのどこからでも呼びたい場合は、そのディレクトリを各自PATHに追加してください。
-GUIを使わずCLI/MCPサーバーだけ欲しい場合は、`masker-<OS>`/`masker-mcp-<OS>`を個別にダウンロードしても
-そのまま実行できます(ビルド不要)。
+そのまま配置されます。GUIを使わずCLI/MCPサーバーだけ欲しい場合は、`masker-<OS>`/`masker-mcp-<OS>`を
+個別にダウンロードしてもそのまま実行できます(ビルド不要)。
+
+### CLIをターミナルから呼べるようにする(PATHへの追加)
+
+インストールしただけでは`masker`コマンドはターミナルのどこからでも呼べません(MCPサーバーの設定は
+絶対パス指定が前提のため、`masker-mcp`はこの対応は不要です)。既定のインストール先を前提にした
+手順は以下の通りです。
+
+**Windows**
+
+インストーラーの種類によって既定のインストール先が異なります。
+
+- `*-setup.exe`(既定、管理者権限不要): `%LOCALAPPDATA%\SensitiveMasker\`
+- `*.msi`: `C:\Program Files\SensitiveMasker\`
+
+PowerShellで(setup.exe版の場合、管理者権限不要):
+
+```powershell
+[Environment]::SetEnvironmentVariable("Path", "$env:LOCALAPPDATA\SensitiveMasker;" + [Environment]::GetEnvironmentVariable("Path", "User"), "User")
+```
+
+GUIから設定する場合は「設定 → システム → バージョン情報 → システムの詳細設定 → 環境変数」で
+ユーザー環境変数の`Path`に上記いずれかのフォルダを追加してください。設定後はターミナルの再起動が必要です。
+
+**macOS**
+
+`/Applications`にドラッグした場合、`masker`は`/Applications/SensitiveMasker.app/Contents/MacOS/masker`
+に配置されます。`~/.zshrc`等に追加してください。
+
+```bash
+echo 'export PATH="/Applications/SensitiveMasker.app/Contents/MacOS:$PATH"' >> ~/.zshrc
+```
+
+**Linux(.deb / .rpm)**
+
+`masker`/`masker-mcp`は`/usr/bin/`に直接インストールされ、標準で全ユーザーのPATHに含まれるため、
+追加の設定は不要です。
 
 ## インターフェース
 
