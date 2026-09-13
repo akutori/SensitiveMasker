@@ -50,6 +50,8 @@ SensitiveMasker/
     src-tauri/                # Tauriコマンド・トレイ・クリップボード連携
     e2e/                       # WebDriverベースのE2Eテスト
   docs/cli/README.md         # masker CLIのコマンド仕様
+  docs/gui/README.md         # GUIの画面・機能一覧
+  docs/mcp/README.md         # masker-mcpのツール仕様
   poc/                      # 使い捨てのPoC用(workspaceのmemberに含めない)
 ```
 

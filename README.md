@@ -107,6 +107,8 @@ bun run tauri dev
 配布用ビルドは `bun run tauri build`。フロントエンドはReact + TypeScript + Vite、コンポーネントは
 Storybook(`bun run storybook`)で個別に確認できます。
 
+画面・機能の詳細は [docs/gui/README.md](docs/gui/README.md) を参照してください。
+
 ## MCPサーバー
 
 `masker-mcp`はstdioトランスポートのMCPサーバーです。ビルドした実行ファイルをMCPクライアントの設定に登録して使います。
@@ -116,6 +118,7 @@ cargo build -p masker-mcp --release
 ```
 
 提供するツールは`run_masked_command`(任意のシェルコマンドを実行し、標準出力を`masker`でマスクしてから返す)のみです。
+セットアップ方法・引数の詳細は [docs/mcp/README.md](docs/mcp/README.md) を参照してください。
 
 ## 開発
 
@@ -147,6 +150,8 @@ gui/              # Tauri + React GUI
   src-tauri/      # Tauriコマンド・トレイ・クリップボード連携
   e2e/            # WebDriverベースのE2Eテスト
 docs/cli/         # masker CLIのコマンド仕様
+docs/gui/         # GUIの画面・機能一覧
+docs/mcp/         # masker-mcpのツール仕様
 poc/              # 使い捨てのPoC用(workspaceのmemberに含めない)
 ```
 
