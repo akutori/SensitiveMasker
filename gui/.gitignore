@@ -42,3 +42,7 @@ scripts/*.d.ts
 
 # TanStack Routerが自動生成するルートツリー
 src/routeTree.gen.ts
+
+# リリースビルド時にexternalBin用にCIが配置するmasker/masker-mcpのsidecar
+# (tauri.release.conf.json参照)。ローカルの通常ビルドでは生成されない
+src-tauri/binaries/

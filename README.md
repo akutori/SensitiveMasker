@@ -19,13 +19,17 @@ GUI・CLI・MCPサーバーの3つのインターフェースを提供し、マ�
 
 | ファイル | 内容 |
 |---|---|
-| `SensitiveMasker_*-setup.exe` / `*.msi`(Windows) | GUIインストーラー |
-| `SensitiveMasker_*_universal.dmg`(macOS) | GUIインストーラー(Universal Binary) |
-| `SensitiveMasker_*.deb` / `*.AppImage`(Linux) | GUIインストーラー / 単独実行ファイル |
+| `SensitiveMasker_*-setup.exe` / `*.msi`(Windows) | GUIインストーラー(`masker`/`masker-mcp`同梱) |
+| `SensitiveMasker_*_universal.dmg`(macOS) | GUIインストーラー(Universal Binary、`masker`/`masker-mcp`同梱) |
+| `SensitiveMasker_*.deb` / `*.AppImage`(Linux) | GUIインストーラー / 単独実行ファイル(`masker`/`masker-mcp`同梱) |
 | `masker-<OS>`(`.exe`はWindowsのみ) | CLI単独実行ファイル |
 | `masker-mcp-<OS>`(`.exe`はWindowsのみ) | MCPサーバー単独実行ファイル |
 
-CLI・MCPサーバーはダウンロードしてそのまま実行できます(ビルド不要)。
+GUIインストーラーには`masker`/`masker-mcp`も同梱されており、インストール先ディレクトリに
+そのまま配置されます(例: Windowsは`C:\Program Files\SensitiveMasker\masker.exe`)。
+CLIをターミナルのどこからでも呼びたい場合は、そのディレクトリを各自PATHに追加してください。
+GUIを使わずCLI/MCPサーバーだけ欲しい場合は、`masker-<OS>`/`masker-mcp-<OS>`を個別にダウンロードしても
+そのまま実行できます(ビルド不要)。
 
 ## インターフェース
 

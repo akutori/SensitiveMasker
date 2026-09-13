@@ -64,6 +64,34 @@ jobs:
             cp target/release/masker-mcp "dist-cli/masker-mcp-${{ matrix.cli-suffix }}"
           fi
 
+      # GUIインストーラーにmasker/masker-mcpを同梱する(externalBin)ためのsidecar配置。
+      # tauri-build(build.rs)はsrc-tauri/binaries/配下に「<name>-<target-triple>」という
+      # ファイルが実在することをビルド時に要求するため、通常のcargo checkやtauri devを
+      # 壊さないようtauri.conf.jsonには書かず、リリースビルド専用のtauri.release.conf.json
+      # (--configで合成)側にのみexternalBinを定義している。
+      - name: prepare bundled sidecars (externalBin)
+        shell: bash
+        run: |
+          mkdir -p gui/src-tauri/binaries
+          if [ "${{ matrix.platform }}" = "macos-latest" ]; then
+            # tauriのuniversal macOSビルドはexternalBinもuniversal(lipo済み)である
+            # ことを要求する(tauri-bundlerのsettings.rsで確認済み)。
+            cargo build --release -p masker -p masker-mcp --target x86_64-apple-darwin
+            lipo -create -output gui/src-tauri/binaries/masker-universal-apple-darwin \
+              target/release/masker target/x86_64-apple-darwin/release/masker
+            lipo -create -output gui/src-tauri/binaries/masker-mcp-universal-apple-darwin \
+              target/release/masker-mcp target/x86_64-apple-darwin/release/masker-mcp
+          else
+            TARGET_TRIPLE=$(rustc --print host-tuple)
+            if [ "${{ matrix.platform }}" = "windows-latest" ]; then
+              cp target/release/masker.exe "gui/src-tauri/binaries/masker-${TARGET_TRIPLE}.exe"
+              cp target/release/masker-mcp.exe "gui/src-tauri/binaries/masker-mcp-${TARGET_TRIPLE}.exe"
+            else
+              cp target/release/masker "gui/src-tauri/binaries/masker-${TARGET_TRIPLE}"
+              cp target/release/masker-mcp "gui/src-tauri/binaries/masker-mcp-${TARGET_TRIPLE}"
+            fi
+          fi
+
       - name: build & publish GUI (Tauri)
         uses: tauri-apps/tauri-action@v0
         env:
@@ -75,7 +103,7 @@ jobs:
           releaseBody: 'このタグに対応するインストーラー・実行ファイルは下記アセットからダウンロードしてください。'
           releaseDraft: false
           prerelease: false
-          args: ${{ matrix.args }}
+          args: --config src-tauri/tauri.release.conf.json ${{ matrix.args }}
 
       - name: upload CLI binaries to release
         uses: softprops/action-gh-release@v2
