@@ -18,7 +18,9 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["tray-icon"] }
+# with_webview経由でwebview2-comの型を直接使うため、tauriの内部依存とのバージョン
+# 不一致を避けるべくマイナーバージョンまで固定する(Tauri公式の推奨)。
+tauri = { version = "2.11", features = ["tray-icon"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 masking-core = { version = "0.0.1", path = "../../crates/masking-core" }
@@ -43,6 +45,13 @@ arboard = "3.6.1"
 tauri-plugin-notification = "2"
 # トレイメニューの「自動起動」チェックボックス項目用の公式プラグイン。
 tauri-plugin-autostart = "2"
+
+[target.'cfg(windows)'.dependencies]
+# WebView2既定のブラウザアクセラレータキー(Ctrl+F/F3等)を無効化するために直接使う。
+# tauriが内部で使うバージョンと型を一致させる必要があるため、tauriのバージョン固定と
+# 合わせてここも更新する。
+webview2-com = "0.38"
+windows-core = "0.61"
 
 [features]
 # 依存自体をデフォルトから外すためのfeature。有効化してもlib.rs側でさらに

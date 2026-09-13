@@ -59,10 +59,13 @@ export function MainScreen({
   return (
     // data-a11y-verified-contrast: Monaco Editorの描画と無関係な子孫要素まで
     // axeのcolor-contrastが不安定にInconclusiveを出すため子孫ごと除外する(.storybook/preview.tsx参照)。
-    <div className="p-5" data-a11y-verified-contrast="monaco-adjacent-contrast-instability">
-      <h1 className="text-lg font-bold">SensitiveMasker</h1>
+    <div
+      className="flex h-screen flex-col overflow-hidden p-5"
+      data-a11y-verified-contrast="monaco-adjacent-contrast-instability"
+    >
+      <h1 className="shrink-0 text-lg font-bold">SensitiveMasker</h1>
 
-      <div className="mt-4 flex flex-wrap items-center gap-2">
+      <div className="mt-4 flex shrink-0 flex-wrap items-center gap-2">
         <label htmlFor={`${id}-profile`} className="text-sm">
           プロファイル:
         </label>
@@ -94,7 +97,7 @@ export function MainScreen({
         </Button>
       </div>
 
-      <div className="mt-2 flex flex-wrap gap-2">
+      <div className="mt-2 flex shrink-0 flex-wrap gap-2">
         <Button variant="outline" onClick={onNewProfile}>
           新規作成
         </Button>
@@ -103,49 +106,51 @@ export function MainScreen({
         </Button>
       </div>
 
-      <div className="mt-4 grid gap-1.5">
-        <p className="text-sm">入力テキスト: (Ctrl+Fで検索、Ctrl+Hで置換)</p>
-        <MaskedTextEditor
-          value={inputText}
-          onChange={onInputTextChange}
-          ariaLabel="入力テキスト"
-        />
-      </div>
-
-      <div className="mt-2 flex flex-wrap items-center gap-2">
-        <Button variant="outline" onClick={onLoadFromFile} disabled={!hasProfiles}>
-          ファイルから
-        </Button>
-        <Button
-          className="font-bold"
-          onClick={onMaskExecute}
-          disabled={!hasProfiles}
-        >
-          マスク実行 -&gt;
-        </Button>
-        <Button variant="outline" onClick={onClear}>
-          クリア
-        </Button>
-      </div>
-
-      <div className="mt-5 border-t pt-4">
-        <p className="text-sm">出力(マスク後)テキスト:</p>
-        <div className="mt-1.5">
-          <MaskedTextEditor value={outputText} readOnly ariaLabel="出力(マスク後)テキスト" />
+      <div className="mt-4 min-h-0 flex-1 overflow-y-auto">
+        <div className="grid gap-1.5">
+          <p className="text-sm">入力テキスト: (Ctrl+Fで検索、Ctrl+Hで置換)</p>
+          <MaskedTextEditor
+            value={inputText}
+            onChange={onInputTextChange}
+            ariaLabel="入力テキスト"
+          />
         </div>
-      </div>
 
-      <div className="mt-2 flex justify-end gap-2">
-        <Button variant="outline" onClick={onSaveToFile}>
-          ファイルに保存
-        </Button>
-        <Button variant="outline" onClick={onCopyToClipboard}>
-          クリップボードにコピー
-        </Button>
-      </div>
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          <Button variant="outline" onClick={onLoadFromFile} disabled={!hasProfiles}>
+            ファイルから
+          </Button>
+          <Button
+            className="font-bold"
+            onClick={onMaskExecute}
+            disabled={!hasProfiles}
+          >
+            マスク実行 -&gt;
+          </Button>
+          <Button variant="outline" onClick={onClear}>
+            クリア
+          </Button>
+        </div>
 
-      <div className="mt-4 rounded-md border border-border bg-muted px-3 py-2 text-sm text-foreground">
-        {statusText}
+        <div className="mt-5 border-t pt-4">
+          <p className="text-sm">出力(マスク後)テキスト:</p>
+          <div className="mt-1.5">
+            <MaskedTextEditor value={outputText} readOnly ariaLabel="出力(マスク後)テキスト" />
+          </div>
+        </div>
+
+        <div className="mt-2 flex justify-end gap-2">
+          <Button variant="outline" onClick={onSaveToFile}>
+            ファイルに保存
+          </Button>
+          <Button variant="outline" onClick={onCopyToClipboard}>
+            クリップボードにコピー
+          </Button>
+        </div>
+
+        <div className="mt-4 rounded-md border border-border bg-muted px-3 py-2 text-sm text-foreground">
+          {statusText}
+        </div>
       </div>
     </div>
   );

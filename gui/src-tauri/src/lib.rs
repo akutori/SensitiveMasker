@@ -3,6 +3,8 @@ mod export_import;
 mod masking;
 mod profiles;
 mod tray;
+#[cfg(windows)]
+mod webview_setup;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -24,6 +26,8 @@ pub fn run() {
         .manage(clipboard::ClipboardState::default())
         .setup(|app| {
             tray::setup(app)?;
+            #[cfg(windows)]
+            webview_setup::disable_browser_accelerator_keys(app);
             Ok(())
         })
         .on_window_event(tray::handle_window_event);

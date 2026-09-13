@@ -2,7 +2,7 @@ import { createContext, useContext, useEffect, useMemo, useRef, useState, type R
 import { toast } from "sonner";
 import type { RuleListItem } from "@/components/rule-edit-screen";
 import type { ImportPreviewRow } from "@/components/import-confirm-dialog";
-import { DEMO_SAMPLE_TEXT, PROFILE_TEMPLATE_RULES } from "./demo-seed-data";
+import { PROFILE_TEMPLATE_RULES } from "./demo-seed-data";
 import { maskText, clearMappings as ipcClearMappings } from "./masking-ipc";
 import {
   clearPendingImport as ipcClearPendingImport,
@@ -162,7 +162,7 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
   const [initialized, setInitializedState] = useState<boolean | null>(null);
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [tags, setTags] = useState<Tag[]>([]);
-  const [inputText, setInputText] = useState(DEMO_SAMPLE_TEXT);
+  const [inputText, setInputText] = useState("");
   const [outputText, setOutputText] = useState("");
   const [statusText, setStatusText] = useState("アクティブプロファイル: なし");
 

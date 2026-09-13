@@ -236,8 +236,8 @@ export function RuleEditScreen({
   };
 
   return (
-    <div className="p-5">
-      <div className="flex items-center justify-between">
+    <div className="flex h-screen flex-col overflow-hidden p-5">
+      <div className="flex shrink-0 items-center justify-between">
         <h1 className="text-lg font-bold">ルール編集</h1>
         <div className="flex gap-2">
           <Button onClick={onSave}>保存</Button>
@@ -247,7 +247,7 @@ export function RuleEditScreen({
         </div>
       </div>
 
-      <div className="mt-5 flex flex-wrap gap-4">
+      <div className="mt-5 flex shrink-0 flex-wrap gap-4">
         <div className="grid gap-1.5">
           <Label htmlFor={`${id}-profile-name`}>プロファイル名:</Label>
           <Input
@@ -275,7 +275,7 @@ export function RuleEditScreen({
         </div>
       </div>
 
-      <div className="mt-5 flex flex-wrap gap-6 border-t pt-5">
+      <div className="mt-5 min-h-0 flex-1 overflow-y-auto flex flex-wrap gap-6 border-t pt-5">
         <div className="min-w-80 flex-1">
           <h2 className="text-sm font-bold">ルール一覧(ドラッグで並べ替え)</h2>
 

@@ -133,15 +133,15 @@ export function ProfileManagementScreen({
 
   return (
     <TooltipProvider>
-      <div className="p-5">
-        <div className="flex items-center justify-between">
+      <div className="flex h-screen flex-col overflow-hidden p-5">
+        <div className="flex shrink-0 items-center justify-between">
           <h1 className="text-lg font-bold">プロファイル管理</h1>
           <Button variant="outline" onClick={onClose}>
             閉じる(メイン画面へ)
           </Button>
         </div>
 
-        <div className="mt-5 flex flex-wrap items-center gap-2">
+        <div className="mt-5 flex shrink-0 flex-wrap items-center gap-2">
           <Button variant="outline" onClick={onNewProfile}>
             + 新規プロファイル
           </Button>
@@ -160,7 +160,7 @@ export function ProfileManagementScreen({
           </Button>
         </div>
 
-        <div className="mt-3 flex flex-wrap items-center gap-2">
+        <div className="mt-3 flex shrink-0 flex-wrap items-center gap-2">
           <Input
             placeholder="🔍 プロファイル名で検索..."
             value={searchQuery}
@@ -189,7 +189,7 @@ export function ProfileManagementScreen({
           </Button>
         </div>
 
-        <div className="mt-3">
+        <div className="mt-3 shrink-0">
           <TagFilterPopover
             availableTags={availableTags}
             selectedTags={selectedTags}
@@ -197,7 +197,7 @@ export function ProfileManagementScreen({
           />
         </div>
 
-        <div className="mt-4 grid gap-2 border-t pt-4">
+        <div className="mt-4 min-h-0 flex-1 overflow-y-auto grid gap-2 border-t pt-4">
           {profiles.length === 0 ? (
             <p className="text-sm text-muted-foreground">
               プロファイルがまだありません。「+ 新規プロファイル」から作成してください
