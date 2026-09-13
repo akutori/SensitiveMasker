@@ -20,10 +20,11 @@ use std::path::{Path, PathBuf};
 
 use encoding_rs::Encoding;
 use masking_core::{apply_compiled_profile, CompiledProfile, MappingStore};
-use profile_store::ProfileStore;
+use profile_store::{AppPaths, ProfileStore};
 
 use crate::cli::MaskArgs;
 use crate::error::CliError;
+use crate::paths::{validate_output_dir, validate_output_file};
 
 #[derive(Debug, PartialEq, Eq)]
 enum MaskMode {
@@ -182,16 +183,21 @@ fn run_file(
     encoding: Option<&'static Encoding>,
     compiled: &CompiledProfile,
     store: &mut MappingStore,
+    app_paths: &AppPaths,
 ) -> Result<(), CliError> {
+    // 出力先がアプリのデータフォルダ(暗号化DB・鍵ファイルの保存場所)の内側でないことを、
+    // 実際の書き込み(入力の読み込み・マスク処理)より前に確認する(誤ってprofiles.db等を
+    // 平文で上書きするのを防ぐ。GUIの保存ダイアログ経由の書き込みと同じ理由)。
+    let validated_output = validate_output_file(output, app_paths)?;
     let (text, had_errors) = read_decoded(input, encoding)?;
     if had_errors {
         warn_decode_errors(warn, &input.display().to_string(), encoding)?;
     }
     let masked = mask_text(&text, compiled, store);
-    if let Some(parent) = output.parent().filter(|p| !p.as_os_str().is_empty()) {
+    if let Some(parent) = validated_output.parent().filter(|p| !p.as_os_str().is_empty()) {
         fs::create_dir_all(parent).map_err(|source| CliError::IoAt { path: parent.to_path_buf(), source })?;
     }
-    write_at(output, &masked)
+    write_at(&validated_output, &masked)
 }
 
 fn run_batch(
@@ -202,7 +208,12 @@ fn run_batch(
     encoding: Option<&'static Encoding>,
     compiled: &CompiledProfile,
     store: &mut MappingStore,
+    app_paths: &AppPaths,
 ) -> Result<(), CliError> {
+    // 出力先がアプリのデータフォルダの内側でないことを、入力ディレクトリの読み取りより
+    // 前に確認する(run_fileと同じ理由)。
+    let validated_output_dir = validate_output_dir(output_dir, app_paths)?;
+
     // 入力ディレクトリが読めることを先に確認する(出力ディレクトリの作成より前に行い、
     // 入力側が不正な場合に出力側だけが副作用として作られてしまうのを避ける)。
     let mut entries: Vec<fs::DirEntry> = fs::read_dir(input_dir)
@@ -222,7 +233,8 @@ fn run_batch(
         ));
     }
 
-    fs::create_dir_all(output_dir).map_err(|source| CliError::IoAt { path: output_dir.to_path_buf(), source })?;
+    fs::create_dir_all(&validated_output_dir)
+        .map_err(|source| CliError::IoAt { path: validated_output_dir.clone(), source })?;
 
     let mut skipped = 0usize;
     for entry in entries {
@@ -242,7 +254,7 @@ fn run_batch(
             warn_decode_errors(warn, &entry.path().display().to_string(), encoding)?;
         }
         let masked = mask_text(&text, compiled, store);
-        write_at(&output_dir.join(entry.file_name()), &masked)?;
+        write_at(&validated_output_dir.join(entry.file_name()), &masked)?;
     }
     if skipped > 0 {
         writeln!(warn, "{skipped}件のサブディレクトリ/非ファイルをスキップしました")?;
@@ -250,7 +262,7 @@ fn run_batch(
     Ok(())
 }
 
-pub(crate) fn run(args: &MaskArgs, store: &ProfileStore) -> Result<(), CliError> {
+pub(crate) fn run(args: &MaskArgs, store: &ProfileStore, app_paths: &AppPaths) -> Result<(), CliError> {
     let profile = match &args.profile {
         Some(name) => store.get_profile(name)?,
         None => store.active_profile()?.ok_or(CliError::NoActiveProfile)?,
@@ -270,7 +282,7 @@ pub(crate) fn run(args: &MaskArgs, store: &ProfileStore) -> Result<(), CliError>
             &mut mapping_store,
         ),
         MaskMode::File { input, output } => {
-            run_file(&input, &output, &mut warn, encoding, &compiled, &mut mapping_store)
+            run_file(&input, &output, &mut warn, encoding, &compiled, &mut mapping_store, app_paths)
         }
         MaskMode::Batch { input_dir, output_dir, reset_mapping_per_file } => run_batch(
             &input_dir,
@@ -280,6 +292,7 @@ pub(crate) fn run(args: &MaskArgs, store: &ProfileStore) -> Result<(), CliError>
             encoding,
             &compiled,
             &mut mapping_store,
+            app_paths,
         ),
         MaskMode::Stream => run_stream(
             &mut std::io::stdin().lock(),
@@ -299,6 +312,16 @@ mod tests {
     use masking_core::{Mode, PatternType, Rule, RuleProfile};
 
     use super::*;
+
+    // データフォルダの位置を検証するreject_if_dir_is_inside_data_dirは実体比較を行うため、
+    // テスト対象の入出力とは無関係な実在するディレクトリを指すAppPathsを用意する。
+    // 戻り値のTempDirは、is_same_fileがOSレベルで実体解決を行っている間(=関数呼び出しの
+    // 間)ずっと実体が存在し続けるよう、呼び出し元のスコープで保持する必要がある。
+    fn harmless_app_paths() -> (tempfile::TempDir, AppPaths) {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = AppPaths::at(dir.path());
+        (dir, paths)
+    }
 
     fn base_args() -> MaskArgs {
         MaskArgs {
@@ -548,8 +571,9 @@ mod tests {
         let compiled = CompiledProfile::compile(&profile);
         let encoding = resolve_encoding("shift-jis").unwrap();
         let mut warn = Vec::new();
+        let (_app_data_guard, app_paths) = harmless_app_paths();
 
-        run_file(&input, &output, &mut warn, Some(encoding), &compiled, &mut store).unwrap();
+        run_file(&input, &output, &mut warn, Some(encoding), &compiled, &mut store, &app_paths).unwrap();
 
         assert_eq!(fs::read_to_string(&output).unwrap(), "MASKED");
         assert!(warn.is_empty());
@@ -631,8 +655,9 @@ mod tests {
         let (profile, mut store) = sample_compiled_profile_and_store();
         let compiled = CompiledProfile::compile(&profile);
         let mut warn = Vec::new();
+        let (_app_data_guard, app_paths) = harmless_app_paths();
 
-        run_file(&input, &output, &mut warn, None, &compiled, &mut store).unwrap();
+        run_file(&input, &output, &mut warn, None, &compiled, &mut store, &app_paths).unwrap();
 
         assert_eq!(fs::read_to_string(&output).unwrap(), "__MASK_IP_1__");
         assert!(warn.is_empty());
@@ -647,8 +672,9 @@ mod tests {
         let (profile, mut store) = sample_compiled_profile_and_store();
         let compiled = CompiledProfile::compile(&profile);
         let mut warn = Vec::new();
+        let (_app_data_guard, app_paths) = harmless_app_paths();
 
-        run_file(&input, &output, &mut warn, None, &compiled, &mut store).unwrap();
+        run_file(&input, &output, &mut warn, None, &compiled, &mut store, &app_paths).unwrap();
 
         assert_eq!(fs::read_to_string(&output).unwrap(), "__MASK_IP_1__");
     }
@@ -664,8 +690,9 @@ mod tests {
         let (profile, mut store) = sample_compiled_profile_and_store();
         let compiled = CompiledProfile::compile(&profile);
         let mut warn = Vec::new();
+        let (_app_data_guard, app_paths) = harmless_app_paths();
 
-        run_file(&input, &output, &mut warn, None, &compiled, &mut store).unwrap();
+        run_file(&input, &output, &mut warn, None, &compiled, &mut store, &app_paths).unwrap();
 
         assert!(fs::read_to_string(&output).unwrap().contains("__MASK_IP_1__"));
         assert!(!warn.is_empty(), "非UTF-8バイト列を含むファイルは警告を出すはず");
@@ -682,8 +709,10 @@ mod tests {
         let (profile, mut store) = sample_compiled_profile_and_store();
         let compiled = CompiledProfile::compile(&profile);
         let mut warn = Vec::new();
+        let (_app_data_guard, app_paths) = harmless_app_paths();
 
-        run_batch(in_dir.path(), out_dir.path(), false, &mut warn, None, &compiled, &mut store).unwrap();
+        run_batch(in_dir.path(), out_dir.path(), false, &mut warn, None, &compiled, &mut store, &app_paths)
+            .unwrap();
 
         assert_eq!(fs::read_to_string(out_dir.path().join("a.log")).unwrap(), "__MASK_IP_1__");
         assert_eq!(
@@ -702,8 +731,10 @@ mod tests {
         let (profile, mut store) = sample_compiled_profile_and_store();
         let compiled = CompiledProfile::compile(&profile);
         let mut warn = Vec::new();
+        let (_app_data_guard, app_paths) = harmless_app_paths();
 
-        run_batch(in_dir.path(), out_dir.path(), true, &mut warn, None, &compiled, &mut store).unwrap();
+        run_batch(in_dir.path(), out_dir.path(), true, &mut warn, None, &compiled, &mut store, &app_paths)
+            .unwrap();
 
         assert_eq!(fs::read_to_string(out_dir.path().join("a.log")).unwrap(), "__MASK_IP_1__");
         assert_eq!(fs::read_to_string(out_dir.path().join("b.log")).unwrap(), "__MASK_IP_1__");
@@ -716,8 +747,9 @@ mod tests {
         let (profile, mut store) = sample_compiled_profile_and_store();
         let compiled = CompiledProfile::compile(&profile);
         let mut warn = Vec::new();
+        let (_app_data_guard, app_paths) = harmless_app_paths();
 
-        let err = run_batch(dir.path(), dir.path(), false, &mut warn, None, &compiled, &mut store)
+        let err = run_batch(dir.path(), dir.path(), false, &mut warn, None, &compiled, &mut store, &app_paths)
             .expect_err("inputとoutputが同じディレクトリの場合は拒否されるはず");
 
         assert!(matches!(err, CliError::InvalidMaskArgs(_)));
@@ -733,12 +765,42 @@ mod tests {
         let (profile, mut store) = sample_compiled_profile_and_store();
         let compiled = CompiledProfile::compile(&profile);
         let mut warn = Vec::new();
+        let (_app_data_guard, app_paths) = harmless_app_paths();
 
-        let err = run_batch(&input_dir, &output_dir, false, &mut warn, None, &compiled, &mut store)
+        let err = run_batch(&input_dir, &output_dir, false, &mut warn, None, &compiled, &mut store, &app_paths)
             .expect_err("存在しない入力ディレクトリは失敗するはず");
 
         assert!(matches!(err, CliError::IoAt { .. }));
         assert!(!output_dir.exists(), "入力側の検証に失敗した時点で出力ディレクトリが作られてはいけない");
+    }
+
+    #[test]
+    fn run_batch_rejects_an_output_directory_inside_the_app_data_dir() {
+        // ネイティブダイアログを経由するGUIと異なり、CLIは--outputへの手入力を直接
+        // 受け付けるため、誤って(または--outputのタイプミスで)アプリのデータフォルダ
+        // 自体を指定した場合にprofiles.db/鍵ファイルを上書きしないことを固定する。
+        let app_data_dir = tempfile::tempdir().unwrap();
+        let app_paths = AppPaths::at(app_data_dir.path());
+        let in_dir = tempfile::tempdir().unwrap();
+        fs::write(in_dir.path().join("a.log"), "10.0.0.1").unwrap();
+        let (profile, mut store) = sample_compiled_profile_and_store();
+        let compiled = CompiledProfile::compile(&profile);
+        let mut warn = Vec::new();
+
+        let err = run_batch(
+            in_dir.path(),
+            app_data_dir.path(),
+            false,
+            &mut warn,
+            None,
+            &compiled,
+            &mut store,
+            &app_paths,
+        )
+        .expect_err("出力先がアプリのデータフォルダの場合は拒否されるはず");
+
+        assert!(matches!(err, CliError::Path(_)));
+        assert!(!app_data_dir.path().join("a.log").exists(), "検証を通過して実際に書き込まれてしまった");
     }
 
     #[test]
@@ -751,8 +813,10 @@ mod tests {
         let (profile, mut store) = sample_compiled_profile_and_store();
         let compiled = CompiledProfile::compile(&profile);
         let mut warn = Vec::new();
+        let (_app_data_guard, app_paths) = harmless_app_paths();
 
-        run_batch(in_dir.path(), out_dir.path(), false, &mut warn, None, &compiled, &mut store).unwrap();
+        run_batch(in_dir.path(), out_dir.path(), false, &mut warn, None, &compiled, &mut store, &app_paths)
+            .unwrap();
 
         assert_eq!(fs::read_to_string(out_dir.path().join("a.log")).unwrap(), "__MASK_IP_1__");
         assert!(!out_dir.path().join("subdir").exists(), "サブディレクトリは対象外のはず");
@@ -771,12 +835,35 @@ mod tests {
         let (profile, mut store) = sample_compiled_profile_and_store();
         let compiled = CompiledProfile::compile(&profile);
         let mut warn = Vec::new();
+        let (_app_data_guard, app_paths) = harmless_app_paths();
 
-        run_batch(in_dir.path(), out_dir.path(), false, &mut warn, None, &compiled, &mut store).unwrap();
+        run_batch(in_dir.path(), out_dir.path(), false, &mut warn, None, &compiled, &mut store, &app_paths)
+            .unwrap();
 
         assert_eq!(fs::read_to_string(out_dir.path().join("a.log")).unwrap(), "__MASK_IP_1__");
         let warn_text = String::from_utf8(warn).unwrap();
         assert!(warn_text.contains("b.log"), "警告にどのファイルが原因か含まれるはず: {warn_text}");
         assert!(!warn_text.contains("a.log"), "問題のなかったファイルは警告に含まれないはず: {warn_text}");
+    }
+
+    #[test]
+    fn run_file_rejects_an_output_path_inside_the_app_data_dir() {
+        // CLIの--outputへの手入力で、誤ってアプリのデータフォルダ内のファイル名
+        // (profiles.db等)を指定した場合に上書きしないことを固定する。
+        let app_data_dir = tempfile::tempdir().unwrap();
+        let app_paths = AppPaths::at(app_data_dir.path());
+        let in_dir = tempfile::tempdir().unwrap();
+        let input = in_dir.path().join("in.log");
+        fs::write(&input, "10.0.0.1").unwrap();
+        let output = app_data_dir.path().join("profiles.db");
+        let (profile, mut store) = sample_compiled_profile_and_store();
+        let compiled = CompiledProfile::compile(&profile);
+        let mut warn = Vec::new();
+
+        let err = run_file(&input, &output, &mut warn, None, &compiled, &mut store, &app_paths)
+            .expect_err("出力先がアプリのデータフォルダの場合は拒否されるはず");
+
+        assert!(matches!(err, CliError::Path(_)));
+        assert!(!output.exists(), "検証を通過して実際に書き込まれてしまった");
     }
 }

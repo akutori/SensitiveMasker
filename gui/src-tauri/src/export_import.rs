@@ -37,19 +37,6 @@ impl std::fmt::Display for ExportImportError {
     }
 }
 
-/// フロントエンドから渡されたパス文字列を、書き込み/読み込みに使う前に検証する。
-/// UNC(`\\server\share\...`)・ローカルデバイス(`\\.\`)・拡張長(`\\?\`)は
-/// いずれも先頭が`\\`になるため一括で拒否できる。`std::path::absolute`は
-/// ファイルシステムに触れない字句上の正規化のみで、Windowsでも`\\?\`を
-/// 新たに付与しないことをテストで確認済み。
-fn normalize_and_reject_special_forms(raw: &str) -> Result<PathBuf, String> {
-    let absolute = std::path::absolute(raw).map_err(|_| GENERIC_IO_ERROR.to_string())?;
-    if absolute.to_string_lossy().starts_with(r"\\") {
-        return Err("ネットワークパスや特殊な形式のパスは指定できません".to_string());
-    }
-    Ok(absolute)
-}
-
 fn has_smx_extension(path: &Path) -> bool {
     path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("smx"))
 }
@@ -60,39 +47,21 @@ fn validate_export_dest_path(dest_path: &str) -> Result<PathBuf, String> {
     validate_export_dest_path_impl(dest_path, resolve_paths())
 }
 
+// パス検証本体(正規化・特殊形式拒否・アプリのデータフォルダ除外)はprofile_store側で
+// CLI(masker export/mask --output)と共有する。ここでは.smx拡張子の要求のみGUI固有。
 fn validate_export_dest_path_impl(dest_path: &str, app_paths: Result<AppPaths, String>) -> Result<PathBuf, String> {
-    let path = normalize_and_reject_special_forms(dest_path)?;
+    let path = profile_store::normalize_and_reject_special_forms(dest_path).map_err(|e| e.to_string())?;
     if !has_smx_extension(&path) {
         return Err("保存先には拡張子.smxを指定してください".to_string());
     }
-    // データフォルダの位置を確認できない場合は安全側に倒して拒否する(fail-safe defaults)。
     let app_paths = app_paths?;
-    let app_dir = app_paths.key_path.parent().ok_or_else(|| GENERIC_IO_ERROR.to_string())?;
     let dest_parent = path.parent().ok_or_else(|| GENERIC_IO_ERROR.to_string())?;
-    if path_is_same_or_inside(dest_parent, app_dir)? {
-        return Err("アプリのデータフォルダには保存できません".to_string());
-    }
+    app_paths.reject_if_dir_is_inside_data_dir(dest_parent).map_err(|e| e.to_string())?;
     Ok(path)
 }
 
-/// `candidate`が`boundary`自身か、その配下かを判定する。パス文字列の比較(大文字小文字・
-/// ジャンクション/シンボリックリンク・ドライブレターやUNC管理共有等の別名表現)では
-/// 回避されうるため、OSにファイルの実体を解決させる`same_file::is_same_file`で
-/// 祖先を1つずつ比較する(経由したパスの綴りに依存しない)。
-/// 途中の祖先や`boundary`自体が何らかの理由(権限・一時的なロック等)で確認できない
-/// 場合は、「安全と確認できなかった」として拒否する(fail-safe defaults。前段の
-/// resolve_paths失敗時の扱いと一貫させる)。
-fn path_is_same_or_inside(candidate: &Path, boundary: &Path) -> Result<bool, String> {
-    for ancestor in candidate.ancestors() {
-        if same_file::is_same_file(ancestor, boundary).map_err(|_| GENERIC_IO_ERROR.to_string())? {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
 fn validate_import_source_path(source_path: &str) -> Result<PathBuf, String> {
-    let path = normalize_and_reject_special_forms(source_path)?;
+    let path = profile_store::normalize_and_reject_special_forms(source_path).map_err(|e| e.to_string())?;
     if !has_smx_extension(&path) {
         return Err("拡張子が.smxのファイルを選択してください".to_string());
     }

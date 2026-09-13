@@ -3,17 +3,23 @@
 use std::io::{IsTerminal, Write};
 use std::path::Path;
 
-use profile_store::{AllImportEntry, ExposeSecret, ImportOutcome, ImportPreview, ProfileStore, SecretString};
+use profile_store::{AllImportEntry, AppPaths, ExposeSecret, ImportOutcome, ImportPreview, ProfileStore, SecretString};
 
 use crate::error::CliError;
+use crate::paths::validate_output_file;
 
-pub(crate) fn export(store: &ProfileStore, profile: Option<&str>, output: &Path) -> Result<(), CliError> {
+pub(crate) fn export(
+    store: &ProfileStore,
+    profile: Option<&str>,
+    output: &Path,
+    app_paths: &AppPaths,
+) -> Result<(), CliError> {
     // 存在確認を先に行う(存在しない名前に対して無駄にパスフレーズ入力させない)。
     if let Some(name) = profile {
         store.get_profile(name)?;
     }
     let passphrase = prompt_new_passphrase()?;
-    export_with_passphrase(store, profile, output, passphrase)
+    export_with_passphrase(store, profile, output, passphrase, app_paths)
 }
 
 // TTY読み取り(rpassword)をテスト対象から分離するための本体。
@@ -22,12 +28,18 @@ fn export_with_passphrase(
     profile: Option<&str>,
     output: &Path,
     passphrase: SecretString,
+    app_paths: &AppPaths,
 ) -> Result<(), CliError> {
+    // 出力先がアプリのデータフォルダ(暗号化DB・鍵ファイルの保存場所)の内側でないことを、
+    // 実際の暗号化処理より前に確認する(誤ってprofiles.db等を上書きするのを防ぐ。
+    // GUIの保存ダイアログ経由のエクスポートと同じ理由)。
+    let validated_output = validate_output_file(output, app_paths)?;
     let encrypted = match profile {
         Some(name) => store.export_profile(name, passphrase)?,
         None => store.export_all(passphrase)?,
     };
-    std::fs::write(output, &encrypted).map_err(|source| CliError::IoAt { path: output.to_path_buf(), source })?;
+    std::fs::write(&validated_output, &encrypted)
+        .map_err(|source| CliError::IoAt { path: output.to_path_buf(), source })?;
     match profile {
         Some(name) => println!("プロファイル '{name}' を '{}' にエクスポートしました", output.display()),
         None => println!("全プロファイルを '{}' にエクスポートしました", output.display()),
@@ -151,12 +163,15 @@ mod tests {
 
     use super::*;
 
-    fn temp_store() -> (tempfile::TempDir, ProfileStore) {
+    // 戻り値のAppPathsは、export_with_passphraseの検証(出力先がアプリのデータ
+    // フォルダの内側でないこと)にそのまま使う。このストア自身の実データフォルダを
+    // 「保護すべきアプリのデータフォルダ」として使うのが最も実運用に近い。
+    fn temp_store() -> (tempfile::TempDir, AppPaths, ProfileStore) {
         let dir = tempfile::tempdir().unwrap();
         let paths = AppPaths::at(dir.path());
         profile_store::init_at(&paths).unwrap();
         let store = ProfileStore::open_at(&paths).unwrap();
-        (dir, store)
+        (dir, paths, store)
     }
 
     fn create(store: &mut ProfileStore, name: &str) {
@@ -169,14 +184,14 @@ mod tests {
 
     #[test]
     fn single_export_then_import_round_trips_into_a_different_store() {
-        let (_dir_a, mut store_a) = temp_store();
+        let (_dir_a, app_paths_a, mut store_a) = temp_store();
         create(&mut store_a, "work");
         let export_dir = tempfile::tempdir().unwrap();
         let export_path = export_dir.path().join("work.agemask");
 
-        export_with_passphrase(&store_a, Some("work"), &export_path, passphrase("pw")).unwrap();
+        export_with_passphrase(&store_a, Some("work"), &export_path, passphrase("pw"), &app_paths_a).unwrap();
 
-        let (_dir_b, mut store_b) = temp_store();
+        let (_dir_b, _app_paths_b, mut store_b) = temp_store();
         import_with_passphrase(&mut store_b, &export_path, passphrase("pw"), true).unwrap();
 
         assert_eq!(store_b.get_profile("work").unwrap().profile_name(), "work");
@@ -184,15 +199,15 @@ mod tests {
 
     #[test]
     fn all_export_then_import_round_trips_multiple_profiles() {
-        let (_dir_a, mut store_a) = temp_store();
+        let (_dir_a, app_paths_a, mut store_a) = temp_store();
         create(&mut store_a, "work");
         create(&mut store_a, "personal");
         let export_dir = tempfile::tempdir().unwrap();
         let export_path = export_dir.path().join("all.agemask");
 
-        export_with_passphrase(&store_a, None, &export_path, passphrase("pw")).unwrap();
+        export_with_passphrase(&store_a, None, &export_path, passphrase("pw"), &app_paths_a).unwrap();
 
-        let (_dir_b, mut store_b) = temp_store();
+        let (_dir_b, _app_paths_b, mut store_b) = temp_store();
         import_with_passphrase(&mut store_b, &export_path, passphrase("pw"), true).unwrap();
 
         let names: Vec<String> = store_b.list_profiles().unwrap().into_iter().map(|s| s.name).collect();
@@ -202,13 +217,13 @@ mod tests {
 
     #[test]
     fn importing_with_the_wrong_passphrase_fails_cleanly() {
-        let (_dir_a, mut store_a) = temp_store();
+        let (_dir_a, app_paths_a, mut store_a) = temp_store();
         create(&mut store_a, "work");
         let export_dir = tempfile::tempdir().unwrap();
         let export_path = export_dir.path().join("work.agemask");
-        export_with_passphrase(&store_a, Some("work"), &export_path, passphrase("correct")).unwrap();
+        export_with_passphrase(&store_a, Some("work"), &export_path, passphrase("correct"), &app_paths_a).unwrap();
 
-        let (_dir_b, mut store_b) = temp_store();
+        let (_dir_b, _app_paths_b, mut store_b) = temp_store();
         let err = import_with_passphrase(&mut store_b, &export_path, passphrase("wrong"), true)
             .expect_err("誤ったパスフレーズは拒否されるはず");
 
@@ -217,7 +232,7 @@ mod tests {
 
     #[test]
     fn importing_a_missing_file_fails_cleanly() {
-        let (_dir, mut store) = temp_store();
+        let (_dir, _app_paths, mut store) = temp_store();
 
         let err = import_with_passphrase(&mut store, Path::new("no/such/file.agemask"), passphrase("pw"), true)
             .expect_err("存在しないファイルは失敗するはず");
@@ -228,13 +243,13 @@ mod tests {
     #[test]
     fn bulk_import_without_yes_fails_fast_instead_of_hanging_when_not_a_tty() {
         // cargo testのプロセス自体は通常TTYではないため、この経路を安全に検証できる。
-        let (_dir_a, mut store_a) = temp_store();
+        let (_dir_a, app_paths_a, mut store_a) = temp_store();
         create(&mut store_a, "work");
         let export_dir = tempfile::tempdir().unwrap();
         let export_path = export_dir.path().join("all.agemask");
-        export_with_passphrase(&store_a, None, &export_path, passphrase("pw")).unwrap();
+        export_with_passphrase(&store_a, None, &export_path, passphrase("pw"), &app_paths_a).unwrap();
 
-        let (_dir_b, mut store_b) = temp_store();
+        let (_dir_b, _app_paths_b, mut store_b) = temp_store();
         let err = import_with_passphrase(&mut store_b, &export_path, passphrase("pw"), false)
             .expect_err("非TTYかつ--yes無しでは即座に失敗するはず");
 
@@ -246,16 +261,35 @@ mod tests {
     fn single_import_does_not_require_yes_flag() {
         // 単一インポートはpreview時点で衝突が確定するため、--yesの有無に関わらず
         // 対話的な確認そのものが発生しない。
-        let (_dir_a, mut store_a) = temp_store();
+        let (_dir_a, app_paths_a, mut store_a) = temp_store();
         create(&mut store_a, "work");
         let export_dir = tempfile::tempdir().unwrap();
         let export_path = export_dir.path().join("work.agemask");
-        export_with_passphrase(&store_a, Some("work"), &export_path, passphrase("pw")).unwrap();
+        export_with_passphrase(&store_a, Some("work"), &export_path, passphrase("pw"), &app_paths_a).unwrap();
 
-        let (_dir_b, mut store_b) = temp_store();
+        let (_dir_b, _app_paths_b, mut store_b) = temp_store();
         import_with_passphrase(&mut store_b, &export_path, passphrase("pw"), false).unwrap();
 
         assert_eq!(store_b.get_profile("work").unwrap().profile_name(), "work");
+    }
+
+    #[test]
+    fn export_rejects_an_output_path_inside_the_app_data_dir() {
+        // CLIの--outputへの手入力で、誤ってこのストア自身のデータフォルダ内の
+        // ファイル名(profiles.db等)を指定した場合に上書きしないことを固定する。
+        let (dir, app_paths, mut store) = temp_store();
+        create(&mut store, "work");
+        let sneaky_output = dir.path().join("profiles.db");
+
+        let err = export_with_passphrase(&store, Some("work"), &sneaky_output, passphrase("pw"), &app_paths)
+            .expect_err("出力先がアプリのデータフォルダの場合は拒否されるはず");
+
+        assert!(matches!(err, CliError::Path(_)));
+        assert_eq!(
+            store.get_profile("work").unwrap().profile_name(),
+            "work",
+            "検証を通過して実際にDBファイルが上書きされてしまった"
+        );
     }
 
     #[test]

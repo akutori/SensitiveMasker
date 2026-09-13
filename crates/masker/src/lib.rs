@@ -3,6 +3,7 @@
 pub mod cli;
 mod commands;
 pub mod error;
+mod paths;
 
 use cli::{Cli, Command};
 use error::CliError;
@@ -13,7 +14,7 @@ pub fn dispatch(cli: Cli, paths: &AppPaths) -> Result<(), CliError> {
         Command::Init => commands::init::run(paths),
         Command::Mask(args) => {
             let store = ProfileStore::open_at(paths)?;
-            commands::mask::run(&args, &store)
+            commands::mask::run(&args, &store, paths)
         }
         Command::Profile { action } => {
             let mut store = ProfileStore::open_at(paths)?;
@@ -21,7 +22,7 @@ pub fn dispatch(cli: Cli, paths: &AppPaths) -> Result<(), CliError> {
         }
         Command::Export { profile, output } => {
             let store = ProfileStore::open_at(paths)?;
-            commands::export::export(&store, profile.as_deref(), &output)
+            commands::export::export(&store, profile.as_deref(), &output, paths)
         }
         Command::Import { input, yes } => {
             let mut store = ProfileStore::open_at(paths)?;

@@ -18,7 +18,7 @@ use secrecy::SecretBox;
 use zeroize::Zeroizing;
 
 pub use bulk::ExportPayload;
-pub use paths::{AppPaths, PathError};
+pub use paths::{normalize_and_reject_special_forms, AppPaths, PathError};
 // masker/gui側がexport_profile/import_profileにパスフレーズを渡す際、profile-storeが
 // 実際に使っているsecrecyと同一の型を参照できるようにする(独自にsecrecy依存を追加させない)。
 pub use secrecy::{ExposeSecret, SecretString};
