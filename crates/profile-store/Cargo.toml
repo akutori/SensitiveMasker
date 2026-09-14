@@ -1,6 +1,6 @@
 [package]
 name = "profile-store"
-version = "0.0.1"
+version = "0.0.2"
 edition.workspace = true
 
 [dependencies]
@@ -8,7 +8,7 @@ age = "0.12.1"
 # デフォルトでは鍵をdrop時にzeroizeしないため、zeroize featureを明示的に有効化する。
 chacha20poly1305 = { version = "0.11.0", features = ["zeroize"] }
 dirs = "7.0.0"
-masking-core = { version = "0.0.1", path = "../masking-core" }
+masking-core = { version = "0.0.2", path = "../masking-core" }
 # chacha20poly1305が内部で使うpoly1305はzeroize featureが転送されないため、
 # transitive依存に直接featureを立てて、MAC計算の中間状態もdrop時に消去させる。
 poly1305 = { version = "0.9", features = ["zeroize"] }

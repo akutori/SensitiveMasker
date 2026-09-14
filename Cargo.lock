@@ -2388,7 +2388,7 @@ dependencies = [
 
 [[package]]
 name = "gui"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "arboard",
  "masking-core",
@@ -3278,7 +3278,7 @@ dependencies = [
 
 [[package]]
 name = "masker"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "clap",
  "encoding_rs",
@@ -3293,7 +3293,7 @@ dependencies = [
 
 [[package]]
 name = "masker-mcp"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "masker",
  "rmcp",
@@ -3308,7 +3308,7 @@ dependencies = [
 
 [[package]]
 name = "masking-core"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "regex",
  "serde",
@@ -4248,7 +4248,7 @@ dependencies = [
 
 [[package]]
 name = "profile-store"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "age",
  "chacha20poly1305 0.11.0",
