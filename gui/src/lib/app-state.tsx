@@ -94,6 +94,7 @@ export interface AppStateValue {
   reloadProfiles: () => Promise<void>;
   setActiveProfileId: (id: string) => Promise<void>;
   createProfile: (name: string, templateValue?: string) => Promise<string>;
+  createProfileFromRules: (name: string, rules: Omit<RuleListItem, "id">[]) => Promise<string>;
   duplicateProfile: (id: string, newName: string) => Promise<string>;
   deleteProfile: (id: string) => Promise<void>;
   toggleFavorite: (id: string) => Promise<void>;
@@ -168,11 +169,14 @@ async function reportExportErrorAndRethrow<T>(action: () => Promise<T>): Promise
 // 返しており(export_import.rsのreject_if_inside_app_data_dir参照)、そのままでは
 // 単なるプレーンな文字列としてinvokeが reject するため、reportExportErrorAndRethrow
 // と同じ理由で固定文言に置き換えず実際の理由を表示する。
-async function reportFileErrorAndRethrow<T>(action: () => Promise<T>): Promise<T> {
+// Result<_, String>のRustコマンド(read/write_text_file、create_profile等)は文字列を
+// そのままIPCの拒否理由として返す。呼び出し元固有の汎用文言に一本化せず、原因ごとの
+// 具体的な理由(保存先の制約、ルール数上限、ルール名の検証エラー等)をそのまま見せる。
+async function reportRustErrorAndRethrow<T>(fallbackMessage: string, action: () => Promise<T>): Promise<T> {
   try {
     return await action();
   } catch (error) {
-    const message = typeof error === "string" ? error : "ファイルへの保存に失敗しました";
+    const message = typeof error === "string" ? error : fallbackMessage;
     console.error(message, error);
     toast.error(message);
     throw error;
@@ -304,6 +308,17 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
           const id = await ipcCreateProfile(name, "", seedRules ? withRuleIds(seedRules) : []);
           // profile-storeの既定は「アクティブが未設定の場合のみ」自動アクティブ化するため、
           // GUI固有の「新規作成分は常にアクティブにする」挙動はここで明示的に行う。
+          await ipcSetActiveProfile(name);
+          await refreshProfiles();
+          return String(id);
+        }),
+      createProfileFromRules: (name, rules) =>
+        // create_profileはルール数上限超過・ルール名の検証エラー等を具体的な文言で
+        // 返す(check_rule_count/Rule::new)。envインポートは選択項目数が事前に
+        // 見えないため、生成前の入力チェックだけでは防げない失敗が起こりうる。
+        reportRustErrorAndRethrow("プロファイルの作成に失敗しました", async () => {
+          const id = await ipcCreateProfile(name, "", withRuleIds(rules));
+          // createProfile(テンプレートからの作成)と同じ理由で、新規作成分は常にアクティブにする。
           await ipcSetActiveProfile(name);
           await refreshProfiles();
           return String(id);
@@ -462,7 +477,7 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
         if (activeProfile) ipcClearMappings(activeProfile.id).catch(() => {});
       },
       saveOutputToFile: (destPath) =>
-        reportFileErrorAndRethrow(async () => {
+        reportRustErrorAndRethrow("ファイルへの保存に失敗しました", async () => {
           await ipcWriteTextFile(destPath, outputText);
         }),
       copyOutputToClipboard: () =>

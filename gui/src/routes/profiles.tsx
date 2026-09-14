@@ -9,9 +9,13 @@ import { TagManagementDialog } from "@/components/tag-management-dialog";
 import { ExportModal } from "@/components/export-modal";
 import { ImportPassphraseDialog } from "@/components/import-passphrase-dialog";
 import { ImportConfirmDialog, type ImportPreviewRow } from "@/components/import-confirm-dialog";
+import { EnvImportSelectDialog } from "@/components/env-import-select-dialog";
+import type { RuleListItem } from "@/components/rule-edit-screen";
 import { useAppState, SMX_FILE_FILTERS, toImportPreviewRows } from "@/lib/app-state";
 import { isExportImportError } from "@/lib/profile-ipc";
 import { writeClipboardText, clearClipboardIfMatches } from "@/lib/clipboard-ipc";
+import { readTextFile } from "@/lib/text-file-ipc";
+import { previewEnvImport, type EnvCandidate } from "@/lib/env-import-ipc";
 
 export const Route = createFileRoute("/profiles")({
   component: ProfilesRoute,
@@ -43,6 +47,22 @@ function generatePassphrase(): string {
   return crypto.randomUUID().replace(/-/g, "").slice(0, 20);
 }
 
+// 選択されたenv変数を、そのままLiteral一致+固定置換のルールへ変換する。
+// 値が実際のシークレット文字列そのもののため、正規表現ではなくリテラル一致で
+// 確実に検出する(masking-coreのRuleモデルに新しい概念を追加せずに済む)。
+function envCandidatesToRules(candidates: EnvCandidate[]): Omit<RuleListItem, "id">[] {
+  return candidates.map((c) => ({
+    name: c.key,
+    patternType: "literal",
+    pattern: c.value,
+    mode: "fixed",
+    fixedValue: `[MASKED_${c.key}]`,
+    prefix: "",
+    enabled: true,
+    description: "",
+  }));
+}
+
 type DialogState =
   | { kind: "none" }
   | { kind: "newProfile" }
@@ -51,7 +71,9 @@ type DialogState =
   | { kind: "tagManagement" }
   | { kind: "export"; target: string; profileId: string | null }
   | { kind: "importPassphrase"; sourcePath: string; fileName: string }
-  | { kind: "importConfirm"; rows: ImportPreviewRow[] };
+  | { kind: "importConfirm"; rows: ImportPreviewRow[] }
+  | { kind: "envImportSelect"; candidates: EnvCandidate[] }
+  | { kind: "envImportName"; selectedRules: Omit<RuleListItem, "id">[] };
 
 function ProfilesRoute() {
   const navigate = useNavigate();
@@ -154,12 +176,18 @@ function ProfilesRoute() {
       });
   };
 
-  const confirmNewProfileName = async (templateForSeed?: string) => {
+  const confirmNewProfileName = async () => {
     if (profiles.some((p) => p.name === draftName)) {
       setDraftError("同じ名前のプロファイルが既に存在します");
       return;
     }
-    const id = await appState.createProfile(draftName, templateForSeed);
+    const id =
+      dialog.kind === "envImportName"
+        ? await appState.createProfileFromRules(draftName, dialog.selectedRules)
+        : await appState.createProfile(
+            draftName,
+            dialog.kind === "profileNameFromTemplate" ? dialog.templateValue : undefined
+          );
     closeDialog();
     navigate({ to: "/rules/$profileId", params: { profileId: id } });
   };
@@ -218,6 +246,23 @@ function ProfilesRoute() {
             sourcePath: path,
             fileName: path.split(/[\\/]/).pop() ?? path,
           });
+        }}
+        onEnvImport={async () => {
+          // 拡張子フィルタは付けない(index.tsxの「ファイルから」と同じ理由: ".env"は
+          // Path::extension()上「拡張子なし」扱いになり、拡張子フィルタと相性が悪い)。
+          const path = await openFileDialog({ multiple: false });
+          if (!path || Array.isArray(path)) return;
+          try {
+            const { text, hadInvalidUtf8 } = await readTextFile(path);
+            if (hadInvalidUtf8) {
+              toast.warning("ファイルの一部に不正なバイト列があったため、置き換えて読み込みました");
+            }
+            const candidates = await previewEnvImport(text);
+            setDialog({ kind: "envImportSelect", candidates });
+          } catch (error) {
+            console.error("preview_env_import failed", error);
+            toast.error("ファイルを読み込めませんでした");
+          }
         }}
         onToggleFavorite={(id) => appState.toggleFavorite(id)}
         onRowClick={(id) => appState.setActiveProfileId(id)}
@@ -288,11 +333,7 @@ function ProfilesRoute() {
           setDraftError(undefined);
         }}
         errorMessage={draftError}
-        onConfirm={() =>
-          confirmNewProfileName(
-            dialog.kind === "profileNameFromTemplate" ? dialog.templateValue : undefined
-          )
-        }
+        onConfirm={() => confirmNewProfileName()}
       />
 
       <TagManagementDialog
@@ -436,6 +477,29 @@ function ProfilesRoute() {
             closeDialog();
           }
         }}
+      />
+
+      <EnvImportSelectDialog
+        open={dialog.kind === "envImportSelect"}
+        onOpenChange={(open) => !open && closeDialog()}
+        candidates={dialog.kind === "envImportSelect" ? dialog.candidates : []}
+        onConfirm={(selected) => {
+          setDraftName(".envから作成");
+          setDraftError(undefined);
+          setDialog({ kind: "envImportName", selectedRules: envCandidatesToRules(selected) });
+        }}
+      />
+
+      <ProfileNameDialog
+        open={dialog.kind === "envImportName"}
+        onOpenChange={(open) => !open && closeDialog()}
+        name={draftName}
+        onNameChange={(name) => {
+          setDraftName(name);
+          setDraftError(undefined);
+        }}
+        errorMessage={draftError}
+        onConfirm={() => confirmNewProfileName()}
       />
     </>
   );

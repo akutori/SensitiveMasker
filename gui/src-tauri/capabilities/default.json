@@ -33,6 +33,7 @@
     "allow-write-clipboard-text-untracked",
     "allow-clear-clipboard-if-matches",
     "allow-read-text-file",
-    "allow-write-text-file"
+    "allow-write-text-file",
+    "allow-preview-env-import"
   ]
 }

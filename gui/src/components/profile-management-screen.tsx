@@ -56,6 +56,7 @@ export interface ProfileManagementScreenProps {
   onManageTags: () => void;
   onExportAll: () => void;
   onImport: () => void;
+  onEnvImport: () => void;
   onToggleFavorite: (id: string) => void;
   onRowClick: (id: string) => void;
   onEditProfile: (id: string) => void;
@@ -88,6 +89,7 @@ export function ProfileManagementScreen({
   onManageTags,
   onExportAll,
   onImport,
+  onEnvImport,
   onToggleFavorite,
   onRowClick,
   onEditProfile,
@@ -157,6 +159,9 @@ export function ProfileManagementScreen({
           </Button>
           <Button variant="outline" onClick={onImport}>
             インポート
+          </Button>
+          <Button variant="outline" onClick={onEnvImport}>
+            envインポート
           </Button>
         </div>
 

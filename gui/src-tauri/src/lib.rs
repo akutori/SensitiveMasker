@@ -1,4 +1,5 @@
 mod clipboard;
+mod env_import;
 mod export_import;
 mod masking;
 mod profiles;
@@ -74,6 +75,7 @@ pub fn run() {
             clipboard::clear_clipboard_if_matches,
             text_file_io::read_text_file,
             text_file_io::write_text_file,
+            env_import::preview_env_import,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

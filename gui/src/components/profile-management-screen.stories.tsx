@@ -83,6 +83,7 @@ function DemoScreen(props: { initialProfiles: Profile[] }) {
       onManageTags={() => console.log("manage tags")}
       onExportAll={() => console.log("export all")}
       onImport={() => console.log("import")}
+      onEnvImport={() => console.log("env import")}
       onToggleFavorite={(id) =>
         setProfiles(
           profiles.map((p) => (p.id === id ? { ...p, isFavorite: !p.isFavorite } : p))
@@ -134,6 +135,7 @@ export const Default: Story = {
     onManageTags: () => {},
     onExportAll: () => {},
     onImport: () => {},
+    onEnvImport: () => {},
     onToggleFavorite: () => {},
     onRowClick: () => {},
     onEditProfile: () => {},

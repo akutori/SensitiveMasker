@@ -38,6 +38,7 @@ fn main() {
             "clear_clipboard_if_matches",
             "read_text_file",
             "write_text_file",
+            "preview_env_import",
         ])),
     )
     .expect("Tauriのビルド設定(ACLマニフェスト生成)に失敗しました");
