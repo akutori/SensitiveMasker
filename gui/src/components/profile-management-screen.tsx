@@ -202,7 +202,7 @@ export function ProfileManagementScreen({
           />
         </div>
 
-        <div className="mt-4 min-h-0 flex-1 overflow-y-auto grid gap-2 border-t pt-4">
+        <div className="mt-4 min-h-0 flex-1 content-start overflow-y-auto grid gap-2 border-t pt-4">
           {profiles.length === 0 ? (
             <p className="text-sm text-muted-foreground">
               プロファイルがまだありません。「+ 新規プロファイル」から作成してください
