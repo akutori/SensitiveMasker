@@ -17,6 +17,10 @@ export interface ExportModalProps {
   onOpenChange: (open: boolean) => void;
   target: string;
   passphrase: string;
+  // trueの間はコピー・再生成を非活性化する(コピー/クリアいずれかのIPC応答が
+  // 返る前にもう一方を押すと世代カウンタが進み、自動クリアの設置が行われなく
+  // なるため)。
+  busy: boolean;
   onCopy: () => void;
   onRegenerate: () => void;
   onExport: () => void;
@@ -27,6 +31,7 @@ export function ExportModal({
   onOpenChange,
   target,
   passphrase,
+  busy,
   onCopy,
   onRegenerate,
   onExport,
@@ -69,10 +74,10 @@ export function ExportModal({
             >
               {revealed ? <EyeOff /> : <Eye />}
             </Button>
-            <Button variant="outline" onClick={onCopy}>
+            <Button variant="outline" onClick={onCopy} disabled={busy}>
               コピー
             </Button>
-            <Button variant="outline" onClick={onRegenerate}>
+            <Button variant="outline" onClick={onRegenerate} disabled={busy}>
               再生成
             </Button>
           </div>

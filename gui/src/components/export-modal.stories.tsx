@@ -42,6 +42,7 @@ function DemoTrigger(props: { target: string; label: string }) {
         onOpenChange={setOpen}
         target={props.target}
         passphrase={passphrase}
+        busy={false}
         onCopy={() => {
           navigator.clipboard.writeText(passphrase);
         }}
@@ -58,6 +59,7 @@ export const SingleProfile: Story = {
     onOpenChange: () => {},
     target: "SIP監視用",
     passphrase: INITIAL_PASSPHRASE,
+    busy: false,
     onCopy: () => {},
     onRegenerate: () => {},
     onExport: () => {},
@@ -71,6 +73,7 @@ export const AllProfiles: Story = {
     onOpenChange: () => {},
     target: "全プロファイル",
     passphrase: INITIAL_PASSPHRASE,
+    busy: false,
     onCopy: () => {},
     onRegenerate: () => {},
     onExport: () => {},
@@ -84,6 +87,21 @@ export const OpenByDefault: Story = {
     onOpenChange: () => {},
     target: "SIP監視用",
     passphrase: INITIAL_PASSPHRASE,
+    busy: false,
+    onCopy: () => {},
+    onRegenerate: () => {},
+    onExport: () => {},
+  },
+};
+
+// コピー/クリアのIPC応答待ちの間、コピー・再生成ボタンが非活性化されることの確認用。
+export const BusyDisablesButtons: Story = {
+  args: {
+    open: true,
+    onOpenChange: () => {},
+    target: "SIP監視用",
+    passphrase: INITIAL_PASSPHRASE,
+    busy: true,
     onCopy: () => {},
     onRegenerate: () => {},
     onExport: () => {},

@@ -103,11 +103,29 @@ function ProfilesRoute() {
   // 直近でコピーに成功したパスフレーズ(自動クリア待ちの間だけ保持)。再生成時に
   // その場でクリアするため、タイマーの生存とは別に値そのものを覚えておく。
   const lastCopiedPassphrase = useRef<string | null>(null);
+  // writeClipboardText/clearClipboardIfMatchesのIPC応答待ちの間、コピー・再生成
+  // ボタンを非活性化するためのフラグ。どちらの方向でも、応答待ちの間に他方を押すと
+  // copyGenerationが進み、後から解決した側の.then()が世代不一致で早期returnして
+  // しまう(パスフレーズ自体は書き込み/クリア済みのため、無警告で自動クリアの設置
+  // だけが行われなくなる)。ダイアログを閉じた際は明示的にfalseへ戻す(前回の操作の
+  // 結果が別セッションで解決しても、新しいダイアログのボタンを無関係に塞がないため)。
+  const [isPassphraseClipboardBusy, setIsPassphraseClipboardBusy] = useState(false);
   // コピー処理の完了(Rustへの書き込み確認)を待つ間に再生成された場合、後から
   // 解決した古い呼び出しがタイマー・状態を上書きしないようにするための世代カウンタ。
   const copyGeneration = useRef(0);
 
   const closeDialog = () => setDialog({ kind: "none" });
+
+  // エクスポートダイアログを閉じる経路(キャンセル/Escape/×・エクスポート成功)が
+  // 複数あり、どこから閉じてもパスフレーズとbusy表示を同じように後始末するため
+  // 共通化する(片方だけ更新し忘れて古いbusy状態が次回のダイアログに漏れる、
+  // という抜け漏れを防ぐ)。自動クリア自体(copyGeneration/タイマー)はダイアログを
+  // 閉じても継続させる意図のため、ここでは触らない。
+  const closeExportDialog = () => {
+    closeDialog();
+    setPassphrase("");
+    setIsPassphraseClipboardBusy(false);
+  };
 
   const cancelClipboardClear = () => {
     if (clipboardClearTimer.current) {
@@ -132,6 +150,7 @@ function ProfilesRoute() {
   const copyPassphraseWithAutoClear = (value: string) => {
     cancelClipboardClear();
     const generation = ++copyGeneration.current;
+    setIsPassphraseClipboardBusy(true);
     writeClipboardText(value)
       .then(() => {
         if (copyGeneration.current !== generation) return;
@@ -155,6 +174,9 @@ function ProfilesRoute() {
       .catch(() => {
         if (copyGeneration.current !== generation) return;
         toast.error("クリップボードへのコピーに失敗しました");
+      })
+      .finally(() => {
+        if (copyGeneration.current === generation) setIsPassphraseClipboardBusy(false);
       });
   };
 
@@ -166,6 +188,7 @@ function ProfilesRoute() {
     const copied = lastCopiedPassphrase.current;
     if (!copied) return;
     lastCopiedPassphrase.current = null;
+    setIsPassphraseClipboardBusy(true);
     clearClipboardIfMatches(copied)
       .then((result) => {
         if (copyGeneration.current !== generation) return;
@@ -173,6 +196,9 @@ function ProfilesRoute() {
       })
       .catch(() => {
         if (copyGeneration.current === generation) warnClipboardNotClearedAutomatically();
+      })
+      .finally(() => {
+        if (copyGeneration.current === generation) setIsPassphraseClipboardBusy(false);
       });
   };
 
@@ -374,13 +400,13 @@ function ProfilesRoute() {
         open={dialog.kind === "export"}
         onOpenChange={(open) => {
           if (open) return;
-          closeDialog();
           // パスフレーズをReact state上に残さない(画面録画・共有のアーカイブや
           // メモリダンプからの事後的な読み取りを避けるため)。
-          setPassphrase("");
+          closeExportDialog();
         }}
         target={dialog.kind === "export" ? dialog.target : ""}
         passphrase={passphrase}
+        busy={isPassphraseClipboardBusy}
         onCopy={() => copyPassphraseWithAutoClear(passphrase)}
         onRegenerate={() => {
           // 旧パスフレーズが既にコピーされていた場合、タイマーの取り消しだけでは
@@ -402,8 +428,7 @@ function ProfilesRoute() {
             toast.success("エクスポートが完了しました");
             // クリップボードの自動クリアはダイアログを閉じても継続する(コピーした
             // パスフレーズを他所に控える目的で閉じた場合もクリアされるべきため)。
-            closeDialog();
-            setPassphrase("");
+            closeExportDialog();
           } catch {
             // 失敗の通知はappState側のtoastが行う。ダイアログは開いたままにし、
             // 別の保存先で再試行できるようにする。
