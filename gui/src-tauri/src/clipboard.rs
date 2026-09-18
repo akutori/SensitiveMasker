@@ -62,7 +62,8 @@ fn write_clipboard_text_impl<R: Runtime>(
 /// Windowsでは書き込みと同時にSetExtWindows(exclude_from_history/exclude_from_cloud)で
 /// クリップボード履歴・クラウド同期からの除外を行うため、tauri-plugin-clipboard-manager
 /// (内部でarboardをラップ)を経由せずarboardを直接呼ぶ。このWindows専用拡張traitはプラグイン
-/// からは呼べないため。読み取り・クリア、および非Windowsでの書き込みは対象外(プラグイン経由のまま)。
+/// からは呼べないため。秘匿情報のクリア(空文字での上書き)もこの関数を経由させ、同じ除外を効かせる。
+/// 読み取り、および非Windowsでの書き込みは対象外(プラグイン経由のまま)。
 #[cfg(windows)]
 fn write_to_os_clipboard<R: Runtime>(_app: &AppHandle<R>, text: &str) -> Result<(), String> {
     use arboard::SetExtWindows;
@@ -100,8 +101,11 @@ fn clear_clipboard_if_matches_impl<R: Runtime>(
     let mut pending = state.0.lock().unwrap_or_else(|e| e.into_inner());
     let current = app.clipboard().read_text().ok();
     let outcome = decide_outcome(current.as_deref(), expected);
+    // write_to_os_clipboardを経由させ、Windowsでは書き込みと同様にクリア時も
+    // 履歴・クラウド同期から除外する(素通しのwrite_textだとクリア後の空文字だけが
+    // 通常のクリップボード履歴エントリとして残ってしまうため)。
     if outcome == ClipboardClearOutcome::Cleared {
-        app.clipboard().write_text("").map_err(|_| CLIPBOARD_ERROR.to_string())?;
+        write_to_os_clipboard(app, "")?;
     }
     if should_forget_pending(outcome, pending.as_deref(), expected) {
         *pending = None;
