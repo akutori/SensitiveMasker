@@ -91,6 +91,12 @@ SensitiveMasker/
 - **profile-store**: 実ファイルI/O・実DBを使った結合テスト中心(モックしない)
 - **gui**: Component-Driven Development(Storybookで個別コンポーネントを検証してから画面に組み込む)。
   主要フローは`gui/e2e/`のWebDriverベースE2Eテストで検証する
+  - 画面(コンポーネント・操作の流れ)を変えたら、対応するStorybookのstory(playテスト)とE2Eを同じ変更で更新する
+  - 状態遷移などReactに依存しない純関数は`gui/src/lib/*.test.ts`に置き、vitestの`unit`プロジェクト
+    (`bun run test:unit`)で検証する。storyのplayテストは`storybook`プロジェクト(`bun run test:stories`)で実行する
+  - OSのネイティブダイアログ(ファイル選択・保存)はWebDriverから操作できない。E2Eビルド(`VITE_E2E_TESTING`)に
+    限り、`gui/src/lib/file-dialog.ts`が`window.__e2eFileDialogPaths`の値をダイアログの代わりに返す
+    (本番ビルドには含まれない)
 - ロジックを伴う実装(機能追加・修正・リファクタリング)では`adversarial-verification` Skillの
   「実装計画 → 実装 → 敵対的検証 → 修正」ループに従う
 
