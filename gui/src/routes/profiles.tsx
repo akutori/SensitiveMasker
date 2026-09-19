@@ -369,13 +369,14 @@ function ProfilesRoute() {
           if (!path || Array.isArray(path)) return;
           try {
             const { text, hadInvalidUtf8 } = await readTextFile(path);
-            if (hadInvalidUtf8) {
-              toast.warning("ファイルの一部に不正なバイト列があったため、置き換えて読み込みました");
-            }
             const candidates = await previewEnvImport(text);
             // ファイルの読み込み中に別の画面が開かれていたら、置き換えない(書き出し中・書き出し済みの
             // エクスポート画面ならパスフレーズを、確認待ちのインポート画面なら復号済みの内容を、失うため)。
+            // 読み込んだ内容を使わないので、読み込んだことの通知も出さない。
             if (dialogRef.current.kind !== "none") return;
+            if (hadInvalidUtf8) {
+              toast.warning("ファイルの一部に不正なバイト列があったため、置き換えて読み込みました");
+            }
             setDialog({ kind: "envImportSelect", candidates });
           } catch (error) {
             console.error("preview_env_import failed", error);

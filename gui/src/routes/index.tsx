@@ -189,12 +189,12 @@ function MainRoute() {
           if (!path || Array.isArray(path)) return;
           try {
             const { text, hadInvalidUtf8 } = await readTextFile(path);
+            // ファイルの読み込み中に別の画面が開かれていたら、置き換えない(その画面の内容や、確認待ちの
+            // 復号済みの内容を、失うため)。読み込んだ内容を使わないので、読み込んだことの通知も出さない。
+            if (dialogRef.current.kind !== "none") return;
             if (hadInvalidUtf8) {
               toast.warning("ファイルの一部に不正なバイト列があったため、置き換えて読み込みました");
             }
-            // ファイルの読み込み中に別の画面が開かれていたら、置き換えない(その画面の内容や、確認待ちの
-            // 復号済みの内容を、失うため)。
-            if (dialogRef.current.kind !== "none") return;
             // 新しい読み込みは、進行中の(古い)「直接マスクして別ファイルに保存」を
             // 無効化する(同じパスの再読み込みでも内容が変わっている可能性があるため)。
             maskAndSaveGeneration.current += 1;

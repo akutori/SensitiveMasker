@@ -118,19 +118,35 @@ async function saveDialogCalls(): Promise<number> {
   );
 }
 
-// 開くダイアログの結果を、settleOpenDialogが呼ばれるまで保留する。
+// 開くダイアログの結果を、settleOpenDialogが呼ばれるまで保留する。ダイアログを開こうとした回数(差し替え値が
+// 参照された回数)も数え、ボタンの押下が、ダイアログを開く処理まで届いたことの確認(openDialogCalls)に使う。
 async function holdOpenDialog() {
   await browser.tauri.execute(() => {
     const w = window as unknown as {
-      __e2eFileDialogPaths?: { open?: Promise<string | null> };
+      __e2eFileDialogPaths?: object;
       __e2eOpenControl?: { resolve: (path: string | null) => void };
+      __e2eOpenCalls?: number;
     };
-    w.__e2eFileDialogPaths = {
-      open: new Promise<string | null>((resolve) => {
-        w.__e2eOpenControl = { resolve };
-      }),
-    };
+    w.__e2eOpenCalls = 0;
+    const pending = new Promise<string | null>((resolve) => {
+      w.__e2eOpenControl = { resolve };
+    });
+    const paths = {};
+    Object.defineProperty(paths, "open", {
+      enumerable: true,
+      get() {
+        w.__e2eOpenCalls = (w.__e2eOpenCalls ?? 0) + 1;
+        return pending;
+      },
+    });
+    w.__e2eFileDialogPaths = paths;
   });
+}
+
+async function openDialogCalls(): Promise<number> {
+  return browser.tauri.execute(
+    () => (window as unknown as { __e2eOpenCalls?: number }).__e2eOpenCalls ?? 0
+  );
 }
 
 // 保留した開くダイアログを、選んだパス(path)または取り消し(null)で決着させる。
@@ -298,6 +314,22 @@ async function openImportConfirmDialog(passphrase: string) {
   await (await importDialog.$("input")).setValue(passphrase);
   await (await importDialog.$("button=OK")).click();
   await (await $('[role="alertdialog"]')).waitForExist({ timeout: 15000 });
+}
+
+// 読み込んだファイルに、UTF-8として読めないバイト列があったときの警告(トースト)。
+const INVALID_BYTES_WARNING_TEXT = "不正なバイト列があったため";
+
+// 前面に確認画面などがあっても、背景にあるボタンを、JSのclick()で1回押す。押せない状態(無い・無効)は、
+// 押したつもりで何も起きないことを避けるため、その場で失敗させる。
+async function pressBackgroundButton(label: string) {
+  await browser.tauri.execute((_tauri, buttonLabel) => {
+    const button = Array.from(document.querySelectorAll<HTMLButtonElement>("button")).find(
+      (b) => b.textContent?.trim() === buttonLabel
+    );
+    if (!button) throw new Error(`${buttonLabel}のボタンが見つからない`);
+    if (button.disabled) throw new Error(`${buttonLabel}のボタンが無効になっている`);
+    button.click();
+  }, label);
 }
 
 describe("エクスポートモーダル", () => {
@@ -1282,39 +1314,63 @@ describe("エクスポートの実行(ファイルダイアログの差し替え
 
   // 確認画面を開いたまま、背景にあるボタンを押し(ファイルの選択・読み込みを保留し)、決着させても、確認画面の
   // まま残る(選択・読み込みを待つ間に、画面が変わる場合を再現する)。入口ごとに独立したテストにする。
+  // 読み込みを伴う入口(envインポート・ファイルから)は、読み込んだ内容を使わないので、不正なバイト列の警告も出さない。
+  // 「置き換えられなかった」が、押下が入口の処理まで届かなかったせいで成り立たないよう、確認画面が無い状態の
+  // 同じ操作(対照)で、その入口の画面が開くことを先に確かめる。
   const confirmDialogGuardCases = [
-    { route: "profiles", label: "インポート" },
-    { route: "profiles", label: "envインポート" },
-    { route: "main", label: "インポート" },
-    { route: "main", label: "ファイルから" },
+    { route: "profiles", label: "インポート", opens: "パスフレーズを入力", readsFile: false },
+    { route: "profiles", label: "envインポート", opens: "取り込み対象を選択", readsFile: true },
+    { route: "main", label: "インポート", opens: "パスフレーズを入力", readsFile: false },
+    { route: "main", label: "ファイルから", opens: "ファイル取り込み方法の選択", readsFile: true },
   ] as const;
-  confirmDialogGuardCases.forEach(({ route, label }, index) => {
+  confirmDialogGuardCases.forEach(({ route, label, opens, readsFile }, index) => {
     const screenName = route === "profiles" ? "プロファイル管理画面" : "メイン画面";
     it(`確認画面が開かれている間は、ファイルの選択・読み込みが終わっても、「${label}」は、その画面を置き換えない(${screenName})`, async () => {
       await completeInitialSetup();
       const profileName = `E2E確認中選択待ち確認${index}`;
-      const passphrase = await exportAndDeleteProfile(
-        profileName,
-        path.join(exportDir, `guard-confirm-${index}.smx`)
-      );
-      // 内容は架空の値だけにする。
+      const smxPath = path.join(exportDir, `guard-confirm-${index}.smx`);
+      const passphrase = await exportAndDeleteProfile(profileName, smxPath);
+      // 内容は架空の値だけにする。末尾の2バイト(0xFF 0xFE)は、UTF-8として読めない(読み込みの警告を出させるため)。
       const textPath = path.join(exportDir, `guard-confirm-${index}.env`);
-      fs.writeFileSync(textPath, "API_TOKEN=dummy-token-value-0002\n");
+      fs.writeFileSync(
+        textPath,
+        Buffer.concat([
+          Buffer.from("API_TOKEN=dummy-token-value-0002\n"),
+          Buffer.from([0xff, 0xfe]),
+          Buffer.from("\n"),
+        ])
+      );
       if (route === "main") await returnToMainScreen();
-      await openImportConfirmDialog(passphrase);
+      const invalidBytesWarning = await $(`div*=${INVALID_BYTES_WARNING_TEXT}`);
 
+      // 対照: 確認画面が開かれていなければ、選択・読み込みが終わった時点で、その入口の画面が開く。読み込みを
+      // 伴う入口では、警告も出る。開くまでの時間を測り、後で「置き換えられない」ことを確かめるまでの待ちの目安にする。
       await holdOpenDialog();
-      await browser.tauri.execute((_tauri, buttonLabel) => {
-        const button = Array.from(document.querySelectorAll<HTMLButtonElement>("button")).find(
-          (b) => b.textContent?.trim() === buttonLabel
-        );
-        if (!button) throw new Error(`${buttonLabel}のボタンが見つからない`);
-        button.click();
-      }, label);
+      await pressBackgroundButton(label);
+      expect(await openDialogCalls()).toBe(1);
+      const settledAt = Date.now();
       await settleOpenDialog(textPath);
-      await browser.pause(1500);
+      const opened = await $('[role="dialog"]');
+      await opened.waitForExist({ timeout: 10000 });
+      const openedAfterMs = Date.now() - settledAt;
+      expect(await opened.getText()).toContain(opens);
+      if (readsFile) await invalidBytesWarning.waitForExist({ timeout: 5000 });
+      await (await opened.$("button=キャンセル")).click();
+      await opened.waitForExist({ reverse: true, timeout: 10000 });
+      // 対照の警告(数秒表示される)が消えてから進む(次の「警告が出ていない」の確認と混ざらないように)。
+      if (readsFile) await invalidBytesWarning.waitForExist({ reverse: true, timeout: 15000 });
+
+      // 確認画面を開いたまま、同じ操作をする。
+      await setE2eFileDialogPaths({ save: smxPath, open: smxPath });
+      await openImportConfirmDialog(passphrase);
+      await holdOpenDialog();
+      await pressBackgroundButton(label);
+      expect(await openDialogCalls()).toBe(1);
+      await settleOpenDialog(textPath);
+      await browser.pause(Math.max(1500, openedAfterMs * 3));
       expect(await $('[role="alertdialog"]').isDisplayed()).toBe(true);
       expect(await $('[role="dialog"]').isExisting()).toBe(false);
+      expect(await invalidBytesWarning.isExisting()).toBe(false);
 
       // 確認画面を取り消すと、保留も破棄される。
       const confirmDialog = await $('[role="alertdialog"]');
