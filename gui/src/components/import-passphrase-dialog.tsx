@@ -23,6 +23,8 @@ export interface ImportPassphraseDialogProps {
   onPassphraseChange: (value: string) => void;
   errorMessage?: string;
   onConfirm: () => void;
+  // 復号している間はtrue。OKを押せず、入力も変えられない(復号が重なるのを防ぐ)。閉じることはできる。
+  busy?: boolean;
 }
 
 export function ImportPassphraseDialog({
@@ -33,6 +35,7 @@ export function ImportPassphraseDialog({
   onPassphraseChange,
   errorMessage,
   onConfirm,
+  busy = false,
 }: ImportPassphraseDialogProps) {
   const inputId = useId();
   const inputRef = useRef<HTMLInputElement>(null);
@@ -77,6 +80,7 @@ export function ImportPassphraseDialog({
               type={revealed ? "text" : "password"}
               value={passphrase}
               onChange={(e) => onPassphraseChange(e.target.value)}
+              readOnly={busy}
               aria-invalid={!!errorMessage}
               // 表示にしたとき、入力したパスフレーズが自動補完の履歴や綴り確認の対象にならないようにする。
               // WebView2はこの属性だけでは自動補完を止めない場合があるため、tauri.conf.jsonでも無効にしている。
@@ -99,7 +103,11 @@ export function ImportPassphraseDialog({
         {errorMessage && <ValidationErrorBox message={errorMessage} />}
 
         <DialogFooter>
-          <Button onClick={onConfirm} disabled={passphrase.trim().length === 0}>
+          <Button
+            onClick={onConfirm}
+            disabled={busy || passphrase.trim().length === 0}
+            aria-busy={busy}
+          >
             OK
           </Button>
           <DialogClose asChild>

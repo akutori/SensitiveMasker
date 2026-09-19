@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { toast } from "sonner";
 import { MainScreen } from "@/components/main-screen";
@@ -10,6 +10,7 @@ import { ImportPassphraseDialog } from "@/components/import-passphrase-dialog";
 import { ImportConfirmDialog, type ImportPreviewRow } from "@/components/import-confirm-dialog";
 import { useAppState, SMX_FILE_FILTERS, toImportPreviewRows } from "@/lib/app-state";
 import { createImportConfirmHandlers } from "@/lib/import-confirm-handlers";
+import { createImportPassphraseHandlers } from "@/lib/import-passphrase-handlers";
 import { isExportImportError } from "@/lib/profile-ipc";
 import { openFileDialog, saveFileDialog } from "@/lib/file-dialog";
 import { maskText } from "@/lib/masking-ipc";
@@ -58,6 +59,14 @@ function MainRoute() {
 
   // 確認画面の「インポート実行」の確定を、始めてから終えるまでの間だけtrue(理由はimport-confirm-handlers.ts)。
   const importConfirmStarted = useRef(false);
+  // パスフレーズ入力画面で、復号している間だけtrue(理由はimport-passphrase-handlers.ts)。
+  const importDecrypting = useRef(false);
+  const [importBusy, setImportBusy] = useState(false);
+  // 非同期の完了時に、最新の画面の状態を読むための写し(クロージャは、操作した時点の古い状態を掴む)。
+  const dialogRef = useRef(dialog);
+  useLayoutEffect(() => {
+    dialogRef.current = dialog;
+  });
 
   const closeDialog = () => setDialog({ kind: "none" });
 
@@ -73,6 +82,42 @@ function MainRoute() {
         setDialog((current) => (current.kind === "importConfirm" ? { kind: "none" } : current)),
     },
     importConfirmStarted
+  );
+
+  const importPassphraseHandlers = createImportPassphraseHandlers(
+    {
+      target: () =>
+        dialog.kind === "importPassphrase"
+          ? { sourcePath: dialog.sourcePath, passphrase: passphrase }
+          : null,
+      preview: (sourcePath, passphrase) => appState.previewImport(sourcePath, passphrase),
+      isStillOpen: (sourcePath) => {
+        const shown = dialogRef.current;
+        return shown.kind === "importPassphrase" && shown.sourcePath === sourcePath;
+      },
+      showConfirm: (preview) => {
+        setDialog({ kind: "importConfirm", rows: toImportPreviewRows(preview) });
+        // 復号は完了済みでこの先パスフレーズ自体は不要になるため、state上に残さない。
+        setPassphrase("");
+      },
+      showError: (error) => {
+        // Rust側は復号失敗・フォーマット不一致・規模超過・名前重複等を原因ごとに
+        // 別々の具体的なメッセージとして返すため、1つの汎用文言に一本化しない
+        // (一本化すると、正しいパスフレーズでも「誤っている」という誤案内になり、
+        // 正当なバックアップファイルを誤って破棄しかねない)。ExportImportError以外の
+        // 想定外の例外(Tauri IPC自体の失敗等)の場合のみ汎用文言にフォールバックする。
+        setPassphraseError(
+          isExportImportError(error)
+            ? error.message
+            : "パスフレーズが誤っているか、対応していないファイル形式です"
+        );
+      },
+      discardPending: () => {
+        void appState.clearPendingImport();
+      },
+      onBusyChange: setImportBusy,
+    },
+    importDecrypting
   );
 
   const confirmNewProfileName = async () => {
@@ -285,33 +330,8 @@ function MainRoute() {
           setPassphraseError(undefined);
         }}
         errorMessage={passphraseError}
-        onConfirm={async () => {
-          if (dialog.kind !== "importPassphrase") return;
-          const { sourcePath } = dialog;
-          try {
-            const preview = await appState.previewImport(sourcePath, passphrase);
-            // await中にユーザーがダイアログを閉じた、または別のファイルで
-            // インポートをやり直している場合は上書きしない。
-            setDialog((current) =>
-              current.kind === "importPassphrase" && current.sourcePath === sourcePath
-                ? { kind: "importConfirm", rows: toImportPreviewRows(preview) }
-                : current
-            );
-            // 復号は完了済みでこの先パスフレーズ自体は不要になるため、state上に残さない。
-            setPassphrase("");
-          } catch (error) {
-            // Rust側は復号失敗・フォーマット不一致・規模超過・名前重複等を原因ごとに
-            // 別々の具体的なメッセージとして返すため、1つの汎用文言に一本化しない
-            // (一本化すると、正しいパスフレーズでも「誤っている」という誤案内になり、
-            // 正当なバックアップファイルを誤って破棄しかねない)。ExportImportError以外の
-            // 想定外の例外(Tauri IPC自体の失敗等)の場合のみ汎用文言にフォールバックする。
-            setPassphraseError(
-              isExportImportError(error)
-                ? error.message
-                : "パスフレーズが誤っているか、対応していないファイル形式です"
-            );
-          }
-        }}
+        onConfirm={importPassphraseHandlers.onConfirm}
+        busy={importBusy}
       />
 
       <ImportConfirmDialog

@@ -98,6 +98,9 @@ export const OpenByDefault: Story = {
   play: async () => {
     const input = await screen.findByLabelText(PASSPHRASE_LABEL);
     await expect(input).toHaveAttribute("type", "password");
+    // 入力があり、復号していなければ、OKを押せる。
+    await expect(screen.getByRole("button", { name: "OK" })).toBeEnabled();
+    await expect(input).not.toHaveAttribute("readonly");
     // 伏せ字でも表示でも、入力したパスフレーズが自動補完の履歴や綴り確認の対象にならない。
     await expect(input).toHaveAttribute("autocomplete", "off");
     await expect(input).toHaveAttribute("spellcheck", "false");
@@ -143,6 +146,24 @@ export const RevealKeepsTyping: Story = {
     await userEvent.keyboard("{Enter}");
     await expect(input).toHaveAttribute("type", "password");
     await expect(screen.getByRole("button", { name: "パスフレーズを表示" })).toHaveFocus();
+  },
+};
+
+// 復号している間は、OKを押せず、入力も変えられない。復号を待つ間も、閉じることはできる。
+export const Busy: Story = {
+  args: {
+    open: true,
+    onOpenChange: () => {},
+    fileName: FILE_NAME,
+    passphrase: "dummy-passphrase-0001",
+    onPassphraseChange: () => {},
+    onConfirm: () => {},
+    busy: true,
+  },
+  play: async () => {
+    await expect(await screen.findByRole("button", { name: "OK" })).toBeDisabled();
+    await expect(screen.getByLabelText(PASSPHRASE_LABEL)).toHaveAttribute("readonly");
+    await expect(screen.getByRole("button", { name: "キャンセル" })).toBeEnabled();
   },
 };
 
