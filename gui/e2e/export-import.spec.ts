@@ -440,4 +440,37 @@ describe("エクスポートの実行(ファイルダイアログの差し替え
     await confirmDialog.waitForExist({ reverse: true, timeout: 10000 });
     await returnToMainScreen();
   });
+
+  it("インポートのパスフレーズ欄は伏せ字から始まり、「表示」で入力内容を確認でき、開き直すと伏せ字へ戻る", async () => {
+    await completeInitialSetup();
+    // パスフレーズ入力画面を開くだけなので、指すファイルは実在しなくてよい。
+    await setE2eFileDialogPaths({ open: path.join(exportDir, "dummy.smx") });
+    await openProfileManagement();
+
+    await (await $("button=インポート")).click();
+    const importDialog = await $('[role="dialog"]');
+    await importDialog.waitForExist({ timeout: 10000 });
+    const input = await importDialog.$("input");
+    expect(await input.getAttribute("type")).toBe("password");
+
+    await input.setValue("dummy-passphrase-0001");
+    await (await importDialog.$('button[aria-label="パスフレーズを表示"]')).click();
+    expect(await input.getAttribute("type")).toBe("text");
+    expect(await input.getValue()).toBe("dummy-passphrase-0001");
+    await (await importDialog.$('button[aria-label="パスフレーズを隠す"]')).click();
+    expect(await input.getAttribute("type")).toBe("password");
+
+    // 表示にしたまま閉じて開き直すと、伏せ字へ戻っている。
+    await (await importDialog.$('button[aria-label="パスフレーズを表示"]')).click();
+    await (await importDialog.$("button=キャンセル")).click();
+    await importDialog.waitForExist({ reverse: true, timeout: 10000 });
+    await (await $("button=インポート")).click();
+    const reopened = await $('[role="dialog"]');
+    await reopened.waitForExist({ timeout: 10000 });
+    expect(await (await reopened.$("input")).getAttribute("type")).toBe("password");
+
+    await (await reopened.$("button=キャンセル")).click();
+    await reopened.waitForExist({ reverse: true, timeout: 10000 });
+    await returnToMainScreen();
+  });
 });
