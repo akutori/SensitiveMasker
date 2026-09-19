@@ -212,6 +212,34 @@ async function commitLastReceivedPendingImportError(): Promise<string | null> {
   return commitPendingImportError(ids[ids.length - 1]);
 }
 
+// 1回の復号(scrypt)にかかる時間(ms)を、画面を介さず、IPCで直接測る。復号した保留は、その場で破棄する。
+async function measureDecryptMs(sourcePath: string, passphrase: string): Promise<number> {
+  return browser.tauri.execute(
+    async ({ core }, p, s) => {
+      const startedAt = performance.now();
+      const result = (await core.invoke("preview_import", { sourcePath: p, passphrase: s })) as {
+        pending_id: number;
+      };
+      const elapsedMs = performance.now() - startedAt;
+      await core.invoke("clear_pending_import", { pendingId: result.pending_id });
+      return elapsedMs;
+    },
+    sourcePath,
+    passphrase
+  );
+}
+
+// アサーションが落ちたとき、その失敗のメッセージの先頭に、原因の手がかりを付けて投げ直す
+// (expectは、matcherごとのメッセージを引数に取れないため)。
+function withHint(hint: string, assertion: () => unknown): void {
+  try {
+    assertion();
+  } catch (error) {
+    if (error instanceof Error) error.message = `${hint}\n${error.message}`;
+    throw error;
+  }
+}
+
 async function listProfileNames(): Promise<string[]> {
   return browser.tauri.execute(async ({ core }) => {
     const summaries = (await core.invoke("list_profiles")) as Array<{ name: string }>;
@@ -1430,17 +1458,36 @@ describe("エクスポートの実行(ファイルダイアログの差し替え
 
   it("別の画面で復号が重なり、古い復号の結果が後から届いても、新しい画面の確認画面と確定は、影響を受けない", async () => {
     await completeInitialSetup();
-    // 古い画面(プロファイル管理画面)が復号するファイルと、新しい画面(メイン画面)が復号するファイル。
-    const oldName = "E2E復号重複確認古い";
-    const newName = "E2E復号重複確認新しい";
-    const oldFile = path.join(exportDir, "overlap-old.smx");
-    const newFile = path.join(exportDir, "overlap-new.smx");
-    const oldPassphrase = await exportAndDeleteProfile(oldName, oldFile);
+    // 書き出す2つのファイル。どちらを古い画面(プロファイル管理画面)が、どちらを新しい画面(メイン画面)が復号するかは、
+    // 復号の所要時間を測ってから決める。
+    const nameA = "E2E復号重複確認甲";
+    const nameB = "E2E復号重複確認乙";
+    const fileA = path.join(exportDir, "overlap-a.smx");
+    const fileB = path.join(exportDir, "overlap-b.smx");
+    const passphraseA = await exportAndDeleteProfile(nameA, fileA);
     await returnToMainScreen();
-    const newPassphrase = await exportAndDeleteProfile(newName, newFile);
+    const passphraseB = await exportAndDeleteProfile(nameB, fileB);
 
-    // 古い画面: 前後に空白が混ざったパスフレーズは、入力どおりの復号に失敗してから、空白を除いて再試行するため、
-    // 復号に、通常の約2倍の時間がかかる(後から始める新しい画面の復号より、後に終わる)。
+    // 1回の復号にかかる時間は、ファイルごとに違う(ageは、書き出すたびに、scryptの作業係数を較正するため、2つのファイルで
+    // 1段(約2倍)ずれることがある)。古い画面は、前後に空白が混ざったパスフレーズを入力し、入力どおりの復号に失敗してから、
+    // 空白を除いて再試行するため、復号に、その約2倍(2×S_old)かかる。新しい画面の復号は、古い復号を始めた後、少し遅れて始まり、
+    // 1回(S_new)で終わる。1回の復号が遅い方のファイルを古い画面に割り当てると、S_old ≥ S_new のため、
+    // 2×S_old ≥ 2×S_new > S_new + (新しい復号の開始の遅れ) となり(S_newが、その遅れより長ければ)、作業係数のずれに関わらず、
+    // 新しい画面の確認画面が出た後に、古い復号の結果が届く。
+    // 測定は、画面を介さず、IPCで直接行い、ファイルごとに2回(交互)測って小さい方を採る(他の処理と重なって遅くなった1回に、引きずられないため)。
+    const measuredA: number[] = [];
+    const measuredB: number[] = [];
+    for (let round = 0; round < 2; round++) {
+      measuredA.push(await measureDecryptMs(fileA, passphraseA));
+      measuredB.push(await measureDecryptMs(fileB, passphraseB));
+    }
+    const sideA = { name: nameA, file: fileA, passphrase: passphraseA, singleMs: Math.min(...measuredA) };
+    const sideB = { name: nameB, file: fileB, passphrase: passphraseB, singleMs: Math.min(...measuredB) };
+    const [oldSide, newSide] = sideA.singleMs >= sideB.singleMs ? [sideA, sideB] : [sideB, sideA];
+    const { name: oldName, file: oldFile, passphrase: oldPassphrase } = oldSide;
+    const { name: newName, file: newFile, passphrase: newPassphrase } = newSide;
+
+    // 古い画面: 前後に空白が混ざったパスフレーズを入力する(復号に、1回の約2倍かかる)。
     await setE2eFileDialogPaths({ open: oldFile });
     await (await $("button=インポート")).click();
     const oldDialog = await $('[role="dialog"]');
@@ -1466,6 +1513,7 @@ describe("エクスポートの実行(ファイルダイアログの差し替え
 
       const oldOk = openDialogs()[0] && buttonNamed(openDialogs()[0], "OK");
       if (!oldOk) throw new Error("古い画面のOKのボタンが見つからない");
+      const oldStartedAt = performance.now();
       oldOk.click();
       window.history.back();
       await waitUntil(
@@ -1487,6 +1535,7 @@ describe("エクスポートの実行(ファイルダイアログの差し替え
         return !!ok && !ok.disabled;
       }, "OKが押せる状態になること");
       buttonNamed(openDialogs()[0], "OK")?.click();
+      const newStartedMs = performance.now() - oldStartedAt;
 
       const confirmSelector = '[role="alertdialog"][data-state="open"]';
       await waitUntil(() => document.querySelector(confirmSelector) !== null, "確認画面が開くこと", 15000);
@@ -1494,11 +1543,24 @@ describe("エクスポートの実行(ファイルダイアログの差し替え
         confirmText: document.querySelector(confirmSelector)?.textContent ?? "",
         receivedIds:
           (window as unknown as { __e2ePendingImportIds?: number[] }).__e2ePendingImportIds ?? [],
+        newStartedMs,
+        confirmShownMs: performance.now() - oldStartedAt,
       };
     }, newPassphrase);
     // この検証の前提: 新しい画面の確認画面が出た時点で、古い復号の結果は、まだ届いていない(受け取った識別子は、
     // 新しい画面の1件だけ)。届いていたら、ここで落とす(古い結果が、後から届く場面を、再現できていない)。
-    expect(newScreen.receivedIds).toHaveLength(1);
+    withHint(
+      [
+        "前提が崩れた: 新しい画面の確認画面が出た時点で、古い復号の結果が、既に届いていた。",
+        `1回の復号にかかった時間(測定の小さい方): 古い画面のファイル ${Math.round(oldSide.singleMs)}ms、` +
+          `新しい画面のファイル ${Math.round(newSide.singleMs)}ms(古い画面は、空白の再試行で、その約2倍かかる)。`,
+        `古い復号の開始から、新しい復号の開始まで ${Math.round(newScreen.newStartedMs)}ms、` +
+          `新しい確認画面が出るまで ${Math.round(newScreen.confirmShownMs)}ms。`,
+        "新しい復号の開始や確認画面の表示が、古い復号の所要時間(1回の測定値の約2倍)より遅れていないか、",
+        "古い画面のファイルの方が、1回の復号が遅くなる割り当てになっているか(測定が他の処理の影響を受けていないか)を確かめる。",
+      ].join("\n"),
+      () => expect(newScreen.receivedIds).toHaveLength(1)
+    );
     expect(newScreen.confirmText).toContain(newName);
 
     // 古い復号の結果が、離れた画面へ、後から届く。
