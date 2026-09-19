@@ -1,6 +1,5 @@
 import { useRef, useState } from "react";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
-import { open as openFileDialog, save as saveFileDialog } from "@tauri-apps/plugin-dialog";
 import { toast } from "sonner";
 import { ProfileManagementScreen, type SortOption } from "@/components/profile-management-screen";
 import { ProfileNameDialog } from "@/components/profile-name-dialog";
@@ -13,6 +12,7 @@ import { EnvImportSelectDialog } from "@/components/env-import-select-dialog";
 import type { RuleListItem } from "@/components/rule-edit-screen";
 import { useAppState, SMX_FILE_FILTERS, toImportPreviewRows } from "@/lib/app-state";
 import { isExportImportError } from "@/lib/profile-ipc";
+import { openFileDialog, saveFileDialog } from "@/lib/file-dialog";
 import { writeClipboardText, clearClipboardIfMatches } from "@/lib/clipboard-ipc";
 import { readTextFile } from "@/lib/text-file-ipc";
 import { previewEnvImport, type EnvCandidate } from "@/lib/env-import-ipc";

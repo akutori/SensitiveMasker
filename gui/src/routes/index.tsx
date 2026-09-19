@@ -1,6 +1,5 @@
 import { useRef, useState } from "react";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
-import { open as openFileDialog, save as saveFileDialog } from "@tauri-apps/plugin-dialog";
 import { toast } from "sonner";
 import { MainScreen } from "@/components/main-screen";
 import { ProfileNameDialog } from "@/components/profile-name-dialog";
@@ -11,6 +10,7 @@ import { ImportPassphraseDialog } from "@/components/import-passphrase-dialog";
 import { ImportConfirmDialog, type ImportPreviewRow } from "@/components/import-confirm-dialog";
 import { useAppState, SMX_FILE_FILTERS, toImportPreviewRows } from "@/lib/app-state";
 import { isExportImportError } from "@/lib/profile-ipc";
+import { openFileDialog, saveFileDialog } from "@/lib/file-dialog";
 import { maskText } from "@/lib/masking-ipc";
 import { readTextFile, writeTextFile } from "@/lib/text-file-ipc";
 
