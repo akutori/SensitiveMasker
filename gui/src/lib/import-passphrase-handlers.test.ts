@@ -27,45 +27,50 @@ const TARGET = {
   passphrase: "dummy-passphrase-0001",
 };
 const PREVIEW_CALL = `preview:${TARGET.sourcePath}:${TARGET.passphrase}`;
-const PREVIEW: DummyPreview = { pendingId: 7, label: "dummy-preview" };
 
-// 呼び出された操作を、順に記録する依存を作る。ownedPendingIdは、この画面が所有する保留の識別子(初期値を指定できる)。
-function setup(
-  overrides: Partial<ImportPassphraseDeps<DummyPreview>> = {},
-  initialOwnedPendingId: number | null = null
-) {
-  const calls: string[] = [];
-  const decrypting = { current: false };
-  const ownedPendingId: { current: number | null } = { current: initialOwnedPendingId };
-  const decryption = deferred<DummyPreview>();
-  const deps: ImportPassphraseDeps<DummyPreview> = {
-    target: () => TARGET,
-    preview: (sourcePath, passphrase) => {
-      calls.push(`preview:${sourcePath}:${passphrase}`);
-      return decryption.promise;
-    },
-    isStillOpen: () => true,
-    // 確認画面を出す時点で、所有する識別子が既に記録されているかを、その場で読んで残す。
-    showConfirm: (preview) =>
-      calls.push(`showConfirm:${preview.label}:owned=${ownedPendingId.current}`),
-    showError: (error) => calls.push(`showError:${(error as Error).message}`),
-    discardPending: (preview) => {
-      calls.push(`discardPending:${preview.pendingId}`);
-      return Promise.resolve();
-    },
-    onBusyChange: (busy) => calls.push(`busy:${busy}`),
-    ...overrides,
-  };
-  return {
-    calls,
-    decrypting,
-    ownedPendingId,
-    decryption,
-    handlers: createImportPassphraseHandlers(deps, decrypting, ownedPendingId),
-  };
-}
+// 保留の識別子は、Rust側で0から払い出される(アプリ起動後の最初の復号は0)。0は、所有する保留が無い(null)ことではなく、
+// 有効な識別子として扱う。0を無い扱いにする真偽値の判定を見逃さないよう、全てのテストを、0と、0以外(7)の両方で実行する。
+describe.each([0, 7])("createImportPassphraseHandlers(届いた結果の識別子: %i)", (pendingId) => {
+  const PREVIEW: DummyPreview = { pendingId, label: "dummy-preview" };
+  // 画面が既に所有している、届いた結果とは別の識別子。
+  const other = pendingId + 1;
 
-describe("createImportPassphraseHandlers", () => {
+  // 呼び出された操作を、順に記録する依存を作る。ownedPendingIdは、この画面が所有する保留の識別子(初期値を指定できる)。
+  function setup(
+    overrides: Partial<ImportPassphraseDeps<DummyPreview>> = {},
+    initialOwnedPendingId: number | null = null
+  ) {
+    const calls: string[] = [];
+    const decrypting = { current: false };
+    const ownedPendingId: { current: number | null } = { current: initialOwnedPendingId };
+    const decryption = deferred<DummyPreview>();
+    const deps: ImportPassphraseDeps<DummyPreview> = {
+      target: () => TARGET,
+      preview: (sourcePath, passphrase) => {
+        calls.push(`preview:${sourcePath}:${passphrase}`);
+        return decryption.promise;
+      },
+      isStillOpen: () => true,
+      // 確認画面を出す時点で、所有する識別子が既に記録されているかを、その場で読んで残す。
+      showConfirm: (preview) =>
+        calls.push(`showConfirm:${preview.label}:owned=${ownedPendingId.current}`),
+      showError: (error) => calls.push(`showError:${(error as Error).message}`),
+      discardPending: (preview) => {
+        calls.push(`discardPending:${preview.pendingId}`);
+        return Promise.resolve();
+      },
+      onBusyChange: (busy) => calls.push(`busy:${busy}`),
+      ...overrides,
+    };
+    return {
+      calls,
+      decrypting,
+      ownedPendingId,
+      decryption,
+      handlers: createImportPassphraseHandlers(deps, decrypting, ownedPendingId),
+    };
+  }
+
   it("復号できたら、確認画面へ進み、復号している間だけ待ちになる", async () => {
     const { calls, decryption, handlers } = setup();
 
@@ -77,7 +82,7 @@ describe("createImportPassphraseHandlers", () => {
     expect(calls).toEqual([
       "busy:true",
       PREVIEW_CALL,
-      "showConfirm:dummy-preview:owned=7",
+      `showConfirm:dummy-preview:owned=${pendingId}`,
       "busy:false",
     ]);
   });
@@ -89,9 +94,9 @@ describe("createImportPassphraseHandlers", () => {
     decryption.resolve(PREVIEW);
     await confirming;
 
-    expect(ownedPendingId.current).toBe(7);
+    expect(ownedPendingId.current).toBe(pendingId);
     // showConfirmが呼ばれた時点で、既に記録されている(記録が、確認画面の描画より後だと、その間に離れたとき、保留を破棄できない)。
-    expect(calls).toContain("showConfirm:dummy-preview:owned=7");
+    expect(calls).toContain(`showConfirm:dummy-preview:owned=${pendingId}`);
   });
 
   it("復号に失敗したら、画面が開いたままなら、エラーを表示し、所有する識別子は記録しない", async () => {
@@ -119,20 +124,24 @@ describe("createImportPassphraseHandlers", () => {
     const confirming = handlers.onConfirm();
     decryption.resolve(PREVIEW);
     await confirming;
-    expect(calls).toEqual(["busy:true", PREVIEW_CALL, "discardPending:7", "busy:false"]);
+    expect(calls).toEqual(["busy:true", PREVIEW_CALL, `discardPending:${pendingId}`, "busy:false"]);
   });
 
   it("遅れて届いた結果は、その結果の識別子だけを破棄し、この画面が既に所有する識別子(別の保留)は変えない", async () => {
-    // 画面は、識別子3の保留を所有している。識別子7の結果が、閉じられた画面へ遅れて届く。
-    const { calls, ownedPendingId, decryption, handlers } = setup({ isStillOpen: () => false }, 3);
+    // 画面は、別の保留(識別子other)を所有している。この結果が、閉じられた画面へ遅れて届く。
+    const { calls, ownedPendingId, decryption, handlers } = setup(
+      { isStillOpen: () => false },
+      other
+    );
 
     const confirming = handlers.onConfirm();
     decryption.resolve(PREVIEW);
     await confirming;
 
-    expect(calls).toContain("discardPending:7");
-    expect(calls.filter((call) => call.startsWith("discardPending:"))).toEqual(["discardPending:7"]);
-    expect(ownedPendingId.current).toBe(3);
+    expect(calls.filter((call) => call.startsWith("discardPending:"))).toEqual([
+      `discardPending:${pendingId}`,
+    ]);
+    expect(ownedPendingId.current).toBe(other);
   });
 
   it("開いたままかは、OKを押した時の画面(セッション)で判定する。同じファイルを開き直した別の画面は、開いたままとは見なさない", async () => {
@@ -149,7 +158,7 @@ describe("createImportPassphraseHandlers", () => {
     decryption.resolve(PREVIEW);
     await confirming;
     expect(asked).toEqual([TARGET.session]);
-    expect(calls).toEqual(["busy:true", PREVIEW_CALL, "discardPending:7", "busy:false"]);
+    expect(calls).toEqual(["busy:true", PREVIEW_CALL, `discardPending:${pendingId}`, "busy:false"]);
     // 別の画面の結果は、この画面の所有にならない。
     expect(ownedPendingId.current).toBeNull();
   });
@@ -168,11 +177,11 @@ describe("createImportPassphraseHandlers", () => {
     decryption.resolve(PREVIEW);
     await Promise.resolve();
     await Promise.resolve();
-    expect(calls).toEqual(["busy:true", PREVIEW_CALL, "discardPending:7"]);
+    expect(calls).toEqual(["busy:true", PREVIEW_CALL, `discardPending:${pendingId}`]);
 
     discard.resolve();
     await confirming;
-    expect(calls).toEqual(["busy:true", PREVIEW_CALL, "discardPending:7", "busy:false"]);
+    expect(calls).toEqual(["busy:true", PREVIEW_CALL, `discardPending:${pendingId}`, "busy:false"]);
   });
 
   it("破棄に失敗しても、待ちは解ける(次の復号を始められなくならない)", async () => {
@@ -187,7 +196,7 @@ describe("createImportPassphraseHandlers", () => {
     const confirming = handlers.onConfirm();
     decryption.resolve(PREVIEW);
     await confirming;
-    expect(calls).toEqual(["busy:true", PREVIEW_CALL, "discardPending:7", "busy:false"]);
+    expect(calls).toEqual(["busy:true", PREVIEW_CALL, `discardPending:${pendingId}`, "busy:false"]);
   });
 
   it("復号している間の再入は、復号を重ねて実行しない", async () => {
