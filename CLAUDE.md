@@ -100,6 +100,9 @@ SensitiveMasker/
   - OSのネイティブダイアログ(ファイル選択・保存)はWebDriverから操作できない。E2Eビルド(`VITE_E2E_TESTING`)に
     限り、`gui/src/lib/file-dialog.ts`が`window.__e2eFileDialogPaths`の値をダイアログの代わりに返す
     (本番ビルドには含まれない)
+  - インポートの保留(Rust側の復号済みの内容)は、復号のたびに払い出す識別子で結び付け、確定・破棄はその識別子の
+    保留だけに作用する。画面の外から確定を直接呼ぶE2Eのために、E2Eビルドに限り、`gui/src/lib/e2e-pending-import.ts`が
+    受け取った識別子を`window.__e2ePendingImportIds`へ残す(本番ビルドには含まれない)
   - リリース(`.github/workflows/release.yml`)は、`verify.yml`(型検査・単体テスト・storyのplayテスト・
     `cargo test --workspace --locked`・配布用フロントエンドへのE2E専用コード混入確認`bun run check:dist`)に通った場合に限り公開する
 - ロジックを伴う実装(機能追加・修正・リファクタリング)では`adversarial-verification` Skillの
