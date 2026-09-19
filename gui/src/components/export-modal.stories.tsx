@@ -124,7 +124,8 @@ export const OpenByDefault: Story = {
     await expect(await screen.findByRole("button", { name: "再生成" })).toBeEnabled();
     await expect(await screen.findByRole("button", { name: "エクスポート" })).toBeEnabled();
     await expect(await screen.findByRole("button", { name: "キャンセル" })).toBeEnabled();
-    await expect(screen.queryByRole("status")).toBeNull();
+    // 読み上げの領域は、書き出す前から存在し、中身は空である(後から中身が入ることで、読み上げられる)。
+    await expect(screen.getByRole("status")).toBeEmptyDOMElement();
     // コピーしたパスフレーズが消えるまでの時間を、注意文で伝える。
     await expect(
       screen.getByText(new RegExp(`${CLIPBOARD_CLEAR_DELAY_SECONDS}秒後に、自動クリアを試みます`))
@@ -255,7 +256,9 @@ export const ExportFlow: Story = {
     await userEvent.click(await screen.findByRole("button", { name: "エクスポート" }));
     await waitFor(() => expect(input).toHaveFocus());
 
-    await expect(await screen.findByRole("status")).toHaveTextContent("二度と表示できません");
+    await waitFor(() =>
+      expect(screen.getByRole("status")).toHaveTextContent("二度と表示できません")
+    );
     await expect(input).toHaveAttribute("type", "password");
     await expect(input).toHaveValue(INITIAL_PASSPHRASE);
     await expect(screen.queryByRole("button", { name: "再生成" })).toBeNull();

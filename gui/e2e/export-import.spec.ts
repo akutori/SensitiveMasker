@@ -179,6 +179,24 @@ async function focusIsInsideDialog(): Promise<boolean> {
   return browser.tauri.execute(() => !!document.activeElement?.closest('[role="dialog"]'));
 }
 
+// エクスポート完了の通知(読み上げの領域)。領域は書き出す前から存在して中身が空で、完了すると、
+// 同じ領域に通知が入る(領域ごと後から現れると、スクリーンリーダーに読み上げられないことがある)。
+const EXPORT_NOTICE_TEXT = "二度と表示できません";
+
+async function exportNoticeIsEmpty(dialog: WebdriverIO.Element): Promise<boolean> {
+  const notice = await dialog.$('[role="status"]');
+  return (await notice.isExisting()) && (await notice.getProperty("textContent")) === "";
+}
+
+async function waitForExportNotice(dialog: WebdriverIO.Element) {
+  const notice = await dialog.$('[role="status"]');
+  await browser.waitUntil(async () => (await notice.getText()).includes(EXPORT_NOTICE_TEXT), {
+    timeout: 10000,
+    timeoutMsg: "エクスポート完了の通知が表示されなかった",
+  });
+  return notice;
+}
+
 // 失敗したテストが残した状態(保留中のダイアログ、開いたままの画面)を片付け、後続のテストへ
 // 連鎖させない。成功したテストでは何も起きない。片付けそのものの失敗は、テストの失敗にしない。
 afterEach(async () => {
@@ -325,6 +343,9 @@ describe("エクスポートの実行(ファイルダイアログの差し替え
     const dialog = await openExportDialogFor("E2Eエクスポート実行確認");
     const passphraseInput = await dialog.$("input[readonly]");
     const passphrase = await passphraseInput.getValue();
+    // 読み上げの領域は、書き出す前から存在し、中身は空である。
+    const notice = await dialog.$('[role="status"]');
+    expect(await exportNoticeIsEmpty(dialog)).toBe(true);
 
     // 「表示」にしてから実行しても、成功した時点で伏せ字へ戻る。
     await (await dialog.$('button[aria-label="パスフレーズを表示"]')).click();
@@ -332,9 +353,11 @@ describe("エクスポートの実行(ファイルダイアログの差し替え
 
     await (await dialog.$("button=エクスポート")).click();
 
-    const notice = await dialog.$('[role="status"]');
-    await notice.waitForExist({ timeout: 10000 });
-    expect(await notice.getText()).toContain("二度と表示できません");
+    // 完了すると、書き出す前と同じ領域(作り直されたものではない)に、通知が入る。
+    await browser.waitUntil(async () => (await notice.getText()).includes(EXPORT_NOTICE_TEXT), {
+      timeout: 10000,
+      timeoutMsg: "同じ領域にエクスポート完了の通知が入らなかった",
+    });
     expect(fs.statSync(exportPath).size).toBeGreaterThan(0);
 
     // 画面は開いたままで、同じパスフレーズが伏せ字で残る。再生成・エクスポートは出ない。
@@ -371,7 +394,7 @@ describe("エクスポートの実行(ファイルダイアログの差し替え
     const dialog = await openExportDialogFor(profileName);
     const passphrase = await (await dialog.$("input[readonly]")).getValue();
     await (await dialog.$("button=エクスポート")).click();
-    await (await dialog.$('[role="status"]')).waitForExist({ timeout: 10000 });
+    await waitForExportNotice(dialog);
     await (await dialog.$("button=閉じる")).click();
     await dialog.waitForExist({ reverse: true, timeout: 10000 });
 
@@ -430,7 +453,7 @@ describe("エクスポートの実行(ファイルダイアログの差し替え
 
     // 書き出しの後も、同じパスフレーズがコピーされる(相手へ渡すための、この機能の主目的)。
     await (await dialog.$("button=エクスポート")).click();
-    await (await dialog.$('[role="status"]')).waitForExist({ timeout: 10000 });
+    await waitForExportNotice(dialog);
     await copyButton.waitForEnabled({ timeout: 10000 });
     await copyButton.click();
     await browser.waitUntil(() => clipboardHolds(regenerated), {
@@ -457,12 +480,12 @@ describe("エクスポートの実行(ファイルダイアログの差し替え
     await exportButton.waitForEnabled({ reverse: true, timeout: 10000 });
     await settleSaveDialog({ path: null });
     await exportButton.waitForEnabled({ timeout: 10000 });
-    expect(await dialog.$('[role="status"]').isExisting()).toBe(false);
+    expect(await exportNoticeIsEmpty(dialog)).toBe(true);
 
     const exportPath = path.join(exportDir, "after-cancel.smx");
     await setE2eFileDialogPaths({ save: exportPath });
     await exportButton.click();
-    await (await dialog.$('[role="status"]')).waitForExist({ timeout: 10000 });
+    await waitForExportNotice(dialog);
     expect(fs.statSync(exportPath).size).toBeGreaterThan(0);
     expect(await (await dialog.$("input[readonly]")).getValue()).toBe(passphrase);
 
@@ -485,13 +508,13 @@ describe("エクスポートの実行(ファイルダイアログの差し替え
     await exportButton.click();
     await $("div*=保存先には拡張子.smxを指定してください").waitForExist({ timeout: 10000 });
     await exportButton.waitForEnabled({ timeout: 10000 });
-    expect(await dialog.$('[role="status"]').isExisting()).toBe(false);
+    expect(await exportNoticeIsEmpty(dialog)).toBe(true);
     expect(fs.existsSync(invalidPath)).toBe(false);
 
     const exportPath = path.join(exportDir, "after-failure.smx");
     await setE2eFileDialogPaths({ save: exportPath });
     await exportButton.click();
-    await (await dialog.$('[role="status"]')).waitForExist({ timeout: 10000 });
+    await waitForExportNotice(dialog);
     expect(fs.statSync(exportPath).size).toBeGreaterThan(0);
 
     await (await dialog.$("button=閉じる")).click();
@@ -513,7 +536,7 @@ describe("エクスポートの実行(ファイルダイアログの差し替え
     await settleSaveDialog({ error: "e2e: 保存ダイアログの失敗" });
     await $("div*=保存先を選択できませんでした").waitForExist({ timeout: 10000 });
     await exportButton.waitForEnabled({ timeout: 10000 });
-    expect(await dialog.$('[role="status"]').isExisting()).toBe(false);
+    expect(await exportNoticeIsEmpty(dialog)).toBe(true);
 
     await (await dialog.$("button=キャンセル")).click();
     await dialog.waitForExist({ reverse: true, timeout: 10000 });
@@ -551,7 +574,7 @@ describe("エクスポートの実行(ファイルダイアログの差し替え
 
     // 保存先が決まると書き出しに成功し、同じパスフレーズが残っている。
     await settleSaveDialog({ path: path.join(exportDir, "during-export.smx") });
-    await (await dialog.$('[role="status"]')).waitForExist({ timeout: 10000 });
+    await waitForExportNotice(dialog);
     expect(await (await dialog.$("input[readonly]")).getValue()).toBe(passphrase);
 
     await (await dialog.$("button=閉じる")).click();
@@ -612,7 +635,7 @@ describe("エクスポートの実行(ファイルダイアログの差し替え
     expect(await saveDialogCalls()).toBe(1);
 
     await settleSaveDialog({ path: path.join(exportDir, "double-click.smx") });
-    await (await dialog.$('[role="status"]')).waitForExist({ timeout: 10000 });
+    await waitForExportNotice(dialog);
     expect(await saveDialogCalls()).toBe(1);
 
     await (await dialog.$("button=閉じる")).click();
@@ -629,7 +652,7 @@ describe("エクスポートの実行(ファイルダイアログの差し替え
     const dialog = await openExportDialogFor(profileName);
     const passphrase = await (await dialog.$("input[readonly]")).getValue();
     await (await dialog.$("button=エクスポート")).click();
-    await (await dialog.$('[role="status"]')).waitForExist({ timeout: 10000 });
+    await waitForExportNotice(dialog);
 
     // マウスの戻るボタンなどと同じ、履歴の移動(popstate)を起こす操作。
     const urlBefore = await currentUrl();
@@ -664,7 +687,7 @@ describe("エクスポートの実行(ファイルダイアログの差し替え
     expect(await currentUrl()).toBe(urlBefore);
 
     await settleSaveDialog({ path: path.join(exportDir, "history-back-exporting.smx") });
-    await (await dialog.$('[role="status"]')).waitForExist({ timeout: 10000 });
+    await waitForExportNotice(dialog);
     await (await dialog.$("button=閉じる")).click();
     await dialog.waitForExist({ reverse: true, timeout: 10000 });
     await returnToMainScreen();
@@ -695,7 +718,7 @@ describe("エクスポートの実行(ファイルダイアログの差し替え
       regenerate.click();
       exportButton.click();
     });
-    await (await exportDialog.$('[role="status"]')).waitForExist({ timeout: 10000 });
+    await waitForExportNotice(exportDialog);
     const displayed = await passphraseInput.getValue();
     expect(displayed).not.toBe(initial);
     await (await exportDialog.$("button=閉じる")).click();
@@ -729,7 +752,7 @@ describe("エクスポートの実行(ファイルダイアログの差し替え
     const dialog = await openExportDialogFor(profileName);
     const passphrase = await (await dialog.$("input[readonly]")).getValue();
     await (await dialog.$("button=エクスポート")).click();
-    await (await dialog.$('[role="status"]')).waitForExist({ timeout: 10000 });
+    await waitForExportNotice(dialog);
     await (await dialog.$("button=閉じる")).click();
     await dialog.waitForExist({ reverse: true, timeout: 10000 });
     await deleteProfileViaIpc(profileName);
@@ -788,7 +811,7 @@ describe("エクスポートの実行(ファイルダイアログの差し替え
     });
     const regenerated = await passphraseInput.getValue();
     await (await exportDialog.$("button=エクスポート")).click();
-    await (await exportDialog.$('[role="status"]')).waitForExist({ timeout: 10000 });
+    await waitForExportNotice(exportDialog);
     await (await exportDialog.$("button=閉じる")).click();
     await exportDialog.waitForExist({ reverse: true, timeout: 10000 });
 
@@ -829,7 +852,7 @@ describe("エクスポートの実行(ファイルダイアログの差し替え
     const dialog = await openExportDialogFor(profileName);
     const passphrase = await (await dialog.$("input[readonly]")).getValue();
     await (await dialog.$("button=エクスポート")).click();
-    await (await dialog.$('[role="status"]')).waitForExist({ timeout: 10000 });
+    await waitForExportNotice(dialog);
     await (await dialog.$("button=閉じる")).click();
     await dialog.waitForExist({ reverse: true, timeout: 10000 });
     await deleteProfileViaIpc(profileName);
@@ -885,7 +908,7 @@ describe("エクスポートの実行(ファイルダイアログの差し替え
     const dialog = await openExportDialogFor(profileName);
     const passphrase = await (await dialog.$("input[readonly]")).getValue();
     await (await dialog.$("button=エクスポート")).click();
-    await (await dialog.$('[role="status"]')).waitForExist({ timeout: 10000 });
+    await waitForExportNotice(dialog);
 
     await browser.keys("Escape");
     await browser.pause(500);
@@ -911,7 +934,7 @@ describe("エクスポートの実行(ファイルダイアログの差し替え
     await exportDialog.waitForExist({ timeout: 10000 });
     const passphrase = await (await exportDialog.$("input[readonly]")).getValue();
     await (await exportDialog.$("button=エクスポート")).click();
-    await (await exportDialog.$('[role="status"]')).waitForExist({ timeout: 10000 });
+    await waitForExportNotice(exportDialog);
     await (await exportDialog.$("button=閉じる")).click();
     await exportDialog.waitForExist({ reverse: true, timeout: 10000 });
 
@@ -989,7 +1012,7 @@ describe("エクスポートの実行(ファイルダイアログの差し替え
     await exportDialog.waitForExist({ timeout: 10000 });
     const passphrase = await (await exportDialog.$("input[readonly]")).getValue();
     await (await exportDialog.$("button=エクスポート")).click();
-    await (await exportDialog.$('[role="status"]')).waitForExist({ timeout: 10000 });
+    await waitForExportNotice(exportDialog);
     await (await exportDialog.$("button=閉じる")).click();
     await exportDialog.waitForExist({ reverse: true, timeout: 10000 });
 

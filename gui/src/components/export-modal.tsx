@@ -123,17 +123,24 @@ export function ExportModal({
               </Button>
             )}
           </div>
-          {exported && (
-            <div
-              role="status"
-              className="flex items-start gap-2 rounded-md border border-border bg-muted p-3 text-sm text-foreground"
-            >
-              <CircleCheck className="mt-0.5 size-4 shrink-0" />
-              <span>
-                エクスポートが完了しました。このパスフレーズは、書き出したファイルを取り込むときに必要です。この画面を閉じると、二度と表示できません。
-              </span>
-            </div>
-          )}
+          {/* 読み上げの領域は、書き出す前から置いておく(領域ごと後から現れると、読み上げられないことがあるため)。 */}
+          <div
+            role="status"
+            className={
+              exported
+                ? "flex items-start gap-2 rounded-md border border-border bg-muted p-3 text-sm text-foreground"
+                : "sr-only"
+            }
+          >
+            {exported && (
+              <>
+                <CircleCheck className="mt-0.5 size-4 shrink-0" />
+                <span>
+                  エクスポートが完了しました。このパスフレーズは、書き出したファイルを取り込むときに必要です。この画面を閉じると、二度と表示できません。
+                </span>
+              </>
+            )}
+          </div>
           <p
             className="text-sm text-muted-foreground"
             data-a11y-verified-contrast="dialog-overlay-geometry-false-positive"
