@@ -104,9 +104,16 @@ fn kill_first_child_tree(child: &mut std::process::Child) {
     }
     #[cfg(unix)]
     {
-        let pid = child.id();
-        let _ = Command::new("kill").args(["-KILL", &format!("-{pid}")]).output();
+        let _ = group_kill_command(child.id()).output();
     }
+}
+
+/// プロセスグループ`pgid`全体へSIGKILLを送るコマンド。負のPIDは、プロセスグループIDを指す。
+#[cfg(unix)]
+fn group_kill_command(pgid: u32) -> Command {
+    let mut command = Command::new("kill");
+    command.args(["-KILL", &format!("-{pgid}")]);
+    command
 }
 
 #[cfg(windows)]
