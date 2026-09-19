@@ -109,10 +109,12 @@ fn kill_first_child_tree(child: &mut std::process::Child) {
 }
 
 /// プロセスグループ`pgid`全体へSIGKILLを送るコマンド。負のPIDは、プロセスグループIDを指す。
+/// `--`を挟まない並び(`kill -KILL -<pgid>`)は、procps-ng(Ubuntu等)のkillでは、対象のグループではなく、
+/// kill自身が属するグループ(=呼び出し側)へシグナルを送ってしまう。
 #[cfg(unix)]
 fn group_kill_command(pgid: u32) -> Command {
     let mut command = Command::new("kill");
-    command.args(["-KILL", &format!("-{pgid}")]);
+    command.args(["-KILL", "--", &format!("-{pgid}")]);
     command
 }
 
@@ -433,5 +435,51 @@ mod tests {
             !marker.exists(),
             "タイムアウト後もsleep 1&&touchの子プロセスが生き残り、マーカーファイルが作られた"
         );
+    }
+
+    #[cfg(unix)]
+    fn wait_for_exit(child: &mut std::process::Child, within: Duration) -> Option<std::process::ExitStatus> {
+        let deadline = std::time::Instant::now() + within;
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                return Some(status);
+            }
+            if std::time::Instant::now() >= deadline {
+                return None;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    // `--`を挟まない`kill -KILL -<pgid>`は、procps-ng(Ubuntu等)のkillでは、対象のグループではなく、
+    // kill自身が属するグループへシグナルを送る。killを傍観者のグループの一員として動かす
+    // (テスト自身のグループを巻き込まないため)ことで、対象のグループだけが落ち、killを動かした
+    // グループは残ることを確かめる。
+    #[test]
+    #[cfg(unix)]
+    fn group_kill_command_signals_the_target_group_and_not_the_group_it_runs_in() {
+        use std::os::unix::process::{CommandExt, ExitStatusExt};
+
+        let mut target = Command::new("sleep").arg("30").process_group(0).spawn().unwrap();
+        let mut bystander = Command::new("sleep").arg("30").process_group(0).spawn().unwrap();
+
+        let mut kill = group_kill_command(target.id());
+        kill.process_group(bystander.id() as i32);
+        let kill_result = kill.status();
+
+        let target_exit = wait_for_exit(&mut target, Duration::from_secs(2));
+        let bystander_exit = wait_for_exit(&mut bystander, Duration::from_millis(500));
+        let _ = target.kill();
+        let _ = bystander.kill();
+        let _ = target.wait();
+        let _ = bystander.wait();
+
+        kill_result.expect("killコマンドを起動できなかった");
+        assert_eq!(
+            target_exit.and_then(|status| status.signal()),
+            Some(9),
+            "対象のプロセスグループがSIGKILLで落ちなかった(bystander: {bystander_exit:?})"
+        );
+        assert!(bystander_exit.is_none(), "killを動かしたグループまで落ちた: {bystander_exit:?}");
     }
 }
