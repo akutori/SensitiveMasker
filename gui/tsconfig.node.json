@@ -1,6 +1,10 @@
 {
   "compilerOptions": {
+    /* tsconfig.jsonのreferencesがcompositeを要求し、compositeは出力を伴う。
+       実行時はvite/wdioが.tsを直接読むため、宣言(.d.ts)だけを、ソースの隣ではなくnode_modules/.tmpへ出す */
     "composite": true,
+    "emitDeclarationOnly": true,
+    "outDir": "./node_modules/.tmp/tsconfig.node",
     "skipLibCheck": true,
     "module": "ESNext",
     "moduleResolution": "bundler",
