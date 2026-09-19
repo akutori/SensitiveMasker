@@ -1,5 +1,5 @@
 import { useRef, useState } from "react";
-import { createFileRoute, useNavigate } from "@tanstack/react-router";
+import { createFileRoute, useBlocker, useNavigate } from "@tanstack/react-router";
 import { toast } from "sonner";
 import { ProfileManagementScreen, type SortOption } from "@/components/profile-management-screen";
 import { ProfileNameDialog } from "@/components/profile-name-dialog";
@@ -108,6 +108,8 @@ function ProfilesRoute() {
   const [invalidTagId, setInvalidTagId] = useState<string | "new" | undefined>();
   // エクスポート画面を開くたびに増やす識別子(export-dialog-state.tsのsessionId)。
   const exportSessionCounter = useRef(0);
+  // 書き出し(保存先の選択から完了まで)を実行している間だけtrue。
+  const exportInFlight = useRef(false);
   const [importPassphrase, setImportPassphrase] = useState("");
   const [importPassphraseError, setImportPassphraseError] = useState<string | undefined>();
   const clipboardClearTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -127,6 +129,14 @@ function ProfilesRoute() {
   const [clipboardBusy, setClipboardBusy] = useState(false);
 
   const closeDialog = () => setDialog({ kind: "none" });
+
+  // 書き出し中・書き出し済みの画面は、履歴の移動(マウスの戻るボタンなど)でこの画面ごと消えると、
+  // パスフレーズを失うため、移動を止める(Escapeや背景の操作を受け付けないのと同じ理由)。
+  useBlocker({
+    shouldBlockFn: () => true,
+    disabled: !(dialog.kind === "export" && dialog.session.phase !== "editing"),
+    enableBeforeUnload: false,
+  });
 
   const cancelClipboardClear = () => {
     if (clipboardClearTimer.current) {
@@ -216,7 +226,11 @@ function ProfilesRoute() {
     );
 
   const exportToFile = async () => {
+    // ボタンの無効化は再描画されるまで効かず、同じ瞬間に届いた2回目の押下は、実行中になる前の
+    // 状態を見てしまう。実行が終わるまで次の実行を始めないよう、同期的に止める。
+    if (exportInFlight.current) return;
     if (dialog.kind !== "export" || !canStartExport(dialog.session)) return;
+    exportInFlight.current = true;
     const { profileId } = dialog;
     // 書き出したファイルを復号できるのは、実行を押した時点のパスフレーズだけである。
     const { sessionId, passphrase: exportedPassphrase } = dialog.session;
@@ -245,6 +259,8 @@ function ProfilesRoute() {
       // エクスポート自体の失敗の通知は、appState側のtoastが行う。ダイアログは開いたままにし、
       // 別の保存先で再試行できるようにする。
       updateExportSession((session) => abortExport(session, sessionId));
+    } finally {
+      exportInFlight.current = false;
     }
   };
 
@@ -544,10 +560,10 @@ function ProfilesRoute() {
             // 失敗時のトースト表示はappState側のreportAndRethrowが行うため、
             // ここでの追加対応は不要(catchが無いとこのPromise自体がunhandledになる)。
           } finally {
-            // 成否に関わらずここで確認は終わる。確認済みのpreviewはcommit呼び出しの
-            // 成否に関わらずサーバー側で消費済みのため、このダイアログを開いたままに
-            // しても同じ内容で再試行はできない。commitの完了を待つ間に開かれた別の画面
-            // (エクスポートなど)は、閉じない。
+            // 確認画面は「インポート実行」を押した時点で閉じるが、まだ確認画面のままなら、成否に
+            // 関わらずここで閉じる(確認済みのpreviewはcommit呼び出しの成否に関わらずサーバー側で
+            // 消費済みのため、開いたままにしても同じ内容で再試行はできない)。commitの完了を
+            // 待つ間に開かれた別の画面(エクスポートなど)は、閉じない。
             setDialog((current) => (current.kind === "importConfirm" ? { kind: "none" } : current));
           }
         }}

@@ -79,9 +79,40 @@ async function settleSaveDialog(outcome: { path: string | null } | { error: stri
         __e2eSaveControl?: { resolve: (path: string | null) => void; reject: (reason: Error) => void };
       }
     ).__e2eSaveControl;
-    if ("error" in o) control?.reject(new Error(o.error));
-    else control?.resolve(o.path);
+    if (!control) throw new Error("保存ダイアログが保留されていない(holdSaveDialogを先に呼ぶ)");
+    if ("error" in o) control.reject(new Error(o.error));
+    else control.resolve(o.path);
   }, outcome);
+}
+
+// holdSaveDialogに加えて、保存ダイアログを開こうとした回数(差し替え値が参照された回数)を数える。
+async function holdSaveDialogCounting() {
+  await browser.tauri.execute(() => {
+    const w = window as unknown as {
+      __e2eFileDialogPaths?: object;
+      __e2eSaveControl?: { resolve: (path: string | null) => void; reject: (reason: Error) => void };
+      __e2eSaveCalls?: number;
+    };
+    w.__e2eSaveCalls = 0;
+    const pending = new Promise<string | null>((resolve, reject) => {
+      w.__e2eSaveControl = { resolve, reject };
+    });
+    const paths = {};
+    Object.defineProperty(paths, "save", {
+      enumerable: true,
+      get() {
+        w.__e2eSaveCalls = (w.__e2eSaveCalls ?? 0) + 1;
+        return pending;
+      },
+    });
+    w.__e2eFileDialogPaths = paths;
+  });
+}
+
+async function saveDialogCalls(): Promise<number> {
+  return browser.tauri.execute(
+    () => (window as unknown as { __e2eSaveCalls?: number }).__e2eSaveCalls ?? 0
+  );
 }
 
 // 開くダイアログの結果を、settleOpenDialogが呼ばれるまで保留する。
@@ -102,9 +133,11 @@ async function holdOpenDialog() {
 // 保留した開くダイアログを、選んだパス(path)または取り消し(null)で決着させる。
 async function settleOpenDialog(path: string | null) {
   await browser.tauri.execute((_tauri, p) => {
-    (
+    const control = (
       window as unknown as { __e2eOpenControl?: { resolve: (path: string | null) => void } }
-    ).__e2eOpenControl?.resolve(p);
+    ).__e2eOpenControl;
+    if (!control) throw new Error("開くダイアログが保留されていない(holdOpenDialogを先に呼ぶ)");
+    control.resolve(p);
   }, path);
 }
 
@@ -138,7 +171,7 @@ afterEach(async () => {
     });
     for (let attempt = 0; attempt < 3; attempt++) {
       if (!(await $('[role="dialog"], [role="alertdialog"]').isExisting())) break;
-      const closeButton = await $('[role="dialog"] button=閉じる');
+      const closeButton = await $('[role="dialog"]').$("button=閉じる");
       if (await closeButton.isExisting()) await closeButton.click();
       else await browser.keys("Escape");
       await browser.pause(300);
@@ -459,7 +492,7 @@ describe("エクスポートの実行(ファイルダイアログの差し替え
     await returnToMainScreen();
   });
 
-  it("書き出し中は、Escapeを押しても閉じず、Tabを押してもフォーカスが画面の外へ出ない", async () => {
+  it("書き出し中は、Escapeを押しても閉じず、フォーカスは画面の内側に留まる", async () => {
     await completeInitialSetup();
     const profileName = "E2Eエクスポート実行中確認";
     await createProfileViaIpc(profileName);
@@ -476,8 +509,10 @@ describe("エクスポートの実行(ファイルダイアログの差し替え
     await exportButton.click();
     await exportButton.waitForEnabled({ reverse: true, timeout: 10000 });
 
-    // 押したボタンが無効になっても、フォーカスは画面の内側にあり、Tabを押しても背景の画面へ出ない
-    // (出られると、書き出し中に背景の操作をして、パスフレーズを失いかねない)。
+    // 押したボタンが無効になっても、フォーカスは画面の内側にある(外へ落ちると、Tabで背景の画面へ
+    // 出られ、書き出し中に背景の操作をして、パスフレーズを失いかねない)。WebDriverのTabはキー
+    // イベントの送出だけでブラウザ既定のフォーカス移動は起きないため、Tabの後の確認は、
+    // フォーカストラップのキー処理が画面の内側に留めることの確認になる。
     expect(await focusIsInsideDialog()).toBe(true);
     await browser.keys(["Tab", "Tab", "Tab"]);
     expect(await focusIsInsideDialog()).toBe(true);
@@ -526,6 +561,102 @@ describe("エクスポートの実行(ファイルダイアログの差し替え
 
     await (await exportDialog.$("button=キャンセル")).click();
     await exportDialog.waitForExist({ reverse: true, timeout: 10000 });
+    await returnToMainScreen();
+  });
+
+  it("エクスポートを同じ瞬間に2回押しても、保存先の選択と書き出しは1回だけ実行される", async () => {
+    await completeInitialSetup();
+    const profileName = "E2Eエクスポート二重実行確認";
+    await createProfileViaIpc(profileName);
+    const dialog = await openExportDialogFor(profileName);
+    await holdSaveDialogCounting();
+
+    // 1回のJSタスクの中で2回押す(描画される前なので、ボタンはまだ無効になっていない)。
+    await browser.tauri.execute(() => {
+      const button = Array.from(document.querySelectorAll('[role="dialog"] button')).find(
+        (b) => b.textContent?.trim() === "エクスポート"
+      ) as HTMLButtonElement | undefined;
+      if (!button) throw new Error("エクスポートのボタンが見つからない");
+      button.click();
+      button.click();
+    });
+    await (await dialog.$("button=エクスポート")).waitForEnabled({ reverse: true, timeout: 10000 });
+    expect(await saveDialogCalls()).toBe(1);
+
+    await settleSaveDialog({ path: path.join(exportDir, "double-click.smx") });
+    await (await dialog.$('[role="status"]')).waitForExist({ timeout: 10000 });
+    expect(await saveDialogCalls()).toBe(1);
+
+    await (await dialog.$("button=閉じる")).click();
+    await dialog.waitForExist({ reverse: true, timeout: 10000 });
+    await returnToMainScreen();
+  });
+
+  it("画面を閉じないまま履歴で戻る操作をしても、書き出し後のエクスポート画面は残る", async () => {
+    await completeInitialSetup();
+    const profileName = "E2Eエクスポート履歴戻り確認";
+    await createProfileViaIpc(profileName);
+    await setE2eFileDialogPaths({ save: path.join(exportDir, "history-back.smx") });
+
+    const dialog = await openExportDialogFor(profileName);
+    const passphrase = await (await dialog.$("input[readonly]")).getValue();
+    await (await dialog.$("button=エクスポート")).click();
+    await (await dialog.$('[role="status"]')).waitForExist({ timeout: 10000 });
+
+    // マウスの戻るボタンなどによる、履歴の移動と同じ操作。
+    await browser.back();
+    await browser.pause(500);
+    expect(await dialog.isDisplayed()).toBe(true);
+    expect(await (await dialog.$("input[readonly]")).getValue()).toBe(passphrase);
+
+    await (await dialog.$("button=閉じる")).click();
+    await dialog.waitForExist({ reverse: true, timeout: 10000 });
+    await returnToMainScreen();
+  });
+
+  it("再生成した後に書き出したファイルは、再生成後のパスフレーズでだけインポートできる", async () => {
+    await completeInitialSetup();
+    await createProfileViaIpc("E2E再生成往復確認");
+    const filePath = path.join(exportDir, "regenerated.smx");
+    await setE2eFileDialogPaths({ save: filePath, open: filePath });
+
+    await openProfileManagement();
+    await (await $("button=全体エクスポート")).click();
+    const exportDialog = await $('[role="dialog"]');
+    await exportDialog.waitForExist({ timeout: 10000 });
+    const passphraseInput = await exportDialog.$("input[readonly]");
+    const initial = await passphraseInput.getValue();
+    await (await exportDialog.$("button=再生成")).click();
+    await browser.waitUntil(async () => (await passphraseInput.getValue()) !== initial, {
+      timeout: 10000,
+      timeoutMsg: "再生成してもパスフレーズが変わらなかった",
+    });
+    const regenerated = await passphraseInput.getValue();
+    await (await exportDialog.$("button=エクスポート")).click();
+    await (await exportDialog.$('[role="status"]')).waitForExist({ timeout: 10000 });
+    await (await exportDialog.$("button=閉じる")).click();
+    await exportDialog.waitForExist({ reverse: true, timeout: 10000 });
+
+    await (await $("button=インポート")).click();
+    const importDialog = await $('[role="dialog"]');
+    await importDialog.waitForExist({ timeout: 10000 });
+    const field = await importDialog.$("input");
+
+    // 再生成する前のパスフレーズでは、復号に失敗する。
+    await field.setValue(initial);
+    await (await importDialog.$("button=OK")).click();
+    const error = await importDialog.$('[role="alert"]');
+    await error.waitForExist({ timeout: 15000 });
+    expect(await error.getText()).toContain("復号に失敗しました");
+
+    // 再生成した後のパスフレーズなら、内容の確認画面へ進む(取り込みは実行せず取り消す)。
+    await field.setValue(regenerated);
+    await (await importDialog.$("button=OK")).click();
+    const confirmDialog = await $('[role="alertdialog"]');
+    await confirmDialog.waitForExist({ timeout: 15000 });
+    expect(await confirmDialog.getText()).toContain("インポート内容の確認");
+    await (await confirmDialog.$("button=キャンセル")).click();
+    await confirmDialog.waitForExist({ reverse: true, timeout: 10000 });
     await returnToMainScreen();
   });
 

@@ -8,7 +8,7 @@ import "./index.css";
 // e2e-testing用ビルド(VITE_E2E_TESTING=true)でのみ読み込む。この定数分岐は
 // ビルド時にリテラル化されるため、通常ビルドではimport自体がtree-shakeで
 // 消え、配布物にwdioテストプラグインが含まれない。
-if (import.meta.env.VITE_E2E_TESTING) {
+if (import.meta.env.VITE_E2E_TESTING === "true") {
   import("@wdio/tauri-plugin");
 }
 
