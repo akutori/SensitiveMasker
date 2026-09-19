@@ -9,7 +9,12 @@ permissions:
   contents: write
 
 jobs:
+  # 検証(テスト・E2E専用コードの混入確認)に通らなければ、インストーラーのビルドも公開も行わない。
+  verify:
+    uses: ./.github/workflows/verify.yml
+
   publish-tauri:
+    needs: verify
     strategy:
       fail-fast: false
       matrix:

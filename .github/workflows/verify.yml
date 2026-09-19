@@ -1,0 +1,58 @@
+name: Verify
+
+# リリース前の検証。release.ymlから呼ばれ(失敗するとリリースは公開されない)、
+# タグを打つ前に確かめられるよう、手動でも実行できる。
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf build-essential curl wget file libxdo-dev libssl-dev
+
+      - name: install bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: install frontend dependencies
+        working-directory: gui
+        run: bun install --frozen-lockfile
+
+      # 配布用と同じ設定(VITE_E2E_TESTINGなし)でビルドする。型検査も兼ねる。
+      # gui/src-tauriのコンパイル(cargo test)は、ビルド済みのdistが存在することを要求するため、
+      # Rustのテストより前に行う。
+      - name: build frontend
+        working-directory: gui
+        run: bun run build
+
+      - name: check that the frontend build has no E2E-only code
+        working-directory: gui
+        run: bun run check:dist
+
+      - name: frontend unit tests
+        working-directory: gui
+        run: bun run test:unit
+
+      - name: install Chromium for Storybook tests
+        working-directory: gui
+        run: bunx playwright install --with-deps chromium
+
+      - name: Storybook play tests
+        working-directory: gui
+        run: bun run test:stories
+
+      - name: Rust tests
+        run: cargo test --workspace
