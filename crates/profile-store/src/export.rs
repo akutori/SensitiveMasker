@@ -42,26 +42,39 @@ pub fn decrypt_import(ciphertext: &[u8], passphrase: SecretString) -> Result<Vec
     decrypt_with_whitespace_fallback(ciphertext, passphrase, MAX_WORK_FACTOR_LOG_N)
 }
 
-// 貼り付けやTTY入力で前後に空白(改行・タブ・全角スペース等)が混ざっていても復号できるよう、
-// 入力のまま復号に失敗したときだけ、前後の空白を除いたパスフレーズで1回だけ再試行する。
-// 入力のまま成功する場合は従来どおりで、前後に空白を含むパスフレーズで作ったファイルも
-// 復号できる(空白を「足す」方向は試さない)。ワークファクタ超過はパスフレーズの正誤と
-// 無関係なので、再試行しない。
+// 貼り付けで混入しうる、パスフレーズの前後の空白と不可視文字(ゼロ幅スペース・BOM等)。
+// str::trimが除くのはUnicodeのWhite_Spaceだけで、これらの不可視文字は含まれない。
+fn is_paste_noise(c: char) -> bool {
+    c.is_whitespace() || matches!(c, '\u{200B}' | '\u{200C}' | '\u{200D}' | '\u{2060}' | '\u{FEFF}')
+}
+
+// 入力のままの復号に失敗した後の、再試行用の候補。前後の空白・不可視文字を除いた結果が
+// 入力と異なり、かつ空でない場合だけ返す。除くものが無いなら、同じ値で再試行しても無駄に
+// scryptを走らせるだけであり、空になるなら空のパスフレーズを試すことになるため。
+// 入力の部分文字列としてだけ返すので、パスフレーズ内部の空白は変わらない。
+fn retry_candidate(typed: &str) -> Option<&str> {
+    let candidate = typed.trim_matches(is_paste_noise);
+    (!candidate.is_empty() && candidate.len() != typed.len()).then_some(candidate)
+}
+
+// 貼り付けやTTY入力で前後に空白・不可視文字が混ざっていても復号できるよう、入力のまま
+// 復号に失敗したときだけ、それらを除いたパスフレーズで1回だけ再試行する。入力のまま成功する
+// 場合はそのまま復号する(前後に空白を含むパスフレーズで作ったファイルも復号できる。
+// 空白を「足す」方向は試さない)。ワークファクタ超過はパスフレーズの正誤と無関係なので、
+// 再試行しない。
 fn decrypt_with_whitespace_fallback(
     ciphertext: &[u8],
     passphrase: SecretString,
     max_log_n: u8,
 ) -> Result<Vec<u8>, ExportError> {
-    // 最初の試行がパスフレーズを消費するため、再試行用の値は先に作る。前後に空白が無い
+    // 最初の試行がパスフレーズを消費するため、再試行用の値は先に作る。再試行の候補が無い
     // (通常の)場合は作らず、機微な値のコピーを増やさない。
-    let typed = passphrase.expose_secret();
-    let trimmed = typed.trim();
-    let fallback = (!trimmed.is_empty() && trimmed.len() != typed.len())
-        .then(|| SecretString::from(trimmed.to_owned()));
+    let fallback = retry_candidate(passphrase.expose_secret())
+        .map(|candidate| SecretString::from(candidate.to_owned()));
 
     match (decrypt_import_with_max_work_factor(ciphertext, passphrase, max_log_n), fallback) {
-        (Err(ExportError::DecryptionFailed), Some(trimmed)) => {
-            decrypt_import_with_max_work_factor(ciphertext, trimmed, max_log_n)
+        (Err(ExportError::DecryptionFailed), Some(fallback_passphrase)) => {
+            decrypt_import_with_max_work_factor(ciphertext, fallback_passphrase, max_log_n)
         }
         (result, _) => result,
     }
@@ -292,5 +305,72 @@ mod tests {
         let result = decrypt_with_whitespace_fallback(&encrypted, passphrase("correct-horse "), 2);
 
         assert!(matches!(result, Err(ExportError::ExcessiveWork { required: 4, allowed_max: 2 })));
+    }
+
+    #[test]
+    fn retry_candidate_is_none_when_there_is_nothing_to_strip() {
+        // 除くものが無いのに再試行すると、同じ値で無駄にscryptを走らせることになる。
+        assert_eq!(retry_candidate("abc"), None);
+        assert_eq!(retry_candidate(""), None);
+    }
+
+    #[test]
+    fn retry_candidate_strips_surrounding_whitespace_and_invisible_characters() {
+        for (typed, expected) in [
+            ("abc ", "abc"),
+            (" abc", "abc"),
+            ("\u{3000}abc\n", "abc"),
+            ("\u{a0}abc\t", "abc"),
+            ("\u{200B}abc", "abc"),
+            ("abc\u{FEFF}", "abc"),
+            ("\u{2060}abc\u{200D}", "abc"),
+            ("\u{200C}abc", "abc"),
+        ] {
+            assert_eq!(retry_candidate(typed), Some(expected), "入力: {typed:?}");
+        }
+    }
+
+    #[test]
+    fn retry_candidate_keeps_whitespace_inside_the_passphrase() {
+        assert_eq!(retry_candidate("a  b "), Some("a  b"));
+        assert_eq!(retry_candidate(" a b"), Some("a b"));
+    }
+
+    #[test]
+    fn retry_candidate_is_none_when_only_noise_remains() {
+        // 空になる場合に再試行すると、空のパスフレーズを試すことになる。
+        assert_eq!(retry_candidate("  \n"), None);
+        assert_eq!(retry_candidate("\u{200B}\u{FEFF}"), None);
+    }
+
+    #[test]
+    fn invisible_characters_around_the_passphrase_are_ignored() {
+        let encrypted = encrypt_with_cheap_work_factor(b"secret", "correct-horse");
+
+        for pasted in ["\u{FEFF}correct-horse", "correct-horse\u{200B}", "\u{2060}correct-horse\u{200D}"] {
+            let result = decrypt_import(&encrypted, passphrase(pasted));
+            assert_eq!(result.unwrap(), b"secret", "入力: {pasted:?}");
+        }
+    }
+
+    #[test]
+    fn inner_whitespace_survives_the_retry() {
+        // 前後に空白が付いて再試行になっても、内部の空白(2つ連続)は変わらない。
+        let encrypted = encrypt_with_cheap_work_factor(b"secret", "correct  horse");
+
+        let result = decrypt_import(&encrypted, passphrase("correct  horse "));
+
+        assert_eq!(result.unwrap(), b"secret");
+    }
+
+    #[test]
+    fn a_file_made_with_an_empty_passphrase_is_not_opened_by_a_whitespace_only_input() {
+        // 空白のみの入力を空文字として再試行すると、空のパスフレーズで作ったファイルが開いてしまう。
+        // (encrypt_for_exportは空を拒否するため、ageを直接使って空のパスフレーズの暗号文を作る。)
+        let encrypted = encrypt_with_cheap_work_factor(b"secret", "");
+
+        let result = decrypt_import(&encrypted, passphrase("  \n"));
+
+        assert!(matches!(result, Err(ExportError::DecryptionFailed)));
     }
 }
