@@ -639,7 +639,10 @@ mod tests {
         assert_eq!(err, "確認待ちのインポートがありません");
     }
 
+    // UNCの表記はWindowsのパスの形式で、Unixでは、区切りではない文字を含む相対パスの名前になるため、
+    // Windowsでだけ検証する。
     #[test]
+    #[cfg(windows)]
     fn validate_export_dest_path_rejects_unc_paths() {
         let err = validate_export_dest_path_impl(r"\\server\share\export.smx", Err("unused".to_string()))
             .expect_err("UNCパスは拒否されるはず");
@@ -679,7 +682,9 @@ mod tests {
 
     // 字句上のstarts_with比較では、NTFSが大文字小文字を区別しないことを利用して
     // 同一フォルダを別表記で指すだけで判定をすり抜けられるため、これを固定する。
+    // 大文字小文字を区別しないファイルシステムと、`\`の区切りはWindowsの性質のため、Windowsでだけ検証する。
     #[test]
+    #[cfg(windows)]
     fn validate_export_dest_path_rejects_paths_that_differ_only_in_case() {
         let data_dir = tempfile::tempdir().unwrap();
         let app_paths = AppPaths::at(data_dir.path());

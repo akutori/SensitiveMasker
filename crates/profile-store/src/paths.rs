@@ -98,7 +98,10 @@ fn path_is_same_or_inside(candidate: &Path, boundary: &Path) -> Result<bool, Pat
 mod tests {
     use super::*;
 
+    // UNCの表記(`\\server\share`)はWindowsのパスの形式で、Unixでは、区切りではない文字を含む
+    // 相対パスの名前になるため、Windowsでだけ検証する。
     #[test]
+    #[cfg(windows)]
     fn normalize_and_reject_special_forms_rejects_unc_paths() {
         let err = normalize_and_reject_special_forms(r"\\server\share\export.smx").unwrap_err();
         assert!(matches!(err, PathError::SpecialForm));

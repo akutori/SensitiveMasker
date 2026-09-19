@@ -54,5 +54,6 @@ jobs:
         working-directory: gui
         run: bun run test:stories
 
+      # Cargo.lockのとおりに解決できることも確かめる(--locked)。
       - name: Rust tests
-        run: cargo test --workspace
+        run: cargo test --workspace --locked
