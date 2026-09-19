@@ -102,16 +102,18 @@ pub(crate) fn import(store: &mut ProfileStore, input: &Path, yes: bool) -> Resul
     // ファイルの存在確認を先に行う(存在しないパスに対して無駄にパスフレーズ入力させない)。
     std::fs::read(input).map_err(|source| CliError::IoAt { path: input.to_path_buf(), source })?;
     let passphrase = SecretString::from(rpassword::prompt_password("インポート用パスフレーズ: ")?);
-    import_with_passphrase(store, input, passphrase, yes)
+    import_with_passphrase(store, input, passphrase, yes, std::io::stdin().is_terminal())
 }
 
-// TTY読み取り(rpassword)をテスト対象から分離するための本体。ただし全体インポートで
-// `yes`がfalseの場合のみ、確認のためのプレーンな標準入力読み取りが残る。
+// TTY読み取り(rpassword)と、標準入力が端末かの判定をテスト対象から分離するための本体。端末かどうかは、
+// テストの起動方法(端末から実行するか)に左右されるため、引数で受け取る。ただし全体インポートで`yes`が
+// falseかつ端末の場合のみ、確認のためのプレーンな標準入力読み取りが残る。
 fn import_with_passphrase(
     store: &mut ProfileStore,
     input: &Path,
     passphrase: SecretString,
     yes: bool,
+    stdin_is_terminal: bool,
 ) -> Result<(), CliError> {
     let data = std::fs::read(input).map_err(|source| CliError::IoAt { path: input.to_path_buf(), source })?;
     let preview = store.preview_import(&data, passphrase)?;
@@ -119,7 +121,7 @@ fn import_with_passphrase(
     if let ImportPreview::All { entries, .. } = &preview {
         print_all_import_plan(entries);
         if !yes {
-            if !std::io::stdin().is_terminal() {
+            if !stdin_is_terminal {
                 return Err(CliError::NonInteractiveImportNeedsYesFlag);
             }
             if !prompt_yes_no("続行しますか? (y/N): ")? {
@@ -192,7 +194,7 @@ mod tests {
         export_with_passphrase(&store_a, Some("work"), &export_path, passphrase("pw"), &app_paths_a).unwrap();
 
         let (_dir_b, _app_paths_b, mut store_b) = temp_store();
-        import_with_passphrase(&mut store_b, &export_path, passphrase("pw"), true).unwrap();
+        import_with_passphrase(&mut store_b, &export_path, passphrase("pw"), true, false).unwrap();
 
         assert_eq!(store_b.get_profile("work").unwrap().profile_name(), "work");
     }
@@ -208,7 +210,7 @@ mod tests {
         export_with_passphrase(&store_a, None, &export_path, passphrase("pw"), &app_paths_a).unwrap();
 
         let (_dir_b, _app_paths_b, mut store_b) = temp_store();
-        import_with_passphrase(&mut store_b, &export_path, passphrase("pw"), true).unwrap();
+        import_with_passphrase(&mut store_b, &export_path, passphrase("pw"), true, false).unwrap();
 
         let names: Vec<String> = store_b.list_profiles().unwrap().into_iter().map(|s| s.name).collect();
         assert!(names.contains(&"work".to_string()));
@@ -224,7 +226,7 @@ mod tests {
         export_with_passphrase(&store_a, Some("work"), &export_path, passphrase("correct"), &app_paths_a).unwrap();
 
         let (_dir_b, _app_paths_b, mut store_b) = temp_store();
-        let err = import_with_passphrase(&mut store_b, &export_path, passphrase("wrong"), true)
+        let err = import_with_passphrase(&mut store_b, &export_path, passphrase("wrong"), true, false)
             .expect_err("誤ったパスフレーズは拒否されるはず");
 
         assert!(matches!(err, CliError::Store(profile_store::ProfileStoreError::Export(_))));
@@ -234,7 +236,7 @@ mod tests {
     fn importing_a_missing_file_fails_cleanly() {
         let (_dir, _app_paths, mut store) = temp_store();
 
-        let err = import_with_passphrase(&mut store, Path::new("no/such/file.agemask"), passphrase("pw"), true)
+        let err = import_with_passphrase(&mut store, Path::new("no/such/file.agemask"), passphrase("pw"), true, false)
             .expect_err("存在しないファイルは失敗するはず");
 
         assert!(matches!(err, CliError::IoAt { .. }));
@@ -242,7 +244,7 @@ mod tests {
 
     #[test]
     fn bulk_import_without_yes_fails_fast_instead_of_hanging_when_not_a_tty() {
-        // cargo testのプロセス自体は通常TTYではないため、この経路を安全に検証できる。
+        // 標準入力が端末でないことを引数で指定するため、テストの起動方法(端末から実行しても)に左右されない。
         let (_dir_a, app_paths_a, mut store_a) = temp_store();
         create(&mut store_a, "work");
         let export_dir = tempfile::tempdir().unwrap();
@@ -250,7 +252,7 @@ mod tests {
         export_with_passphrase(&store_a, None, &export_path, passphrase("pw"), &app_paths_a).unwrap();
 
         let (_dir_b, _app_paths_b, mut store_b) = temp_store();
-        let err = import_with_passphrase(&mut store_b, &export_path, passphrase("pw"), false)
+        let err = import_with_passphrase(&mut store_b, &export_path, passphrase("pw"), false, false)
             .expect_err("非TTYかつ--yes無しでは即座に失敗するはず");
 
         assert!(matches!(err, CliError::NonInteractiveImportNeedsYesFlag));
@@ -268,7 +270,7 @@ mod tests {
         export_with_passphrase(&store_a, Some("work"), &export_path, passphrase("pw"), &app_paths_a).unwrap();
 
         let (_dir_b, _app_paths_b, mut store_b) = temp_store();
-        import_with_passphrase(&mut store_b, &export_path, passphrase("pw"), false).unwrap();
+        import_with_passphrase(&mut store_b, &export_path, passphrase("pw"), false, false).unwrap();
 
         assert_eq!(store_b.get_profile("work").unwrap().profile_name(), "work");
     }
