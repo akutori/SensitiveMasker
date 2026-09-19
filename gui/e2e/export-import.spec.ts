@@ -3,8 +3,8 @@
 // WebDriverから操作できず、テスト側からinvokeを差し替えることもできない。そのため、E2Eビルド
 // (VITE_E2E_TESTING)に限り、gui/src/lib/file-dialog.tsがwindow.__e2eFileDialogPathsに
 // 指定された値をダイアログの代わりに返す。このファイルは、browser.tauri.executeでその
-// 値を設定してから、エクスポート/インポートを実行する。保存ダイアログには、決着を
-// テストが握るPromiseも指定でき、書き出し中の画面や、取り消し・失敗を検証するために使う。
+// 値を設定してから、エクスポート/インポートを実行する。保存・開くのどちらにも、決着を
+// テストが握るPromiseを指定でき、選択を待つ間の画面や、取り消し・失敗の後の画面を検証するために使う。
 // バックエンドのexport/import本体のロジック(暗号化・復号・往復・エラー系)は
 // gui/src-tauri/src/export_import.rsの実ファイル・実DBを使ったテストでも検証している。
 
@@ -14,12 +14,17 @@ import path from "node:path";
 
 async function completeInitialSetup() {
   const maskButton = await $("button*=マスク実行");
-  // 既に初期化済みでメイン画面が出ていれば、何も待たない。
-  if (await maskButton.isExisting()) return;
   const startButton = await $("button=始める");
-  await startButton.waitForExist({ timeout: 10000 });
-  await startButton.click();
-  await maskButton.waitForExist({ timeout: 10000 });
+  // 初回は初期設定画面、初期化済みならメイン画面が出る。どちらかが出るまで待ってから分岐する
+  // (初期化済みのときに、出ない「始める」を待たないため)。
+  await browser.waitUntil(
+    async () => (await maskButton.isExisting()) || (await startButton.isExisting()),
+    { timeout: 15000, timeoutMsg: "初期設定画面もメイン画面も表示されなかった" }
+  );
+  if (await startButton.isExisting()) {
+    await startButton.click();
+    await maskButton.waitForExist({ timeout: 10000 });
+  }
 }
 
 async function createProfileViaIpc(name: string) {
@@ -147,6 +152,23 @@ async function clipboardHolds(expected: string): Promise<boolean> {
     expected
   );
   return (result as { outcome: string }).outcome === "cleared";
+}
+
+// 保留中のインポートの確定を、直接呼ぶ。保留中の内容が無ければ失敗する(成功すると、実際に取り込まれる)。
+async function commitPendingImportSucceeds(): Promise<boolean> {
+  return browser.tauri.execute(({ core }) =>
+    core.invoke("commit_pending_import").then(
+      () => true,
+      () => false
+    )
+  );
+}
+
+async function listProfileNames(): Promise<string[]> {
+  return browser.tauri.execute(async ({ core }) => {
+    const summaries = (await core.invoke("list_profiles")) as Array<{ name: string }>;
+    return summaries.map((s) => s.name);
+  });
 }
 
 async function currentUrl(): Promise<string> {
@@ -793,6 +815,67 @@ describe("エクスポートの実行(ファイルダイアログの差し替え
     await returnToMainScreen();
   });
 
+  it("メイン画面のインポートでも、インポートを実行すると、書き出して削除したプロファイルが復元される", async () => {
+    await completeInitialSetup();
+    const profileName = "E2Eメイン画面取込確認";
+    // 削除するプロファイル以外をアクティブにしておく(アクティブなプロファイルは削除できない)。
+    const activeProfileName = "E2Eメイン画面取込の保持プロファイル";
+    await createProfileViaIpc(activeProfileName);
+    await setActiveProfileViaIpc(activeProfileName);
+    await createProfileViaIpc(profileName);
+    const filePath = path.join(exportDir, "main-screen-import.smx");
+    await setE2eFileDialogPaths({ save: filePath, open: filePath });
+
+    const dialog = await openExportDialogFor(profileName);
+    const passphrase = await (await dialog.$("input[readonly]")).getValue();
+    await (await dialog.$("button=エクスポート")).click();
+    await (await dialog.$('[role="status"]')).waitForExist({ timeout: 10000 });
+    await (await dialog.$("button=閉じる")).click();
+    await dialog.waitForExist({ reverse: true, timeout: 10000 });
+    await deleteProfileViaIpc(profileName);
+    await returnToMainScreen();
+
+    // メイン画面の「インポート」から、同じ流れで確定する。
+    await (await $("button=インポート")).click();
+    const importDialog = await $('[role="dialog"]');
+    await importDialog.waitForExist({ timeout: 10000 });
+    await (await importDialog.$("input")).setValue(passphrase);
+    await (await importDialog.$("button=OK")).click();
+    const confirmDialog = await $('[role="alertdialog"]');
+    await confirmDialog.waitForExist({ timeout: 15000 });
+    await (await confirmDialog.$("button=インポート実行")).click();
+    await confirmDialog.waitForExist({ reverse: true, timeout: 10000 });
+
+    await browser.waitUntil(async () => (await listProfileNames()).includes(profileName), {
+      timeout: 15000,
+      timeoutMsg: "メイン画面のインポートを実行しても、プロファイルが復元されなかった",
+    });
+  });
+
+  it("画面を閉じる操作と同じ瞬間にエクスポートを押しても、書き出しは実行されない", async () => {
+    await completeInitialSetup();
+    const profileName = "E2Eエクスポート閉じる直後実行確認";
+    await createProfileViaIpc(profileName);
+    const dialog = await openExportDialogFor(profileName);
+    await holdSaveDialogCounting();
+
+    // 1回のJSタスクの中で、キャンセルとエクスポートを続けて押す(再描画される前なので、2つ目の押下は、
+    // 閉じる前の画面を見る)。閉じた画面のパスフレーズを、誰も見ないまま書き出してはならない。
+    await browser.tauri.execute(() => {
+      const buttons = Array.from(document.querySelectorAll('[role="dialog"] button'));
+      const find = (label: string) =>
+        buttons.find((b) => b.textContent?.trim() === label) as HTMLButtonElement | undefined;
+      const cancel = find("キャンセル");
+      const exportButton = find("エクスポート");
+      if (!cancel || !exportButton) throw new Error("ボタンが見つからない");
+      cancel.click();
+      exportButton.click();
+    });
+    await dialog.waitForExist({ reverse: true, timeout: 10000 });
+    expect(await saveDialogCalls()).toBe(0);
+    await returnToMainScreen();
+  });
+
   it("書き出し後は、Escapeを押しても閉じず、「閉じる」で閉じる", async () => {
     await completeInitialSetup();
     const profileName = "E2Eエクスポート成功後確認";
@@ -856,6 +939,8 @@ describe("エクスポートの実行(ファイルダイアログの差し替え
     expect(confirmText).toContain("E2Eインポート往復確認 (インポート)");
     await (await confirmDialog.$("button=キャンセル")).click();
     await confirmDialog.waitForExist({ reverse: true, timeout: 10000 });
+    // キャンセルすると、保留中の(復号済みの)内容は破棄され、その後に確定を呼んでも成立しない。
+    expect(await commitPendingImportSucceeds()).toBe(false);
     await returnToMainScreen();
   });
 

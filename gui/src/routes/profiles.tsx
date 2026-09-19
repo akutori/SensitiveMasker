@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import { createFileRoute, useBlocker, useNavigate } from "@tanstack/react-router";
 import { toast } from "sonner";
 import { ProfileManagementScreen, type SortOption } from "@/components/profile-management-screen";
@@ -25,6 +25,7 @@ import {
   type ExportDialogState,
 } from "@/lib/export-dialog-state";
 import { createOperationCounter } from "@/lib/operation-counter";
+import { createImportConfirmHandlers } from "@/lib/import-confirm-handlers";
 import { writeClipboardText, clearClipboardIfMatches } from "@/lib/clipboard-ipc";
 import {
   CLIPBOARD_CLEAR_DELAY_MS,
@@ -117,10 +118,7 @@ function ProfilesRoute() {
   // 二重押下など)が古い描画の状態を見て、画面に出ているものと違うパスフレーズで書き出したり、
   // 二重に実行したりしてしまう。遷移はこちらへ先に適用し、画面の状態(dialog)へ写す。
   const exportSessionRef = useRef<ExportDialogState | null>(null);
-  // 確認画面の「インポート実行」は、確定(commit)を始めた後で、画面を閉じる操作(onOpenChange)も呼ぶ。
-  // その閉じる操作から後始末(clearPendingImport)を続けて発行すると、2つのIPCの実行順が保証されず、
-  // 後始末が先に走ると、確定が「確認待ちのインポートがありません」で失敗する。確定は成否に関わらず
-  // 保留中の内容を消費するため、確定を始めた場合は、後始末を発行しない。
+  // 確認画面の「インポート実行」の確定を、始めてから終えるまでの間だけtrue(理由はimport-confirm-handlers.ts)。
   const importConfirmStarted = useRef(false);
   const [importPassphrase, setImportPassphrase] = useState("");
   const [importPassphraseError, setImportPassphraseError] = useState<string | undefined>();
@@ -134,9 +132,23 @@ function ProfilesRoute() {
   // コピー/クリアのIPC応答待ちの間は、コピー・再生成を受け付けない(理由はoperation-counter.ts)。
   // ボタンの無効化に使うstateは、件数の変化の写しである。
   const [clipboardBusy, setClipboardBusy] = useState(false);
-  const clipboardOperations = useMemo(() => createOperationCounter(setClipboardBusy), []);
+  const [clipboardOperations] = useState(() => createOperationCounter(setClipboardBusy));
 
   const closeDialog = () => setDialog({ kind: "none" });
+
+  const importConfirmHandlers = createImportConfirmHandlers(
+    {
+      isOpen: () => dialog.kind === "importConfirm",
+      commit: () => appState.commitImport(),
+      discardPending: () => {
+        void appState.clearPendingImport();
+      },
+      close: closeDialog,
+      closeIfStillOpen: () =>
+        setDialog((current) => (current.kind === "importConfirm" ? { kind: "none" } : current)),
+    },
+    importConfirmStarted
+  );
 
   // 書き出し中・書き出し済みの画面は、履歴の移動(マウスの戻るボタンなど)でこの画面ごと消えると、
   // パスフレーズを失うため、移動を止める(Escapeや背景の操作を受け付けないのと同じ理由)。
@@ -474,12 +486,17 @@ function ProfilesRoute() {
 
       <ExportModal
         open={dialog.kind === "export"}
-        // 閉じるとパスフレーズは画面の状態ごと手放す(以後、この画面から参照できなくなる。JSの
-        // 文字列はメモリ上で消去できないため、消えるのは参照だけである)。クリップボードの
+        // 閉じるとパスフレーズは、画面の状態と、進行状況の正(exportSessionRef)の両方から手放す
+        // (以後、この画面から参照できなくなり、閉じた後に届いた古い描画からの操作も、書き出さない。
+        // JSの文字列はメモリ上で消去できないため、消えるのは参照だけである)。クリップボードの
         // 自動クリアは画面を閉じても継続する(コピーしたパスフレーズを他所に控える目的で
         // 閉じた場合も、クリアされるべきため)。実行中・成功後に閉じる操作は、ExportModalが
         // 受け付けない。
-        onOpenChange={(open) => !open && closeDialog()}
+        onOpenChange={(open) => {
+          if (open) return;
+          exportSessionRef.current = null;
+          closeDialog();
+        }}
         target={dialog.kind === "export" ? dialog.target : ""}
         passphrase={dialog.kind === "export" ? dialog.session.passphrase : ""}
         status={dialog.kind === "export" ? dialog.session.phase : "editing"}
@@ -549,31 +566,9 @@ function ProfilesRoute() {
 
       <ImportConfirmDialog
         open={dialog.kind === "importConfirm"}
-        onOpenChange={(open) => {
-          if (open) return;
-          closeDialog();
-          if (importConfirmStarted.current) return;
-          // キャンセルなど、確定しない閉じ方では、ここで明示的に破棄しない限り、復号済みの平文が
-          // 残り続ける。
-          appState.clearPendingImport();
-        }}
+        onOpenChange={importConfirmHandlers.onOpenChange}
         rows={dialog.kind === "importConfirm" ? dialog.rows : []}
-        onConfirm={async () => {
-          importConfirmStarted.current = true;
-          try {
-            await appState.commitImport();
-          } catch {
-            // 失敗時のトースト表示はappState側のreportAndRethrowが行うため、
-            // ここでの追加対応は不要(catchが無いとこのPromise自体がunhandledになる)。
-          } finally {
-            importConfirmStarted.current = false;
-            // 確認画面は「インポート実行」を押した時点で閉じるが、まだ確認画面のままなら、成否に
-            // 関わらずここで閉じる(確認済みのpreviewはcommit呼び出しの成否に関わらずサーバー側で
-            // 消費済みのため、開いたままにしても同じ内容で再試行はできない)。commitの完了を
-            // 待つ間に開かれた別の画面(エクスポートなど)は、閉じない。
-            setDialog((current) => (current.kind === "importConfirm" ? { kind: "none" } : current));
-          }
-        }}
+        onConfirm={importConfirmHandlers.onConfirm}
       />
 
       <EnvImportSelectDialog

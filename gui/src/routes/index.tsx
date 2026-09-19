@@ -9,6 +9,7 @@ import { MatchCountConfirmDialog, type MatchCountRow } from "@/components/match-
 import { ImportPassphraseDialog } from "@/components/import-passphrase-dialog";
 import { ImportConfirmDialog, type ImportPreviewRow } from "@/components/import-confirm-dialog";
 import { useAppState, SMX_FILE_FILTERS, toImportPreviewRows } from "@/lib/app-state";
+import { createImportConfirmHandlers } from "@/lib/import-confirm-handlers";
 import { isExportImportError } from "@/lib/profile-ipc";
 import { openFileDialog, saveFileDialog } from "@/lib/file-dialog";
 import { maskText } from "@/lib/masking-ipc";
@@ -55,13 +56,24 @@ function MainRoute() {
   // 誤って受理してしまうため、値ではなく「これが最新の呼び出しか」で判定する。
   const maskAndSaveGeneration = useRef(0);
 
-  // 確認画面の「インポート実行」は、確定(commit)を始めた後で、画面を閉じる操作(onOpenChange)も呼ぶ。
-  // その閉じる操作から後始末(clearPendingImport)を続けて発行すると、2つのIPCの実行順が保証されず、
-  // 後始末が先に走ると、確定が「確認待ちのインポートがありません」で失敗する。確定は成否に関わらず
-  // 保留中の内容を消費するため、確定を始めた場合は、後始末を発行しない。
+  // 確認画面の「インポート実行」の確定を、始めてから終えるまでの間だけtrue(理由はimport-confirm-handlers.ts)。
   const importConfirmStarted = useRef(false);
 
   const closeDialog = () => setDialog({ kind: "none" });
+
+  const importConfirmHandlers = createImportConfirmHandlers(
+    {
+      isOpen: () => dialog.kind === "importConfirm",
+      commit: () => appState.commitImport(),
+      discardPending: () => {
+        void appState.clearPendingImport();
+      },
+      close: closeDialog,
+      closeIfStillOpen: () =>
+        setDialog((current) => (current.kind === "importConfirm" ? { kind: "none" } : current)),
+    },
+    importConfirmStarted
+  );
 
   const confirmNewProfileName = async () => {
     if (profiles.some((p) => p.name === draftName)) {
@@ -304,27 +316,9 @@ function MainRoute() {
 
       <ImportConfirmDialog
         open={dialog.kind === "importConfirm"}
-        onOpenChange={(open) => {
-          if (open) return;
-          closeDialog();
-          if (importConfirmStarted.current) return;
-          // キャンセルなど、確定しない閉じ方では、ここで明示的に破棄しない限り、復号済みの平文が
-          // 残り続ける。
-          appState.clearPendingImport();
-        }}
+        onOpenChange={importConfirmHandlers.onOpenChange}
         rows={dialog.kind === "importConfirm" ? dialog.rows : []}
-        onConfirm={async () => {
-          importConfirmStarted.current = true;
-          try {
-            await appState.commitImport();
-          } catch {
-            // 失敗時のトースト表示はappState側のreportAndRethrowが行うため、
-            // ここでの追加対応は不要(catchが無いとこのPromise自体がunhandledになる)。
-          } finally {
-            importConfirmStarted.current = false;
-            closeDialog();
-          }
-        }}
+        onConfirm={importConfirmHandlers.onConfirm}
       />
     </>
   );
