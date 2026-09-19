@@ -87,6 +87,10 @@ struct PendingImports {
     /// 次に払い出す識別子。単調に増え、再利用しない(捨てられた保留の識別子が、後から払い出された
     /// 別の保留を指さないようにするため)。
     next_id: u64,
+    /// メインウィンドウのページの読み込みが始まるたびに進める世代。復号を始めた時点の世代と、結果を保留へ
+    /// 入れる時点の世代が違えば、復号している間にページが読み込み直されている(結果を受け取る画面が
+    /// もう無い)ため、その結果は保留しない(insert_if_generation)。
+    page_generation: u64,
     /// 保留を、挿入順(古い順)に持つ。
     entries: VecDeque<(u64, ImportPreview)>,
 }
@@ -96,17 +100,40 @@ impl PendingImportState {
         self.0.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// 保留を追加し、払い出した識別子を返す。識別子の払い出しと挿入は、同じロックの中で行う。
+    /// いまのページの世代。復号を始める時点で控え、結果を保留へ入れるとき(insert_if_generation)に渡す。
+    fn generation(&self) -> u64 {
+        self.lock().page_generation
+    }
+
+    /// 復号を始めた時点の世代(generation)が、いまの世代と同じ場合に限り、保留を追加し、払い出した識別子を返す
+    /// (違えば、preview を捨ててNone)。識別子の払い出しと挿入は、同じロックの中で行う。
     /// 保持数が上限に達している場合は、最も古い保留を捨ててから追加する。
-    fn insert(&self, preview: ImportPreview) -> u64 {
+    fn insert_if_generation(&self, generation: u64, preview: ImportPreview) -> Option<u64> {
         let mut pending = self.lock();
+        if pending.page_generation != generation {
+            return None;
+        }
         let id = pending.next_id;
         pending.next_id += 1;
         if pending.entries.len() >= MAX_PENDING_IMPORTS {
             pending.entries.pop_front();
         }
         pending.entries.push_back((id, preview));
-        id
+        Some(id)
+    }
+
+    /// いまの世代で、保留を追加する(テストが、世代を意識せずに保留を作るため)。
+    #[cfg(test)]
+    fn insert(&self, preview: ImportPreview) -> u64 {
+        let generation = self.generation();
+        self.insert_if_generation(generation, preview).expect("いまの世代での挿入は、必ず成功する")
+    }
+
+    /// メインウィンドウのページが読み込み直されたとき: 全ての保留を破棄し、世代を進める。
+    fn reset_for_new_page(&self) {
+        let mut pending = self.lock();
+        pending.entries.clear();
+        pending.page_generation += 1;
     }
 
     /// 指定した識別子の保留を取り出す(他の保留には触れない)。無ければNone。
@@ -142,7 +169,7 @@ pub(crate) fn discard_pending_imports_on_page_load(
     event: PageLoadEvent,
 ) {
     if webview_label == MAIN_WINDOW_LABEL && event == PageLoadEvent::Started {
-        pending.discard(None);
+        pending.reset_for_new_page();
     }
 }
 
@@ -286,6 +313,23 @@ fn preview_import_impl(
     source_path: &str,
     passphrase: SecretString,
 ) -> Result<PreviewImportResultDto, ExportImportError> {
+    preview_import_with_hook(state, pending, source_path, passphrase, || {})
+}
+
+/// preview_import_implの本体。after_decryptは、復号が終わった直後(結果を保留へ入れる前)に呼ぶ。復号している
+/// 最中にページが読み込み直される場合を、テストで再現するための差し込み口で、実際の呼び出しでは、何もしない。
+///
+/// 復号を始める前のページの世代を控え、結果を保留へ入れるときに、同じ世代であることを確かめる。復号している
+/// 最中にページが読み込み直されていれば、その結果を受け取る画面がもう無いため、保留せずに失敗する
+/// (復号済みの内容が、確定も破棄もされないまま、Rust側に残らないようにする)。
+fn preview_import_with_hook(
+    state: &ProfileStoreState,
+    pending: &PendingImportState,
+    source_path: &str,
+    passphrase: SecretString,
+    after_decrypt: impl FnOnce(),
+) -> Result<PreviewImportResultDto, ExportImportError> {
+    let generation = pending.generation();
     let source_path = validate_import_source_path(source_path).map_err(ExportImportError::InvalidInput)?;
     let metadata = std::fs::metadata(&source_path)
         .map_err(|_| ExportImportError::Failed(GENERIC_IO_ERROR.to_string()))?;
@@ -296,11 +340,14 @@ fn preview_import_impl(
     // パスフレーズ検証(scrypt、数百ms〜数秒)はストアのロックを握らずに行う。ロック内で
     // 実行すると、他のプロファイル/タグ系コマンドがこの間ずっとブロックされてしまう。
     let payload = decrypt_import_payload(&data, passphrase).map_err(|e| ExportImportError::Failed(e.to_string()))?;
+    after_decrypt();
     let preview =
         with_store(state, |store| store.resolve_import_preview(payload)).map_err(ExportImportError::Failed)?;
     let has_active = with_store(state, |store| store.has_active_profile()).map_err(ExportImportError::Failed)?;
     let dto = to_dto(&preview, has_active);
-    let pending_id = pending.insert(preview);
+    let pending_id = pending.insert_if_generation(generation, preview).ok_or_else(|| {
+        ExportImportError::Failed("ページが読み込み直されたため、復号の結果を破棄しました".to_string())
+    })?;
     Ok(PreviewImportResultDto { pending_id, preview: dto })
 }
 
@@ -1077,6 +1124,86 @@ mod tests {
         assert_eq!(pending_count(&pending), 0);
         let id = pending.insert(sample_import_preview("元プロファイル"));
         assert!(pending.take(id).is_some());
+    }
+
+    // 復号している最中にメインウィンドウのページが読み込み直されると、その復号の結果を受け取る画面が
+    // もう無い。復号を始めた時点のページの世代と、結果を保留へ入れる時点の世代が違えば、その結果は保留しない。
+    #[test]
+    fn a_result_decrypted_before_a_page_load_started_is_not_kept() {
+        let pending = PendingImportState::default();
+        let generation = pending.generation();
+
+        discard_pending_imports_on_page_load(&pending, MAIN_WINDOW_LABEL, PageLoadEvent::Started);
+
+        assert!(pending.insert_if_generation(generation, sample_import_preview("元プロファイル")).is_none());
+        assert_eq!(pending_count(&pending), 0);
+    }
+
+    #[test]
+    fn a_result_decrypted_within_the_same_page_is_kept() {
+        let pending = PendingImportState::default();
+        let generation = pending.generation();
+
+        let id = pending
+            .insert_if_generation(generation, sample_import_preview("元プロファイル"))
+            .expect("同じページの中で復号した結果は、保留されるはず");
+
+        assert!(pending.take(id).is_some());
+    }
+
+    // ページの世代が進むのは、メインウィンドウの読み込みの開始だけ。読み込みの完了・別のウェブビューの読み込み・
+    // 画面の外からの全消去(E2Eの後片付け)は、復号している最中の結果を、捨てない。
+    #[test]
+    fn only_the_start_of_a_main_window_page_load_advances_the_page_generation() {
+        let pending = PendingImportState::default();
+        let generation = pending.generation();
+
+        discard_pending_imports_on_page_load(&pending, MAIN_WINDOW_LABEL, PageLoadEvent::Finished);
+        discard_pending_imports_on_page_load(&pending, "other", PageLoadEvent::Started);
+        pending.discard(None);
+
+        assert_eq!(pending.generation(), generation);
+        assert!(pending.insert_if_generation(generation, sample_import_preview("元プロファイル")).is_some());
+    }
+
+    // 復号が終わった直後(結果を保留へ入れる前)にページが読み込み直されると、preview_importは、結果を保留せずに
+    // 失敗する(応答を受け取る画面がもう無いため、復号済みの内容が、Rust側に残らない)。
+    #[test]
+    fn preview_import_fails_and_keeps_nothing_when_the_page_is_reloaded_while_decrypting() {
+        let file = export_profile_smx("元プロファイル");
+        let dest = EmptyDestination::new();
+        let pending = PendingImportState::default();
+
+        let result = preview_import_with_hook(
+            &dest.state,
+            &pending,
+            file.path().to_str().unwrap(),
+            passphrase(TEST_PASSPHRASE),
+            || discard_pending_imports_on_page_load(&pending, MAIN_WINDOW_LABEL, PageLoadEvent::Started),
+        );
+
+        assert!(result.is_err(), "復号している最中にページが読み込み直されたのに、結果が返った");
+        assert_eq!(pending_count(&pending), 0);
+    }
+
+    // 対照: 復号している最中に、世代を進めない読み込みの完了が届いても、結果は保留される。
+    #[test]
+    fn preview_import_keeps_the_result_when_no_new_page_started_while_decrypting() {
+        let file = export_profile_smx("元プロファイル");
+        let dest = EmptyDestination::new();
+        let pending = PendingImportState::default();
+
+        let result = preview_import_with_hook(
+            &dest.state,
+            &pending,
+            file.path().to_str().unwrap(),
+            passphrase(TEST_PASSPHRASE),
+            || discard_pending_imports_on_page_load(&pending, MAIN_WINDOW_LABEL, PageLoadEvent::Finished),
+        )
+        .expect("ページが読み込み直されなければ、結果は保留されるはず");
+
+        assert_eq!(pending_count(&pending), 1);
+        assert!(pending.take(result.pending_id).is_some());
     }
 
     // UNCの表記はWindowsのパスの形式で、Unixでは、区切りではない文字を含む相対パスの名前になるため、
