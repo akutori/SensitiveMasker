@@ -15,7 +15,8 @@
         "title": "SensitiveMasker",
         "width": 800,
         "height": 750,
-        "minHeight": 550
+        "minHeight": 550,
+        "generalAutofillEnabled": false
       }
     ],
     "security": {

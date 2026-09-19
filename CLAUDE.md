@@ -83,6 +83,8 @@ SensitiveMasker/
   (`crates/profile-store/src/paths.rs`)。GUI側の`tauri.conf.json`の`identifier`と一致させる必要がある
 - GUI(Tauri)はACL(`capabilities/default.json`、`build.rs`で自動生成)で全コマンドを個別許可制にし、
   CSP(`tauri.conf.json`)で外部への通信を遮断する
+- WebView2の自動補完(Suggestions)は、入力欄の`autocomplete="off"`を守らない場合があるため、
+  `tauri.conf.json`の`generalAutofillEnabled: false`で無効にする(機微な入力を候補として残さない)
 - 外部実行ファイル(`icacls`/`taskkill`)はPATH解決に頼らず`%SystemRoot%`から絶対パスを組み立てて呼ぶ
 
 ## 開発手法
