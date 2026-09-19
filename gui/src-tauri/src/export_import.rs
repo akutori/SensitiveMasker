@@ -885,6 +885,12 @@ mod tests {
         }
     }
 
+    // 保持できる件数は、docs/gui/README.mdが約束している値(4件)。この値を変えるときは、docsの記述も直す。
+    #[test]
+    fn the_pending_limit_is_the_documented_value() {
+        assert_eq!(MAX_PENDING_IMPORTS, 4);
+    }
+
     // 保持数が上限に達するまでは、何も捨てない。
     #[test]
     fn no_pending_import_is_dropped_up_to_the_limit() {
@@ -920,9 +926,30 @@ mod tests {
         unique.dedup();
         assert_eq!(unique.len(), issued.len(), "識別子が再利用されている: {issued:?}");
         assert!(issued.windows(2).all(|pair| pair[0] < pair[1]), "識別子が、払い出した順に増えていない: {issued:?}");
-        // 上限で捨てられた保留の識別子も、後から払い出された別の保留を指さない。
+
+        // 取り出し・破棄で消えた保留の識別子は、何も指さない。
         assert!(pending.take(first).is_none());
         assert!(pending.take(second).is_none());
+
+        // 上限で捨てられた保留(issued[2]。上限を超えた時点で最も古かった保留)の識別子は、その後に払い出された
+        // どの識別子とも一致せず、捨てられた後に払い出された保留も指さない。
+        let dropped_by_limit = issued[2];
+        assert_eq!(pending_count(&pending), MAX_PENDING_IMPORTS, "上限を超えた状態になっていない");
+        assert!(pending.take(dropped_by_limit).is_none(), "上限で捨てられた保留を、取り出せている");
+        assert!(
+            issued[3..].iter().all(|id| *id != dropped_by_limit),
+            "上限で捨てられた識別子が、後から払い出されている: {issued:?}"
+        );
+        let after_the_drop = pending.insert(sample.clone());
+        assert!(
+            issued.iter().all(|id| *id < after_the_drop),
+            "上限による廃棄の後に、識別子が再利用されている: {after_the_drop}, {issued:?}"
+        );
+        assert!(
+            pending.take(dropped_by_limit).is_none(),
+            "上限で捨てられた識別子が、後から払い出された保留を指している"
+        );
+        assert!(pending.take(after_the_drop).is_some());
     }
 
     // 識別子を指定しない破棄は、全ての保留を破棄する(E2Eの後片付けなどの全消去用)。
@@ -936,12 +963,28 @@ mod tests {
         clear_pending_import_impl(&pending, None);
 
         assert_eq!(pending_count(&pending), 0);
-        for id in ids {
-            let err = commit_pending_import_impl(&dest.state, &pending, id)
+        for id in &ids {
+            let err = commit_pending_import_impl(&dest.state, &pending, *id)
                 .expect_err("全消去の後は、どの保留も確定できないはず");
             assert_eq!(err, "確認待ちのインポートがありません");
         }
         assert!(dest.profile_names().is_empty());
+
+        // 全消去の後に払い出す識別子は、全消去の前に払い出したどの識別子より大きい(全消去の前の識別子が、
+        // 後から払い出された保留を指さないようにする)。
+        let after_clear = pending.insert(sample.clone());
+        let max_before_clear = *ids.iter().max().unwrap();
+        assert!(
+            after_clear > max_before_clear,
+            "全消去の後に、識別子が再利用されている: {after_clear}, {ids:?}"
+        );
+        for id in &ids {
+            assert!(
+                pending.take(*id).is_none(),
+                "全消去の前の識別子(識別子{id})が、後から払い出された保留を指している"
+            );
+        }
+        assert!(pending.take(after_clear).is_some());
     }
 
     // UNCの表記はWindowsのパスの形式で、Unixでは、区切りではない文字を含む相対パスの名前になるため、
