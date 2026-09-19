@@ -57,7 +57,10 @@ export default defineConfig(() => ({
           provider: playwright({}),
           instances: [{
             browser: 'chromium'
-          }]
+          }],
+          // ダイアログ下部のボタンの行は、幅640px未満で縦に積まれる。その幅を前提にするstoryがあるため、
+          // ビューポートを明示する(既定値に頼らない)。
+          viewport: { width: 414, height: 896 }
         }
       }
     }, {

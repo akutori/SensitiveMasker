@@ -202,6 +202,9 @@ export const BusyMovesFocus: Story = {
   },
   render: () => <BusyDemo />,
   play: async () => {
+    // 高さの検証は、DialogFooterが縦に積まれる幅(640px未満)でだけ意味がある(横並びになる幅では、行の固定を
+    // 外しても、高さは変わらない)。幅は、vite.config.tsで固定している。
+    await expect(window.innerWidth, "この検証は、幅640px未満で行う").toBeLessThan(640);
     const input = await screen.findByLabelText(PASSPHRASE_LABEL);
     const ok = screen.getByRole("button", { name: "OK" });
     const dialog = screen.getByRole("dialog");
