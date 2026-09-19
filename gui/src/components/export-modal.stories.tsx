@@ -2,6 +2,7 @@ import { useRef, useState } from "react";
 import type { Meta, StoryObj } from "@storybook/react-vite";
 import { expect, fn, screen, userEvent, waitFor } from "storybook/test";
 import { Button } from "@/components/ui/button";
+import { CLIPBOARD_CLEAR_DELAY_SECONDS } from "@/lib/clipboard-clear-delay";
 import {
   beginExport,
   completeExport,
@@ -124,6 +125,10 @@ export const OpenByDefault: Story = {
     await expect(await screen.findByRole("button", { name: "エクスポート" })).toBeEnabled();
     await expect(await screen.findByRole("button", { name: "キャンセル" })).toBeEnabled();
     await expect(screen.queryByRole("status")).toBeNull();
+    // コピーしたパスフレーズが消えるまでの時間を、注意文で伝える。
+    await expect(
+      screen.getByText(new RegExp(`${CLIPBOARD_CLEAR_DELAY_SECONDS}秒後に、自動クリアを試みます`))
+    ).toBeInTheDocument();
 
     await userEvent.keyboard("{Escape}");
     await expect(args.onOpenChange).toHaveBeenCalledTimes(1);

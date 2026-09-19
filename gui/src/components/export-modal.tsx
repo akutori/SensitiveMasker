@@ -11,6 +11,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
+import { CLIPBOARD_CLEAR_DELAY_SECONDS } from "@/lib/clipboard-clear-delay";
 import type { ExportPhase } from "@/lib/export-dialog-state";
 
 export interface ExportModalProps {
@@ -128,7 +129,7 @@ export function ExportModal({
             className="text-sm text-muted-foreground"
             data-a11y-verified-contrast="dialog-overlay-geometry-false-positive"
           >
-            コピー後、自動クリアを試みます(確実ではありません)。Windows環境ではクリップボード履歴・クラウド同期の対象から除外されます。それ以外の環境では現時点で未対応のため、クリア後も履歴に残る場合があります。確実に消すには手動でクリアしてください。
+            コピーの{CLIPBOARD_CLEAR_DELAY_SECONDS}秒後に、自動クリアを試みます(確実ではありません)。Windows環境ではクリップボード履歴・クラウド同期の対象から除外されます。それ以外の環境では現時点で未対応のため、クリア後も履歴に残る場合があります。確実に消すには手動でクリアしてください。
           </p>
         </div>
 

@@ -24,6 +24,10 @@ import {
   type ExportDialogState,
 } from "@/lib/export-dialog-state";
 import { writeClipboardText, clearClipboardIfMatches } from "@/lib/clipboard-ipc";
+import {
+  CLIPBOARD_CLEAR_DELAY_MS,
+  CLIPBOARD_CLEAR_DELAY_SECONDS,
+} from "@/lib/clipboard-clear-delay";
 import { readTextFile } from "@/lib/text-file-ipc";
 import { previewEnvImport, type EnvCandidate } from "@/lib/env-import-ipc";
 
@@ -36,10 +40,6 @@ const SORT_OPTIONS: SortOption[] = [
   { value: "updated_asc", label: "更新日時が古い順" },
   { value: "name_asc", label: "名前順" },
 ];
-
-// コピー後この時間が経過したら、クリップボードの中身がまだこのパスフレーズの
-// ままであることを確認した上でクリアする(モックアップ6の要件)。
-const CLIPBOARD_CLEAR_DELAY_MS = 30_000;
 
 function sortProfiles<T extends { name: string; updatedAt: string }>(
   profiles: T[],
@@ -166,7 +166,9 @@ function ProfilesRoute() {
       .then(() => {
         if (copyGeneration.current !== generation) return;
         lastCopiedPassphrase.current = value;
-        toast.success("パスフレーズをコピーしました");
+        toast.success(
+          `パスフレーズをコピーしました(${CLIPBOARD_CLEAR_DELAY_SECONDS}秒後に自動クリアを試みます)`
+        );
         clipboardClearTimer.current = setTimeout(() => {
           clipboardClearTimer.current = null;
           trackClipboardOperation(clearClipboardIfMatches(value))

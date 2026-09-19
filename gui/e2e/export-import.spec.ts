@@ -158,6 +158,22 @@ describe("エクスポートモーダル", () => {
     await (await dialog.$("button=キャンセル")).click();
     await returnToMainScreen();
   });
+
+  it("コピーすると、自動クリアまでの秒数が、通知と注意文に表示される", async () => {
+    await completeInitialSetup();
+    await createProfileViaIpc("E2Eエクスポート秒数表示確認");
+
+    const dialog = await openExportDialogFor("E2Eエクスポート秒数表示確認");
+    expect(await dialog.getText()).toContain("コピーの30秒後に、自動クリアを試みます");
+
+    await (await dialog.$("button=コピー")).click();
+    const copiedToast = await $("div*=パスフレーズをコピーしました");
+    await copiedToast.waitForExist({ timeout: 10000 });
+    expect(await copiedToast.getText()).toContain("30秒後に自動クリアを試みます");
+
+    await (await dialog.$("button=キャンセル")).click();
+    await returnToMainScreen();
+  });
 });
 
 describe("エクスポートの実行(ファイルダイアログの差し替え)", () => {
