@@ -222,6 +222,8 @@ afterEach(async () => {
       else await browser.keys("Escape");
       await browser.pause(300);
     }
+    // 保留中の復号済みの内容(Rust側)を、次のテストへ持ち越さない。
+    await browser.tauri.execute(({ core }) => core.invoke("clear_pending_import"));
     const backButton = await $("button=閉じる(メイン画面へ)");
     if (await backButton.isExisting()) await backButton.click();
   } catch {
@@ -1148,6 +1150,8 @@ describe("エクスポートの実行(ファイルダイアログの差し替え
     const reopened = await $('[role="dialog"]');
     await reopened.waitForExist({ timeout: 10000 });
     const reopenedInput = await reopened.$("input");
+    // 開き直した時点で、古い復号がまだ終わっていない(この検証の前提。終わっていたら、ここで落とす)。
+    expect(await reopenedInput.getProperty("readOnly")).toBe(true);
     await browser.waitUntil(async () => !(await reopenedInput.getProperty("readOnly")), {
       timeout: 15000,
       timeoutMsg: "復号が終わらなかった(入力できる状態へ戻らなかった)",
@@ -1274,5 +1278,50 @@ describe("エクスポートの実行(ファイルダイアログの差し替え
     expect(await $('[role="alertdialog"]').isExisting()).toBe(false);
     expect(await commitPendingImportSucceeds()).toBe(false);
     expect(await listProfileNames()).not.toContain(profileName);
+  });
+
+  // 確認画面を開いたまま、背景にあるボタンを押し(ファイルの選択・読み込みを保留し)、決着させても、確認画面の
+  // まま残る(選択・読み込みを待つ間に、画面が変わる場合を再現する)。入口ごとに独立したテストにする。
+  const confirmDialogGuardCases = [
+    { route: "profiles", label: "インポート" },
+    { route: "profiles", label: "envインポート" },
+    { route: "main", label: "インポート" },
+    { route: "main", label: "ファイルから" },
+  ] as const;
+  confirmDialogGuardCases.forEach(({ route, label }, index) => {
+    const screenName = route === "profiles" ? "プロファイル管理画面" : "メイン画面";
+    it(`確認画面が開かれている間は、ファイルの選択・読み込みが終わっても、「${label}」は、その画面を置き換えない(${screenName})`, async () => {
+      await completeInitialSetup();
+      const profileName = `E2E確認中選択待ち確認${index}`;
+      const passphrase = await exportAndDeleteProfile(
+        profileName,
+        path.join(exportDir, `guard-confirm-${index}.smx`)
+      );
+      // 内容は架空の値だけにする。
+      const textPath = path.join(exportDir, `guard-confirm-${index}.env`);
+      fs.writeFileSync(textPath, "API_TOKEN=dummy-token-value-0002\n");
+      if (route === "main") await returnToMainScreen();
+      await openImportConfirmDialog(passphrase);
+
+      await holdOpenDialog();
+      await browser.tauri.execute((_tauri, buttonLabel) => {
+        const button = Array.from(document.querySelectorAll<HTMLButtonElement>("button")).find(
+          (b) => b.textContent?.trim() === buttonLabel
+        );
+        if (!button) throw new Error(`${buttonLabel}のボタンが見つからない`);
+        button.click();
+      }, label);
+      await settleOpenDialog(textPath);
+      await browser.pause(1500);
+      expect(await $('[role="alertdialog"]').isDisplayed()).toBe(true);
+      expect(await $('[role="dialog"]').isExisting()).toBe(false);
+
+      // 確認画面を取り消すと、保留も破棄される。
+      const confirmDialog = await $('[role="alertdialog"]');
+      await (await confirmDialog.$("button=キャンセル")).click();
+      await confirmDialog.waitForExist({ reverse: true, timeout: 10000 });
+      expect(await commitPendingImportSucceeds()).toBe(false);
+      if (route === "profiles") await returnToMainScreen();
+    });
   });
 });

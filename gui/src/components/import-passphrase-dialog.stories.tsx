@@ -204,16 +204,22 @@ export const BusyMovesFocus: Story = {
   play: async () => {
     const input = await screen.findByLabelText(PASSPHRASE_LABEL);
     const ok = screen.getByRole("button", { name: "OK" });
+    const dialog = screen.getByRole("dialog");
+    // 開くときの拡大の動きの影響を受けない、レイアウト上の高さで比べる。
+    const heightBefore = dialog.offsetHeight;
     await expect(screen.getByRole("status")).toBeEmptyDOMElement();
 
     await userEvent.click(ok);
     await waitFor(() => expect(ok).toBeDisabled());
     await expect(input).toHaveFocus();
     await expect(screen.getByRole("status")).toHaveTextContent("復号しています");
+    // 文言が出ても、画面の高さは変わらない(画面は中央寄せのため、高さが変わると、内容が動いて見える)。
+    await expect(dialog.offsetHeight).toBe(heightBefore);
 
     await waitFor(() => expect(ok).toBeEnabled());
     await expect(input).not.toHaveAttribute("readonly");
     await expect(screen.getByRole("status")).toBeEmptyDOMElement();
+    await expect(dialog.offsetHeight).toBe(heightBefore);
   },
 };
 

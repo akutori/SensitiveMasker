@@ -132,16 +132,14 @@ function ProfilesRoute() {
   const importSessionCounter = useRef(0);
   // この画面が破棄されていないか(破棄された後に届いた復号の結果は、見る人が居ない)。
   const mounted = useRef(true);
-  // この画面を離れる(破棄される)と、確認画面を見る人が居なくなる。復号済みの内容(Rust側の保留)が
-  // 残らないよう破棄する。確定を始めていれば、その確定が使うため、破棄しない。復号している最中に離れた
-  // 場合は、結果が届いた時に、isStillOpenがfalseになって破棄される。
+  // この画面を離れる(破棄される)と、復号済みの内容(Rust側の保留)を確認する人が居なくなる。残らないよう
+  // 破棄する(画面の状態でなく、無条件に。保留が無ければ、何も起きない)。確定を始めていれば、その確定が
+  // 使うため、破棄しない。復号している最中に離れた場合は、結果が届いた時に、isStillOpenがfalseになって破棄される。
   useEffect(() => {
     mounted.current = true;
     return () => {
       mounted.current = false;
-      if (dialogRef.current.kind === "importConfirm" && !importConfirmStarted.current) {
-        void appState.clearPendingImport();
-      }
+      if (!importConfirmStarted.current) void appState.clearPendingImport();
     };
   }, []);
   const [importPassphrase, setImportPassphrase] = useState("");
@@ -375,11 +373,10 @@ function ProfilesRoute() {
               toast.warning("ファイルの一部に不正なバイト列があったため、置き換えて読み込みました");
             }
             const candidates = await previewEnvImport(text);
-            // ファイルの読み込み中に開かれたエクスポート画面を置き換えると、書き出し中・書き出し済みの
-            // パスフレーズを失うため、置き換えない。
-            setDialog((current) =>
-              current.kind === "export" ? current : { kind: "envImportSelect", candidates }
-            );
+            // ファイルの読み込み中に別の画面が開かれていたら、置き換えない(書き出し中・書き出し済みの
+            // エクスポート画面ならパスフレーズを、確認待ちのインポート画面なら復号済みの内容を、失うため)。
+            if (dialogRef.current.kind !== "none") return;
+            setDialog({ kind: "envImportSelect", candidates });
           } catch (error) {
             console.error("preview_env_import failed", error);
             toast.error("ファイルを読み込めませんでした");

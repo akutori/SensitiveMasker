@@ -104,16 +104,21 @@ export function ImportPassphraseDialog({
               {revealed ? <EyeOff /> : <Eye />}
             </Button>
           </div>
-          {/* OKと入力が無効になる理由を、見える文言と読み上げの両方で伝える。領域は、復号する前から置いておく
-              (領域ごと後から現れると、読み上げられないことがあるため)。 */}
-          <p role="status" className={busy ? "text-sm text-muted-foreground" : "sr-only"}>
-            {busy ? "復号しています…" : null}
-          </p>
         </div>
 
         {errorMessage && <ValidationErrorBox message={errorMessage} />}
 
-        <DialogFooter>
+        {/* ボタンの行は、どの幅でも横並びにする(縦に積まれる幅では、文言の分だけ、高さが増える)。 */}
+        <DialogFooter className="flex-row justify-end">
+          {/* OKと入力が無効になる理由を、見える文言と読み上げの両方で伝える。領域は、復号する前から置いておく
+              (領域ごと後から現れると、読み上げられないことがあるため)。文言は、ボタンと同じ行の左端に置く
+              (行の高さは、ボタンで決まるため、文言が出ても、画面の高さが変わらない)。 */}
+          <p
+            role="status"
+            className={busy ? "mr-auto self-center text-sm text-muted-foreground" : "sr-only"}
+          >
+            {busy ? "復号しています…" : null}
+          </p>
           <Button
             onClick={onConfirm}
             disabled={busy || passphrase.trim().length === 0}

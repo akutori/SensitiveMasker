@@ -72,16 +72,14 @@ function MainRoute() {
   const importSessionCounter = useRef(0);
   // この画面が破棄されていないか(破棄された後に届いた復号の結果は、見る人が居ない)。
   const mounted = useRef(true);
-  // この画面を離れる(破棄される)と、確認画面を見る人が居なくなる。復号済みの内容(Rust側の保留)が
-  // 残らないよう破棄する。確定を始めていれば、その確定が使うため、破棄しない。復号している最中に離れた
-  // 場合は、結果が届いた時に、isStillOpenがfalseになって破棄される。
+  // この画面を離れる(破棄される)と、復号済みの内容(Rust側の保留)を確認する人が居なくなる。残らないよう
+  // 破棄する(画面の状態でなく、無条件に。保留が無ければ、何も起きない)。確定を始めていれば、その確定が
+  // 使うため、破棄しない。復号している最中に離れた場合は、結果が届いた時に、isStillOpenがfalseになって破棄される。
   useEffect(() => {
     mounted.current = true;
     return () => {
       mounted.current = false;
-      if (dialogRef.current.kind === "importConfirm" && !importConfirmStarted.current) {
-        void appState.clearPendingImport();
-      }
+      if (!importConfirmStarted.current) void appState.clearPendingImport();
     };
   }, []);
 
@@ -194,6 +192,9 @@ function MainRoute() {
             if (hadInvalidUtf8) {
               toast.warning("ファイルの一部に不正なバイト列があったため、置き換えて読み込みました");
             }
+            // ファイルの読み込み中に別の画面が開かれていたら、置き換えない(その画面の内容や、確認待ちの
+            // 復号済みの内容を、失うため)。
+            if (dialogRef.current.kind !== "none") return;
             // 新しい読み込みは、進行中の(古い)「直接マスクして別ファイルに保存」を
             // 無効化する(同じパスの再読み込みでも内容が変わっている可能性があるため)。
             maskAndSaveGeneration.current += 1;

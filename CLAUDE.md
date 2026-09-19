@@ -101,7 +101,7 @@ SensitiveMasker/
     限り、`gui/src/lib/file-dialog.ts`が`window.__e2eFileDialogPaths`の値をダイアログの代わりに返す
     (本番ビルドには含まれない)
   - リリース(`.github/workflows/release.yml`)は、`verify.yml`(型検査・単体テスト・storyのplayテスト・
-    `cargo test --workspace`・配布用フロントエンドへのE2E専用コード混入確認`bun run check:dist`)に通った場合に限り公開する
+    `cargo test --workspace --locked`・配布用フロントエンドへのE2E専用コード混入確認`bun run check:dist`)に通った場合に限り公開する
 - ロジックを伴う実装(機能追加・修正・リファクタリング)では`adversarial-verification` Skillの
   「実装計画 → 実装 → 敵対的検証 → 修正」ループに従う
 
