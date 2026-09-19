@@ -155,13 +155,31 @@ export interface ImportPreviewResult {
   preview: ImportPreviewDto;
 }
 
+// 保留の識別子は、Rust側のu64。JavaScriptの数値として正確に扱える、0以上の安全な整数だけを有効とする。
+function isPendingId(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+// Rustのclear_pending_importは、識別子が無い・nullのとき、全ての保留(他の画面が始めた復号の保留も)を破棄する。
+// undefinedはキーごと落ち、NaN・Infinityはnullに直列化されるため、無効な識別子のままinvokeを呼ぶと、その呼び出しに
+// なってしまう。そのため、確定・破棄は、識別子を検証し、無効なら、invokeを呼ばずに拒否する。
+function assertPendingId(value: unknown): asserts value is number {
+  if (!isPendingId(value)) throw new TypeError(`invalid pending import id: ${String(value)}`);
+}
+
 export async function previewImport(sourcePath: string, passphrase: string): Promise<ImportPreviewResult> {
-  const { pending_id, preview } = await invoke<{ pending_id: number; preview: ImportPreviewDto }>(
+  // 応答の形は、型引数で断定できるだけで、Rust側との取り決めがずれると、識別子が欠ける。識別子の無い保留を
+  // 画面へ渡さないよう、実行時に検証する。
+  const response = await invoke<{ pending_id: unknown; preview: ImportPreviewDto } | null | undefined>(
     "preview_import",
     { sourcePath, passphrase }
   );
-  recordPendingImportIdForE2e(pending_id);
-  return { pendingId: pending_id, preview };
+  const pendingId = response?.pending_id;
+  if (!response || !isPendingId(pendingId)) {
+    throw new Error(`preview_import returned an invalid pending_id: ${String(pendingId)}`);
+  }
+  recordPendingImportIdForE2e(pendingId);
+  return { pendingId, preview: response.preview };
 }
 
 export interface CommitImportResultDto {
@@ -170,6 +188,7 @@ export interface CommitImportResultDto {
 
 // 指定した識別子の保留だけを確定する。その保留が無い(破棄済み・確定済み・保持数の上限で捨てられた)場合は失敗する。
 export async function commitPendingImport(pendingId: number): Promise<CommitImportResultDto> {
+  assertPendingId(pendingId);
   return invoke<CommitImportResultDto>("commit_pending_import", { pendingId });
 }
 
@@ -178,6 +197,7 @@ export async function commitPendingImport(pendingId: number): Promise<CommitImpo
 // 確定しないようにするため。指定した識別子の保留だけを破棄する(他の保留は消さない)。
 // 識別子を省略して全ての保留を消す呼び方(E2Eの後片付け用)は、意図せず他の保留を消さないよう、ここには設けない。
 export async function clearPendingImport(pendingId: number): Promise<void> {
+  assertPendingId(pendingId);
   await invoke("clear_pending_import", { pendingId });
 }
 
