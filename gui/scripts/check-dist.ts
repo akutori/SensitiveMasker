@@ -1,8 +1,10 @@
 // 配布用のフロントエンド(dist)に、E2Eテスト専用のコードが混入していないことを確かめる。
 //
-// E2Eビルド(VITE_E2E_TESTING=true)だけが持つ次の2つは、配布物に含まれると、画面の外から
-// ファイルダイアログの結果を指定したり、認証無しのWebDriver経由でアプリを操作したりする入口になる。
+// E2Eビルド(VITE_E2E_TESTING=true)だけが持つ次の3つは、配布物に含まれると、画面の外から
+// ファイルダイアログの結果を指定したり、インポートの保留の識別子を読んだり、認証無しのWebDriver経由で
+// アプリを操作したりする入口になる。
 // - src/lib/file-dialog.tsの差し替え口(window.__e2eFileDialogPaths)
+// - src/lib/e2e-pending-import.tsの、受け取った保留の識別子の記録口(window.__e2ePendingImportIds)
 // - src/main.tsxが読み込むWebDriverプラグイン(@wdio/tauri-plugin)
 // どちらも、VITE_E2E_TESTINGが"true"のときだけ残る定数分岐の中にあり、通常のビルドでは消える。
 // その分岐が壊れていないことを、ビルドした結果のファイルの中身で確かめる。

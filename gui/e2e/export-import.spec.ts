@@ -5,6 +5,9 @@
 // 指定された値をダイアログの代わりに返す。このファイルは、browser.tauri.executeでその
 // 値を設定してから、エクスポート/インポートを実行する。保存・開くのどちらにも、決着を
 // テストが握るPromiseを指定でき、選択を待つ間の画面や、取り消し・失敗の後の画面を検証するために使う。
+// インポートの保留(Rust側の、復号済みの内容)は、識別子を指定して確定・破棄する。画面の外から確定を直接呼んで
+// 保留が残っていないことを確かめられるよう、E2Eビルドは、アプリが受け取った識別子を、受け取った順に、
+// window.__e2ePendingImportIdsへ残す(gui/src/lib/e2e-pending-import.ts)。
 // バックエンドのexport/import本体のロジック(暗号化・復号・往復・エラー系)は
 // gui/src-tauri/src/export_import.rsの実ファイル・実DBを使ったテストでも検証している。
 
@@ -170,14 +173,43 @@ async function clipboardHolds(expected: string): Promise<boolean> {
   return (result as { outcome: string }).outcome === "cleared";
 }
 
-// 保留中のインポートの確定を、直接呼ぶ。保留中の内容が無ければ失敗する(成功すると、実際に取り込まれる)。
-async function commitPendingImportSucceeds(): Promise<boolean> {
-  return browser.tauri.execute(({ core }) =>
-    core.invoke("commit_pending_import").then(
-      () => true,
-      () => false
-    )
+// 保留中のインポートが無いときの、確定のエラー文言(Rust側のcommit_pending_importと同じ)。
+const NO_PENDING_IMPORT_MESSAGE = "確認待ちのインポートがありません";
+
+// 保留の識別子を指定して、確定を直接呼ぶ。成功なら(実際に取り込まれる)null、失敗ならそのエラー文言を返す。
+async function commitPendingImportError(pendingId: number): Promise<string | null> {
+  return browser.tauri.execute(
+    ({ core }, id) =>
+      core.invoke("commit_pending_import", { pendingId: id }).then(
+        () => null,
+        (error) => String(error)
+      ),
+    pendingId
   );
+}
+
+// 保留の破棄を、直接呼ぶ。識別子を省略すると、全ての保留を破棄する。
+async function clearPendingImportDirectly(pendingId?: number): Promise<void> {
+  await browser.tauri.execute(
+    ({ core }, id) => core.invoke("clear_pending_import", id == null ? {} : { pendingId: id }),
+    pendingId
+  );
+}
+
+// アプリ(E2Eビルド)が、復号の結果として受け取った保留の識別子を、受け取った順に返す。
+async function receivedPendingImportIds(): Promise<number[]> {
+  return browser.tauri.execute(
+    () => (window as unknown as { __e2ePendingImportIds?: number[] }).__e2ePendingImportIds ?? []
+  );
+}
+
+// 直近に受け取った保留の確定を、直接呼ぶ。保留が残っていなければ、NO_PENDING_IMPORT_MESSAGEで失敗する
+// (成功すると、実際に取り込まれる)。復号の結果を受け取っていないと、「保留が残っていない」の確認が、何も
+// 確かめずに通ってしまうため、その場で落とす。
+async function commitLastReceivedPendingImportError(): Promise<string | null> {
+  const ids = await receivedPendingImportIds();
+  if (ids.length === 0) throw new Error("復号の結果を受け取っていない(保留の識別子が無い)");
+  return commitPendingImportError(ids[ids.length - 1]);
 }
 
 async function listProfileNames(): Promise<string[]> {
@@ -232,6 +264,7 @@ afterEach(async () => {
         __e2eFileDialogPaths?: unknown;
         __e2eSaveControl?: { resolve: (path: string | null) => void };
         __e2eOpenControl?: { resolve: (path: string | null) => void };
+        __e2ePendingImportIds?: number[];
       };
       w.__e2eSaveControl?.resolve(null);
       w.__e2eOpenControl?.resolve(null);
@@ -239,6 +272,8 @@ afterEach(async () => {
       w.__e2eSaveControl = undefined;
       w.__e2eOpenControl = undefined;
       w.__e2eFileDialogPaths = undefined;
+      // 次のテストの「直近に受け取った保留の識別子」が、前のテストのものにならないようにする。
+      w.__e2ePendingImportIds = undefined;
     })
   );
   await bestEffort(async () => {
@@ -255,8 +290,8 @@ afterEach(async () => {
     const backButton = await $("button=閉じる(メイン画面へ)");
     if (await backButton.isExisting()) await backButton.click();
   });
-  // 保留中の復号済みの内容(Rust側)を、次のテストへ持ち越さない。画面を離れる後始末が、既に破棄していれば、
-  // 何も起きない。
+  // 保留中の復号済みの内容(Rust側)を、次のテストへ持ち越さない。識別子を指定しない破棄は、全ての保留を消す。
+  // 画面を離れる後始末が、既に破棄していれば、何も起きない。
   await bestEffort(() => browser.tauri.execute(({ core }) => core.invoke("clear_pending_import")));
 });
 
@@ -1044,7 +1079,7 @@ describe("エクスポートの実行(ファイルダイアログの差し替え
     await (await confirmDialog.$("button=キャンセル")).click();
     await confirmDialog.waitForExist({ reverse: true, timeout: 10000 });
     // キャンセルすると、保留中の(復号済みの)内容は破棄され、その後に確定を呼んでも成立しない。
-    expect(await commitPendingImportSucceeds()).toBe(false);
+    expect(await commitLastReceivedPendingImportError()).toBe(NO_PENDING_IMPORT_MESSAGE);
     await returnToMainScreen();
   });
 
@@ -1224,7 +1259,7 @@ describe("エクスポートの実行(ファイルダイアログの差し替え
     // Rust側に残っていない(残っていると、確定を呼ぶだけで取り込まれてしまう)。
     expect(await $('[role="alertdialog"]').isExisting()).toBe(false);
     expect(await reopened.$('[role="alert"]').isExisting()).toBe(false);
-    expect(await commitPendingImportSucceeds()).toBe(false);
+    expect(await commitLastReceivedPendingImportError()).toBe(NO_PENDING_IMPORT_MESSAGE);
     expect(await listProfileNames()).not.toContain(profileName);
 
     await (await reopened.$("button=キャンセル")).click();
@@ -1277,7 +1312,7 @@ describe("エクスポートの実行(ファイルダイアログの差し替え
     await browser.back();
     await (await $("button*=マスク実行")).waitForExist({ timeout: 10000 });
     await browser.pause(1000);
-    expect(await commitPendingImportSucceeds()).toBe(false);
+    expect(await commitLastReceivedPendingImportError()).toBe(NO_PENDING_IMPORT_MESSAGE);
     expect(await listProfileNames()).not.toContain(profileName);
   });
 
@@ -1295,7 +1330,7 @@ describe("エクスポートの実行(ファイルダイアログの差し替え
     await browser.back();
     await $("h1=プロファイル管理").waitForExist({ timeout: 10000 });
     await browser.pause(1000);
-    expect(await commitPendingImportSucceeds()).toBe(false);
+    expect(await commitLastReceivedPendingImportError()).toBe(NO_PENDING_IMPORT_MESSAGE);
     expect(await listProfileNames()).not.toContain(profileName);
     await returnToMainScreen();
   });
@@ -1336,11 +1371,163 @@ describe("エクスポートの実行(ファイルダイアログの差し替え
     });
     await (await $("button*=マスク実行")).waitForExist({ timeout: 10000 });
 
-    // 復号が終わるまで待っても、確認画面は出ず、復号済みの内容も残っていない。
+    // 復号が終わるまで待っても、確認画面は出ず、復号済みの内容も残っていない。この画面を離れた後の復号の結果
+    // (2件目)が、アプリに届いていること(届いていないと、1件目の識別子で確かめてしまう)を、先に確かめる。
     await browser.pause(Math.max(3000, decryptMs * 3));
+    expect(await receivedPendingImportIds()).toHaveLength(2);
     expect(await $('[role="alertdialog"]').isExisting()).toBe(false);
-    expect(await commitPendingImportSucceeds()).toBe(false);
+    expect(await commitLastReceivedPendingImportError()).toBe(NO_PENDING_IMPORT_MESSAGE);
     expect(await listProfileNames()).not.toContain(profileName);
+  });
+
+  it("保留は、識別子ごとに独立している(IPCを直接呼ぶ): 別の識別子の確定・破棄は、他の保留に作用せず、識別子を指定しない破棄は、全ての保留を消す", async () => {
+    await completeInitialSetup();
+    const nameX = "E2E識別子確認X";
+    const nameY = "E2E識別子確認Y";
+    const fileX = path.join(exportDir, "pending-id-x.smx");
+    const fileY = path.join(exportDir, "pending-id-y.smx");
+    const passphraseX = await exportAndDeleteProfile(nameX, fileX);
+    await returnToMainScreen();
+    const passphraseY = await exportAndDeleteProfile(nameY, fileY);
+
+    // 復号は、画面を介さず、IPCで直接行う(戻り値の形と、引数の名前を、実アプリで確かめる)。
+    const previewDirectly = (sourcePath: string, passphrase: string) =>
+      browser.tauri.execute(
+        async ({ core }, p, s) =>
+          (await core.invoke("preview_import", { sourcePath: p, passphrase: s })) as {
+            pending_id: number;
+            preview: { kind: string; name: string };
+          },
+        sourcePath,
+        passphrase
+      );
+    const previewX = await previewDirectly(fileX, passphraseX);
+    const previewY = await previewDirectly(fileY, passphraseY);
+    expect(previewX.preview.kind).toBe("single");
+    expect(previewX.preview.name).toBe(nameX);
+    expect(previewY.preview.name).toBe(nameY);
+    expect(previewX.pending_id).not.toBe(previewY.pending_id);
+
+    // 払い出されていない識別子の確定は失敗し、どちらの保留も消費しない。
+    const unusedId = Math.max(previewX.pending_id, previewY.pending_id) + 1000;
+    expect(await commitPendingImportError(unusedId)).toBe(NO_PENDING_IMPORT_MESSAGE);
+    // Xの識別子だけを破棄すると、Yの保留は残り、Yの識別子で確定すると、Yの内容だけが取り込まれる。
+    await clearPendingImportDirectly(previewX.pending_id);
+    expect(await commitPendingImportError(previewX.pending_id)).toBe(NO_PENDING_IMPORT_MESSAGE);
+    expect(await commitPendingImportError(previewY.pending_id)).toBeNull();
+    const namesAfterCommit = await listProfileNames();
+    expect(namesAfterCommit).toContain(nameY);
+    expect(namesAfterCommit).not.toContain(nameX);
+
+    // 識別子を指定しない破棄は、全ての保留を消す(Xは、まだ取り込まれていないため、もう一度、復号できる)。
+    const againFirst = await previewDirectly(fileX, passphraseX);
+    const againSecond = await previewDirectly(fileX, passphraseX);
+    await clearPendingImportDirectly();
+    expect(await commitPendingImportError(againFirst.pending_id)).toBe(NO_PENDING_IMPORT_MESSAGE);
+    expect(await commitPendingImportError(againSecond.pending_id)).toBe(NO_PENDING_IMPORT_MESSAGE);
+    expect(await listProfileNames()).not.toContain(nameX);
+  });
+
+  it("別の画面で復号が重なり、古い復号の結果が後から届いても、新しい画面の確認画面と確定は、影響を受けない", async () => {
+    await completeInitialSetup();
+    // 古い画面(プロファイル管理画面)が復号するファイルと、新しい画面(メイン画面)が復号するファイル。
+    const oldName = "E2E復号重複確認古い";
+    const newName = "E2E復号重複確認新しい";
+    const oldFile = path.join(exportDir, "overlap-old.smx");
+    const newFile = path.join(exportDir, "overlap-new.smx");
+    const oldPassphrase = await exportAndDeleteProfile(oldName, oldFile);
+    await returnToMainScreen();
+    const newPassphrase = await exportAndDeleteProfile(newName, newFile);
+
+    // 古い画面: 前後に空白が混ざったパスフレーズは、入力どおりの復号に失敗してから、空白を除いて再試行するため、
+    // 復号に、通常の約2倍の時間がかかる(後から始める新しい画面の復号より、後に終わる)。
+    await setE2eFileDialogPaths({ open: oldFile });
+    await (await $("button=インポート")).click();
+    const oldDialog = await $('[role="dialog"]');
+    await oldDialog.waitForExist({ timeout: 10000 });
+    await (await oldDialog.$("input")).setValue(`  ${oldPassphrase}  `);
+    // 新しい画面が開くファイルを、差し替える(古い画面は、既に開いている)。
+    await setE2eFileDialogPaths({ open: newFile });
+
+    // 古い復号を始めた同じJSタスクの中で、古い画面を離れ、新しい画面で復号を始め、その確認画面が開くまで進める
+    // (WebDriverの往復を挟むと、新しい復号を始めるのが遅れ、古い復号の方が先に終わりうる)。
+    const newScreen = await browser.tauri.execute(async (_tauri, passphrase) => {
+      const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+      const openDialogs = () =>
+        Array.from(document.querySelectorAll<HTMLElement>('[role="dialog"][data-state="open"]'));
+      const buttonNamed = (root: ParentNode, label: string, exact = true) =>
+        Array.from(root.querySelectorAll<HTMLButtonElement>("button")).find((b) =>
+          exact ? b.textContent?.trim() === label : b.textContent?.includes(label)
+        );
+      const waitUntil = async (condition: () => boolean, what: string, timeoutMs = 3000) => {
+        for (let waited = 0; waited < timeoutMs && !condition(); waited += 10) await sleep(10);
+        if (!condition()) throw new Error(`${what}が起きなかった`);
+      };
+
+      const oldOk = openDialogs()[0] && buttonNamed(openDialogs()[0], "OK");
+      if (!oldOk) throw new Error("古い画面のOKのボタンが見つからない");
+      oldOk.click();
+      window.history.back();
+      await waitUntil(
+        () => openDialogs().length === 0 && !!buttonNamed(document.body, "マスク実行", false),
+        "古い画面を離れて、メイン画面へ移ること"
+      );
+
+      const importButton = buttonNamed(document.body, "インポート");
+      if (!importButton) throw new Error("インポートのボタンが見つからない");
+      importButton.click();
+      await waitUntil(() => openDialogs().length === 1, "新しい画面のパスフレーズ入力画面が開くこと");
+      const input = openDialogs()[0].querySelector<HTMLInputElement>("input");
+      if (!input) throw new Error("入力欄が見つからない");
+      // Reactの制御された入力欄へ、値を入れる。
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set?.call(input, passphrase);
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      await waitUntil(() => {
+        const ok = buttonNamed(openDialogs()[0], "OK");
+        return !!ok && !ok.disabled;
+      }, "OKが押せる状態になること");
+      buttonNamed(openDialogs()[0], "OK")?.click();
+
+      const confirmSelector = '[role="alertdialog"][data-state="open"]';
+      await waitUntil(() => document.querySelector(confirmSelector) !== null, "確認画面が開くこと", 15000);
+      return {
+        confirmText: document.querySelector(confirmSelector)?.textContent ?? "",
+        receivedIds:
+          (window as unknown as { __e2ePendingImportIds?: number[] }).__e2ePendingImportIds ?? [],
+      };
+    }, newPassphrase);
+    // この検証の前提: 新しい画面の確認画面が出た時点で、古い復号の結果は、まだ届いていない(受け取った識別子は、
+    // 新しい画面の1件だけ)。届いていたら、ここで落とす(古い結果が、後から届く場面を、再現できていない)。
+    expect(newScreen.receivedIds).toHaveLength(1);
+    expect(newScreen.confirmText).toContain(newName);
+
+    // 古い復号の結果が、離れた画面へ、後から届く。
+    await browser.waitUntil(async () => (await receivedPendingImportIds()).length === 2, {
+      timeout: 20000,
+      timeoutMsg: "古い復号の結果が届かなかった",
+    });
+    const [newId, oldId] = await receivedPendingImportIds();
+    expect(newId).not.toBe(oldId);
+    // 古い画面の後始末(届いた結果の保留だけの破棄)が終わるまで待つ。
+    await browser.pause(1500);
+
+    // 新しい画面の確認画面は、影響を受けず、開いたまま、新しい画面のファイルの内容を示している。
+    const confirmDialog = await $('[role="alertdialog"]');
+    expect(await confirmDialog.isDisplayed()).toBe(true);
+    const confirmText = await confirmDialog.getText();
+    expect(confirmText).toContain(newName);
+    expect(confirmText).not.toContain(oldName);
+
+    // 確定すると、確認画面に出ていた、新しい画面のファイルの内容だけが取り込まれる。
+    await (await confirmDialog.$("button=インポート実行")).click();
+    await confirmDialog.waitForExist({ reverse: true, timeout: 10000 });
+    await browser.waitUntil(async () => (await listProfileNames()).includes(newName), {
+      timeout: 10000,
+      timeoutMsg: "新しい画面のファイルの内容が取り込まれなかった",
+    });
+    // 古い復号の結果の保留は、破棄されている(確定を呼んでも、取り込まれない)。
+    expect(await commitPendingImportError(oldId)).toBe(NO_PENDING_IMPORT_MESSAGE);
+    expect(await listProfileNames()).not.toContain(oldName);
   });
 
   // 確認画面を開いたまま、背景にあるボタンを押し(ファイルの選択・読み込みを保留し)、決着させても、確認画面の
@@ -1407,7 +1594,7 @@ describe("エクスポートの実行(ファイルダイアログの差し替え
       const confirmDialog = await $('[role="alertdialog"]');
       await (await confirmDialog.$("button=キャンセル")).click();
       await confirmDialog.waitForExist({ reverse: true, timeout: 10000 });
-      expect(await commitPendingImportSucceeds()).toBe(false);
+      expect(await commitLastReceivedPendingImportError()).toBe(NO_PENDING_IMPORT_MESSAGE);
       if (route === "profiles") await returnToMainScreen();
     });
   });

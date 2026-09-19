@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { RuleListItem } from "@/components/rule-edit-screen";
+import { recordPendingImportIdForE2e } from "./e2e-pending-import";
 import { fromRuleDto, toRuleDto, type RuleProfileDto } from "./masking-ipc";
 
 export interface ProfileSummaryDto {
@@ -159,6 +160,7 @@ export async function previewImport(sourcePath: string, passphrase: string): Pro
     "preview_import",
     { sourcePath, passphrase }
   );
+  recordPendingImportIdForE2e(pending_id);
   return { pendingId: pending_id, preview };
 }
 

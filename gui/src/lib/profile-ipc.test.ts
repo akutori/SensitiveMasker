@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const tauriCore = vi.hoisted(() => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => tauriCore);
@@ -55,5 +55,54 @@ describe("インポートの保留のIPC", () => {
     await clearPendingImport(12);
 
     expect(tauriCore.invoke).toHaveBeenCalledWith("clear_pending_import", { pendingId: 12 });
+  });
+});
+
+// E2Eビルド(VITE_E2E_TESTING)に限り、previewImportが受け取った識別子を、E2Eテストが読める場所へ残す。
+describe("インポートの保留の識別子の、E2E用の記録", () => {
+  beforeEach(() => {
+    tauriCore.invoke.mockReset();
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.unstubAllGlobals();
+  });
+
+  function inBuild(env: string | undefined) {
+    const fakeWindow: { __e2ePendingImportIds?: number[] } = {};
+    vi.stubGlobal("window", fakeWindow);
+    if (env === undefined) vi.stubEnv("VITE_E2E_TESTING", undefined);
+    else vi.stubEnv("VITE_E2E_TESTING", env);
+    return fakeWindow;
+  }
+
+  it("E2Eビルドでは、previewImportが受け取った識別子を、受け取った順に残す", async () => {
+    const fakeWindow = inBuild("true");
+    tauriCore.invoke.mockResolvedValueOnce({ pending_id: 3, preview: DUMMY_PREVIEW });
+    tauriCore.invoke.mockResolvedValueOnce({ pending_id: 4, preview: DUMMY_PREVIEW });
+
+    await previewImport("C:/dummy/a.smx", "dummy-passphrase-0001");
+    await previewImport("C:/dummy/b.smx", "dummy-passphrase-0002");
+
+    expect(fakeWindow.__e2ePendingImportIds).toEqual([3, 4]);
+  });
+
+  it("E2Eビルドでも、previewImportが失敗したときは、識別子を残さない", async () => {
+    const fakeWindow = inBuild("true");
+    tauriCore.invoke.mockRejectedValue({ kind: "failed", message: "dummy failure" });
+
+    await expect(previewImport("C:/dummy/a.smx", "dummy-passphrase-0001")).rejects.toBeDefined();
+
+    expect(fakeWindow.__e2ePendingImportIds).toBeUndefined();
+  });
+
+  it("E2Eビルドでなければ、previewImportは、識別子を、ページから読める場所へ残さない", async () => {
+    const fakeWindow = inBuild(undefined);
+    tauriCore.invoke.mockResolvedValue({ pending_id: 3, preview: DUMMY_PREVIEW });
+
+    await previewImport("C:/dummy/a.smx", "dummy-passphrase-0001");
+
+    expect(fakeWindow.__e2ePendingImportIds).toBeUndefined();
   });
 });
