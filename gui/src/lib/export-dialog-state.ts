@@ -36,8 +36,18 @@ export function regeneratePassphrase(
   return canRegenerate(state) ? { ...state, passphrase } : state;
 }
 
-export function beginExport(state: ExportDialogState): ExportDialogState {
-  return state.phase === "editing" ? { ...state, phase: "exporting" } : state;
+// 実行を押した時点の画面(識別子とパスフレーズ)と、今の状態が一致するときだけ実行中にする。
+// 食い違ったまま書き出すと、画面に出ているものと違うパスフレーズでファイルができてしまう。
+export function beginExport(
+  state: ExportDialogState,
+  sessionId: number,
+  passphrase: string
+): ExportDialogState {
+  return state.phase === "editing" &&
+    state.sessionId === sessionId &&
+    state.passphrase === passphrase
+    ? { ...state, phase: "exporting" }
+    : state;
 }
 
 export function completeExport(state: ExportDialogState, sessionId: number): ExportDialogState {

@@ -84,6 +84,72 @@ async function settleSaveDialog(outcome: { path: string | null } | { error: stri
   }, outcome);
 }
 
+// 開くダイアログの結果を、settleOpenDialogが呼ばれるまで保留する。
+async function holdOpenDialog() {
+  await browser.tauri.execute(() => {
+    const w = window as unknown as {
+      __e2eFileDialogPaths?: { open?: Promise<string | null> };
+      __e2eOpenControl?: { resolve: (path: string | null) => void };
+    };
+    w.__e2eFileDialogPaths = {
+      open: new Promise<string | null>((resolve) => {
+        w.__e2eOpenControl = { resolve };
+      }),
+    };
+  });
+}
+
+// 保留した開くダイアログを、選んだパス(path)または取り消し(null)で決着させる。
+async function settleOpenDialog(path: string | null) {
+  await browser.tauri.execute((_tauri, p) => {
+    (
+      window as unknown as { __e2eOpenControl?: { resolve: (path: string | null) => void } }
+    ).__e2eOpenControl?.resolve(p);
+  }, path);
+}
+
+// クリップボードが期待した値と一致していれば、クリアして真を返す。WebViewからクリップボードを
+// 読めないため、比較とクリアをRust側で行うコマンドの結果で確かめる。
+async function clipboardHolds(expected: string): Promise<boolean> {
+  const result = await browser.tauri.execute(
+    ({ core }, text) => core.invoke("clear_clipboard_if_matches", { expected: text }),
+    expected
+  );
+  return (result as { outcome: string }).outcome === "cleared";
+}
+
+async function focusIsInsideDialog(): Promise<boolean> {
+  return browser.tauri.execute(() => !!document.activeElement?.closest('[role="dialog"]'));
+}
+
+// 失敗したテストが残した状態(保留中のダイアログ、開いたままの画面)を片付け、後続のテストへ
+// 連鎖させない。成功したテストでは何も起きない。片付けそのものの失敗は、テストの失敗にしない。
+afterEach(async () => {
+  try {
+    await browser.tauri.execute(() => {
+      const w = window as unknown as {
+        __e2eFileDialogPaths?: unknown;
+        __e2eSaveControl?: { resolve: (path: string | null) => void };
+        __e2eOpenControl?: { resolve: (path: string | null) => void };
+      };
+      w.__e2eSaveControl?.resolve(null);
+      w.__e2eOpenControl?.resolve(null);
+      w.__e2eFileDialogPaths = undefined;
+    });
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (!(await $('[role="dialog"], [role="alertdialog"]').isExisting())) break;
+      const closeButton = await $('[role="dialog"] button=閉じる');
+      if (await closeButton.isExisting()) await closeButton.click();
+      else await browser.keys("Escape");
+      await browser.pause(300);
+    }
+    const backButton = await $("button=閉じる(メイン画面へ)");
+    if (await backButton.isExisting()) await backButton.click();
+  } catch {
+    // 片付けは最善を尽くすだけで、失敗しても元のテストの結果を覆い隠さない。
+  }
+});
+
 async function openProfileManagement() {
   const listButton = await $("button=プロファイル一覧");
   await listButton.waitForExist({ timeout: 10000 });
@@ -164,6 +230,7 @@ describe("エクスポートモーダル", () => {
     await createProfileViaIpc("E2Eエクスポート秒数表示確認");
 
     const dialog = await openExportDialogFor("E2Eエクスポート秒数表示確認");
+    expect(await dialog.getText()).toContain("E2Eエクスポート秒数表示確認");
     expect(await dialog.getText()).toContain("コピーの30秒後に、自動クリアを試みます");
 
     await (await dialog.$("button=コピー")).click();
@@ -267,6 +334,54 @@ describe("エクスポートの実行(ファイルダイアログの差し替え
     await returnToMainScreen();
   });
 
+  it("コピーしたパスフレーズは、編集中も、再生成の後も、書き出しの後も、画面に表示されているものと一致する", async () => {
+    await completeInitialSetup();
+    const profileName = "E2Eエクスポートコピー値確認";
+    await createProfileViaIpc(profileName);
+    await setE2eFileDialogPaths({ save: path.join(exportDir, "copy-value.smx") });
+
+    const dialog = await openExportDialogFor(profileName);
+    const passphraseInput = await dialog.$("input[readonly]");
+    const copyButton = await dialog.$("button=コピー");
+
+    const initial = await passphraseInput.getValue();
+    await copyButton.click();
+    await browser.waitUntil(() => clipboardHolds(initial), {
+      timeout: 10000,
+      timeoutMsg: "編集中にコピーした値が、画面のパスフレーズと一致しない",
+    });
+
+    // 再生成すると、新しいパスフレーズがコピーされる(古い値ではない)。
+    const regenerateButton = await dialog.$("button=再生成");
+    await regenerateButton.waitForEnabled({ timeout: 10000 });
+    await regenerateButton.click();
+    await browser.waitUntil(async () => (await passphraseInput.getValue()) !== initial, {
+      timeout: 10000,
+      timeoutMsg: "再生成してもパスフレーズが変わらなかった",
+    });
+    const regenerated = await passphraseInput.getValue();
+    await copyButton.waitForEnabled({ timeout: 10000 });
+    await copyButton.click();
+    await browser.waitUntil(() => clipboardHolds(regenerated), {
+      timeout: 10000,
+      timeoutMsg: "再生成の後にコピーした値が、画面のパスフレーズと一致しない",
+    });
+
+    // 書き出しの後も、同じパスフレーズがコピーされる(相手へ渡すための、この機能の主目的)。
+    await (await dialog.$("button=エクスポート")).click();
+    await (await dialog.$('[role="status"]')).waitForExist({ timeout: 10000 });
+    await copyButton.waitForEnabled({ timeout: 10000 });
+    await copyButton.click();
+    await browser.waitUntil(() => clipboardHolds(regenerated), {
+      timeout: 10000,
+      timeoutMsg: "書き出しの後にコピーした値が、画面のパスフレーズと一致しない",
+    });
+
+    await (await dialog.$("button=閉じる")).click();
+    await dialog.waitForExist({ reverse: true, timeout: 10000 });
+    await returnToMainScreen();
+  });
+
   it("保存先の選択を取り消すと、編集中に戻り、続けて書き出せる", async () => {
     await completeInitialSetup();
     const profileName = "E2Eエクスポート取消確認";
@@ -344,7 +459,7 @@ describe("エクスポートの実行(ファイルダイアログの差し替え
     await returnToMainScreen();
   });
 
-  it("書き出し中は、Escapeを押しても閉じない", async () => {
+  it("書き出し中は、Escapeを押しても閉じず、Tabを押してもフォーカスが画面の外へ出ない", async () => {
     await completeInitialSetup();
     const profileName = "E2Eエクスポート実行中確認";
     await createProfileViaIpc(profileName);
@@ -361,6 +476,12 @@ describe("エクスポートの実行(ファイルダイアログの差し替え
     await exportButton.click();
     await exportButton.waitForEnabled({ reverse: true, timeout: 10000 });
 
+    // 押したボタンが無効になっても、フォーカスは画面の内側にあり、Tabを押しても背景の画面へ出ない
+    // (出られると、書き出し中に背景の操作をして、パスフレーズを失いかねない)。
+    expect(await focusIsInsideDialog()).toBe(true);
+    await browser.keys(["Tab", "Tab", "Tab"]);
+    expect(await focusIsInsideDialog()).toBe(true);
+
     await browser.keys("Escape");
     await browser.pause(500);
     expect(await dialog.isDisplayed()).toBe(true);
@@ -372,6 +493,39 @@ describe("エクスポートの実行(ファイルダイアログの差し替え
 
     await (await dialog.$("button=閉じる")).click();
     await dialog.waitForExist({ reverse: true, timeout: 10000 });
+    await returnToMainScreen();
+  });
+
+  it("envインポートのファイルの選択・読み込みを待つ間に開かれたエクスポート画面を、置き換えない", async () => {
+    await completeInitialSetup();
+    const profileName = "E2E環境変数取込中確認";
+    await createProfileViaIpc(profileName);
+    // 内容は架空の値だけにする。
+    const envPath = path.join(exportDir, "sample.env");
+    fs.writeFileSync(envPath, "API_TOKEN=dummy-token-value-0001\n");
+    await openProfileManagement();
+
+    // 対照: エクスポート画面を開かなければ、読み込みが終わった時点で、取り込み対象の選択画面が出る。
+    await holdOpenDialog();
+    await (await $("button=envインポート")).click();
+    await settleOpenDialog(envPath);
+    const selectDialog = await $('[role="dialog"]');
+    await selectDialog.waitForExist({ timeout: 10000 });
+    expect(await selectDialog.getText()).toContain("取り込み対象を選択");
+    await (await selectDialog.$("button=キャンセル")).click();
+    await selectDialog.waitForExist({ reverse: true, timeout: 10000 });
+
+    // ファイルの選択を待つ間にエクスポート画面を開くと、読み込みが終わっても、その画面のまま残る。
+    await holdOpenDialog();
+    await (await $("button=envインポート")).click();
+    const exportDialog = await openExportDialogFromRow(profileName);
+    await settleOpenDialog(envPath);
+    await browser.pause(1500);
+    expect(await exportDialog.isDisplayed()).toBe(true);
+    expect(await exportDialog.getText()).toContain("エクスポート: " + profileName);
+
+    await (await exportDialog.$("button=キャンセル")).click();
+    await exportDialog.waitForExist({ reverse: true, timeout: 10000 });
     await returnToMainScreen();
   });
 

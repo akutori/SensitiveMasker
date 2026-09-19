@@ -54,16 +54,24 @@ describe("regeneratePassphrase", () => {
 });
 
 describe("beginExport", () => {
-  it("編集中なら実行中になる(パスフレーズは保たれる)", () => {
-    expect(beginExport(editing())).toEqual(exporting());
+  it("編集中で、識別子とパスフレーズが一致すれば、実行中になる", () => {
+    expect(beginExport(editing(2), 2, PASSPHRASE)).toEqual(exporting(2));
+  });
+
+  it("識別子が異なれば変わらない(別の画面の状態を実行中にしない)", () => {
+    expect(beginExport(editing(2), 1, PASSPHRASE)).toEqual(editing(2));
+  });
+
+  it("パスフレーズが異なれば変わらない(画面に出ているものと違うパスフレーズで書き出させない)", () => {
+    expect(beginExport(editing(2), 2, NEXT_PASSPHRASE)).toEqual(editing(2));
   });
 
   it("実行中は変わらない(二重実行を防ぐ)", () => {
-    expect(beginExport(exporting())).toEqual(exporting());
+    expect(beginExport(exporting(), 1, PASSPHRASE)).toEqual(exporting());
   });
 
   it("成功後は変わらない(書き出し済みのパスフレーズで再実行させない)", () => {
-    expect(beginExport(exported())).toEqual(exported());
+    expect(beginExport(exported(), 1, PASSPHRASE)).toEqual(exported());
   });
 });
 

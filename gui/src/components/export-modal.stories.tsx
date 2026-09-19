@@ -60,8 +60,8 @@ function DemoTrigger(props: { target: string; label: string; openByDefault?: boo
         }}
         onRegenerate={() => setSession((current) => regeneratePassphrase(current, randomDemoPassphrase()))}
         onExport={() => {
-          const { sessionId } = session;
-          setSession(beginExport);
+          const { sessionId, passphrase } = session;
+          setSession((current) => beginExport(current, sessionId, passphrase));
           window.setTimeout(() => setSession((current) => completeExport(current, sessionId)), 200);
         }}
       />
@@ -246,7 +246,14 @@ export const ExportFlow: Story = {
     await userEvent.click(await screen.findByRole("button", { name: "パスフレーズを表示" }));
     await expect(input).toHaveAttribute("type", "text");
 
+    // 押したボタンが無効になっても、フォーカスは画面の外へ出ず、入力欄へ移る
+    // (キーボード操作が背景の画面へ漏れないようにするため)。
+    await expect(screen.getByRole("button", { name: "パスフレーズを隠す" })).toHaveAttribute(
+      "aria-controls",
+      input.id
+    );
     await userEvent.click(await screen.findByRole("button", { name: "エクスポート" }));
+    await waitFor(() => expect(input).toHaveFocus());
 
     await expect(await screen.findByRole("status")).toHaveTextContent("二度と表示できません");
     await expect(input).toHaveAttribute("type", "password");

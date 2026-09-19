@@ -131,6 +131,7 @@ cargo test --workspace
 cd gui && bunx tsc --noEmit
 
 # フロントエンドのテスト(純関数の単体テストとStorybookのplayテスト。それぞれ単独でも実行できる)
+# playテストはPlaywrightのChromiumを使う。未導入なら`bunx playwright install chromium`が必要
 cd gui && bun run test
 cd gui && bun run test:unit
 cd gui && bun run test:stories

@@ -1,4 +1,4 @@
-import { useId, useLayoutEffect, useState } from "react";
+import { useId, useLayoutEffect, useRef, useState } from "react";
 import { CircleCheck, Eye, EyeOff } from "lucide-react";
 import {
   Dialog,
@@ -46,9 +46,16 @@ export function ExportModal({
   onExport,
 }: ExportModalProps) {
   const inputId = useId();
+  const passphraseInputRef = useRef<HTMLInputElement>(null);
   const [revealed, setRevealed] = useState(false);
   const exporting = status === "exporting";
   const exported = status === "exported";
+
+  // 実行中は、押したボタンが無効になってフォーカスを失い、フォーカストラップが効かなくなる
+  // (Tabで背景の画面へ出られる)ため、フォーカスを入力欄へ移しておく。
+  useLayoutEffect(() => {
+    if (exporting) passphraseInputRef.current?.focus();
+  }, [exporting]);
 
   // Escapeと背景を押す操作は、操作の意図を確かめずに閉じてしまう。編集中(まだ何も書き出して
   // いない)以外は、パスフレーズを失うため受け付けない。
@@ -86,6 +93,7 @@ export function ExportModal({
           <div className="flex gap-2">
             <Input
               id={inputId}
+              ref={passphraseInputRef}
               type={revealed ? "text" : "password"}
               value={passphrase}
               readOnly
@@ -97,6 +105,7 @@ export function ExportModal({
               size="icon"
               onClick={() => setRevealed((v) => !v)}
               disabled={exporting}
+              aria-controls={inputId}
               aria-label={revealed ? "パスフレーズを隠す" : "パスフレーズを表示"}
             >
               {revealed ? <EyeOff /> : <Eye />}

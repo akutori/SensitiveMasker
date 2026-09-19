@@ -108,6 +108,39 @@ export const OpenByDefault: Story = {
   },
 };
 
+// 手入力の途中で「表示」をマウスで押した後も、入力欄にフォーカスとキャレット位置が戻り、続けて入力できる
+// (ボタンにフォーカスが残ると、続けて打った文字が入力されない)。キーボードで押したときは、
+// 繰り返し切り替えられるよう、フォーカスをボタンに残す。
+export const RevealKeepsTyping: Story = {
+  args: {
+    open: false,
+    onOpenChange: () => {},
+    fileName: FILE_NAME,
+    passphrase: "",
+    onPassphraseChange: () => {},
+    onConfirm: () => {},
+  },
+  render: () => <DemoTrigger />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await userEvent.click(await canvas.findByRole("button", { name: "インポート" }));
+    const input = await screen.findByLabelText(PASSPHRASE_LABEL);
+    await userEvent.type(input, "ab");
+
+    await userEvent.click(screen.getByRole("button", { name: "パスフレーズを表示" }));
+    await expect(input).toHaveAttribute("type", "text");
+    await expect(input).toHaveFocus();
+    await userEvent.keyboard("cd");
+    await expect(input).toHaveValue("abcd");
+
+    const hideButton = screen.getByRole("button", { name: "パスフレーズを隠す" });
+    hideButton.focus();
+    await userEvent.keyboard("{Enter}");
+    await expect(input).toHaveAttribute("type", "password");
+    await expect(screen.getByRole("button", { name: "パスフレーズを表示" })).toHaveFocus();
+  },
+};
+
 // 開き直すたびに、表示していても伏せ字から始まる(前回の表示状態を引き継がない)。
 export const RevealResetsWhenReopened: Story = {
   args: {

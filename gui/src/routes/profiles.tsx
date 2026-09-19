@@ -119,8 +119,8 @@ function ProfilesRoute() {
   const copyGeneration = useRef(0);
   // コピー/クリアのIPC応答待ちの件数。1件以上ある間はコピー・再生成を受け付けない。
   // 応答待ちの間に他方を押すと世代カウンタが進み、後から解決した側の.then()が世代不一致で
-  // 早期returnして自動クリアの設置が行われなくなるため。件数で数えるのは、30秒タイマー
-  // 発火のクリアが他の操作と重なっても、最後の1件が終わるまで受け付けないままにするため。
+  // 早期returnして自動クリアの設置が行われなくなるため。件数で数えるのは、自動クリアの
+  // タイマー発火によるクリアが他の操作と重なっても、最後の1件が終わるまで受け付けないままにするため。
   // ハンドラが再描画を待たずに同期的に判定できるよう、件数はrefを正とし、ボタンの無効化に
   // 使うstateはその写しとする。
   const clipboardOperationCount = useRef(0);
@@ -156,7 +156,7 @@ function ProfilesRoute() {
   // という最も一般的な操作フローで失敗するため使わない。
   //
   // copyGenerationは「この呼び出しが今なお最新の操作か」の判定に一本化して使う
-  // (書き込み完了時の判定だけでなく、30秒後のクリア結果が返ってきた時点でも同じ
+  // (書き込み完了時の判定だけでなく、自動クリアの結果が返ってきた時点でも同じ
   // 判定に使う)。既に次のコピー/再生成が発生していれば、古い呼び出しの結果は
   // (成功・失敗を問わず)警告や状態更新の対象にしない。
   const copyPassphraseWithAutoClear = (value: string) => {
@@ -220,7 +220,7 @@ function ProfilesRoute() {
     const { profileId } = dialog;
     // 書き出したファイルを復号できるのは、実行を押した時点のパスフレーズだけである。
     const { sessionId, passphrase: exportedPassphrase } = dialog.session;
-    updateExportSession(beginExport);
+    updateExportSession((session) => beginExport(session, sessionId, exportedPassphrase));
     try {
       // プロファイル名を既定ファイル名に使うと、暗号文の外側(ファイル名・最近使った
       // ファイルの履歴)に平文メタデータとして残ってしまうため、汎用名にする。
@@ -456,10 +456,11 @@ function ProfilesRoute() {
 
       <ExportModal
         open={dialog.kind === "export"}
-        // 閉じるとパスフレーズは画面の状態ごと破棄される(画面録画・共有のアーカイブや
-        // メモリダンプからの事後的な読み取りを避けるため)。クリップボードの自動クリアは
-        // 画面を閉じても継続する(コピーしたパスフレーズを他所に控える目的で閉じた場合も
-        // クリアされるべきため)。実行中・成功後に閉じる操作は、ExportModalが受け付けない。
+        // 閉じるとパスフレーズは画面の状態ごと手放す(以後、この画面から参照できなくなる。JSの
+        // 文字列はメモリ上で消去できないため、消えるのは参照だけである)。クリップボードの
+        // 自動クリアは画面を閉じても継続する(コピーしたパスフレーズを他所に控える目的で
+        // 閉じた場合も、クリアされるべきため)。実行中・成功後に閉じる操作は、ExportModalが
+        // 受け付けない。
         onOpenChange={(open) => !open && closeDialog()}
         target={dialog.kind === "export" ? dialog.target : ""}
         passphrase={dialog.kind === "export" ? dialog.session.passphrase : ""}
@@ -545,8 +546,9 @@ function ProfilesRoute() {
           } finally {
             // 成否に関わらずここで確認は終わる。確認済みのpreviewはcommit呼び出しの
             // 成否に関わらずサーバー側で消費済みのため、このダイアログを開いたままに
-            // しても同じ内容で再試行はできない。
-            closeDialog();
+            // しても同じ内容で再試行はできない。commitの完了を待つ間に開かれた別の画面
+            // (エクスポートなど)は、閉じない。
+            setDialog((current) => (current.kind === "importConfirm" ? { kind: "none" } : current));
           }
         }}
       />
