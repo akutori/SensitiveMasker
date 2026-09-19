@@ -4,9 +4,11 @@ use std::sync::{Mutex, MutexGuard};
 
 use masking_core::{Mode, PatternType, Rule, RuleProfile};
 use profile_store::{decrypt_import_payload, AllImportEntry, AppPaths, ImportPreview, SecretString};
+use tauri::webview::PageLoadEvent;
 use tauri::{Emitter, Manager};
 
 use crate::profiles::{resolve_paths, with_store, ProfileStoreState};
+use crate::tray::MAIN_WINDOW_LABEL;
 
 /// この上限を超えるファイルは復号を試みる前に拒否する(巨大ファイル指定による
 /// メモリ枯渇・ハングを避けるため)。実際の.smxは数KB〜数百KB程度で足りる。
@@ -71,7 +73,8 @@ fn validate_import_source_path(source_path: &str) -> Result<PathBuf, String> {
 const MAX_PENDING_IMPORTS: usize = 4;
 
 /// preview_importが復号した内容(ルール本体を含む)をIPCで往復させないための保持先。
-/// commit_pending_import・clear_pending_importが呼ばれるまでの間だけメモリ上に置く。
+/// commit_pending_import・clear_pending_importが呼ばれるか、メインウィンドウのページの読み込みが始まる
+/// (discard_pending_imports_on_page_load)までの間だけメモリ上に置く。
 ///
 /// 復号のたびに識別子を払い出して保持し、確定・破棄は、その識別子で、その保留だけを指す。
 /// 画面ごとに復号は独立して走るため、復号が重なっても、互いの保留を取り違えたり消したりしない。
@@ -120,6 +123,26 @@ impl PendingImportState {
             Some(id) => pending.entries.retain(|(entry_id, _)| *entry_id != id),
             None => pending.entries.clear(),
         }
+    }
+}
+
+/// メインウィンドウのページの読み込みが始まったときに、保留している全ての内容を破棄する。
+///
+/// ページを読み込み直す(初回の読み込み・再読み込み)と、その画面のJavaScriptの状態が失われ、保留の識別子を
+/// 持つ画面が無くなる。確認画面を開いたまま再読み込みされた場合などに、確定も破棄もされなくなった保留は、
+/// そのままでは、復号済みの平文(ルールのパターン・固定値)としてRust側に残り続けるため。ページ内の画面遷移
+/// (履歴による切り替え)は、ページの読み込みを起こさないので、対象にならない。
+///
+/// 読み込みの完了(Finished)では、何もしない。on_page_loadはBuilder全体に登録され、全てのウェブビューへ
+/// 適用されるため、メインウィンドウ以外の読み込みでも、何もしない(メインウィンドウの確認画面の保留を、
+/// 消さないため)。
+pub(crate) fn discard_pending_imports_on_page_load(
+    pending: &PendingImportState,
+    webview_label: &str,
+    event: PageLoadEvent,
+) {
+    if webview_label == MAIN_WINDOW_LABEL && event == PageLoadEvent::Started {
+        pending.discard(None);
     }
 }
 
@@ -989,6 +1012,67 @@ mod tests {
             );
         }
         assert!(pending.take(after_clear).is_some());
+    }
+
+    /// 上限いっぱいまで、保留を挿入する。挿入した識別子を返す。
+    fn fill_pending(pending: &PendingImportState) -> Vec<u64> {
+        let sample = sample_import_preview("元プロファイル");
+        (0..MAX_PENDING_IMPORTS).map(|_| pending.insert(sample.clone())).collect()
+    }
+
+    // メインウィンドウのページの読み込みが始まったとき(初回の読み込み・再読み込み)は、保留の識別子を持つ
+    // 画面が無くなるため、全ての保留を破棄する。
+    #[test]
+    fn the_start_of_a_main_window_page_load_discards_every_pending_import() {
+        let pending = PendingImportState::default();
+        let ids = fill_pending(&pending);
+
+        discard_pending_imports_on_page_load(&pending, MAIN_WINDOW_LABEL, PageLoadEvent::Started);
+
+        assert_eq!(pending_count(&pending), 0);
+        for id in ids {
+            assert!(pending.take(id).is_none(), "ページの読み込みの開始の後に、保留(識別子{id})が残っている");
+        }
+    }
+
+    // 読み込みの完了では、破棄しない(読み込みの間に届いた保留を、完了の通知で消さない)。
+    #[test]
+    fn the_end_of_a_main_window_page_load_keeps_every_pending_import() {
+        let pending = PendingImportState::default();
+        let ids = fill_pending(&pending);
+
+        discard_pending_imports_on_page_load(&pending, MAIN_WINDOW_LABEL, PageLoadEvent::Finished);
+
+        assert_eq!(pending_count(&pending), MAX_PENDING_IMPORTS);
+        for id in ids {
+            assert!(pending.take(id).is_some(), "ページの読み込みの完了で、保留(識別子{id})が消えている");
+        }
+    }
+
+    // メインウィンドウ以外のウェブビューの読み込みでは、メインウィンドウの保留を破棄しない。
+    #[test]
+    fn a_page_load_of_another_webview_keeps_every_pending_import() {
+        let pending = PendingImportState::default();
+        let ids = fill_pending(&pending);
+
+        discard_pending_imports_on_page_load(&pending, "other", PageLoadEvent::Started);
+
+        assert_eq!(pending_count(&pending), MAX_PENDING_IMPORTS);
+        for id in ids {
+            assert!(pending.take(id).is_some(), "別のウェブビューの読み込みで、保留(識別子{id})が消えている");
+        }
+    }
+
+    // 保留が無いときは、何も起きない(その後の保留は、通常どおり払い出し、確定できる)。
+    #[test]
+    fn the_start_of_a_page_load_without_pending_imports_does_nothing() {
+        let pending = PendingImportState::default();
+
+        discard_pending_imports_on_page_load(&pending, MAIN_WINDOW_LABEL, PageLoadEvent::Started);
+
+        assert_eq!(pending_count(&pending), 0);
+        let id = pending.insert(sample_import_preview("元プロファイル"));
+        assert!(pending.take(id).is_some());
     }
 
     // UNCの表記はWindowsのパスの形式で、Unixでは、区切りではない文字を含む相対パスの名前になるため、

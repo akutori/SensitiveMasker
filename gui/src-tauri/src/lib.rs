@@ -8,6 +8,8 @@ mod tray;
 #[cfg(windows)]
 mod webview_setup;
 
+use tauri::Manager;
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     #[allow(unused_mut)]
@@ -31,6 +33,15 @@ pub fn run() {
             #[cfg(windows)]
             webview_setup::disable_browser_accelerator_keys(app);
             Ok(())
+        })
+        // ページを読み込み直すと、確認画面が持つ保留の識別子が失われるため、Rust側の保留を全て破棄する
+        // (判定は、discard_pending_imports_on_page_load)。
+        .on_page_load(|webview, payload| {
+            export_import::discard_pending_imports_on_page_load(
+                &webview.state::<export_import::PendingImportState>(),
+                webview.label(),
+                payload.event(),
+            );
         })
         .on_window_event(tray::handle_window_event);
 

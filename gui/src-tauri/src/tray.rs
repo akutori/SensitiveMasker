@@ -9,7 +9,7 @@ use tauri_plugin_notification::NotificationExt as _;
 
 use crate::profiles::{with_store, ProfileStoreState};
 
-const MAIN_WINDOW_LABEL: &str = "main";
+pub(crate) const MAIN_WINDOW_LABEL: &str = "main";
 const TRAY_ID: &str = "main-tray";
 const OPEN_ID: &str = "open";
 const QUIT_ID: &str = "quit";
