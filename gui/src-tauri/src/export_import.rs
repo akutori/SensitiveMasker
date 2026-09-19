@@ -41,14 +41,11 @@ fn has_smx_extension(path: &Path) -> bool {
     path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("smx"))
 }
 
-fn validate_export_dest_path(dest_path: &str) -> Result<PathBuf, String> {
-    // 環境変数の読み取り(resolve_paths)とロジック本体を分離し、後者だけを引数渡しで
-    // テストできるようにする(profiles.rsのresolve_paths_with_overrideと同じ方針)。
-    validate_export_dest_path_impl(dest_path, resolve_paths())
-}
-
 // パス検証本体(正規化・特殊形式拒否・アプリのデータフォルダ除外)はprofile_store側で
 // CLI(masker export/mask --output)と共有する。ここでは.smx拡張子の要求のみGUI固有。
+// データフォルダの解決(resolve_paths。環境変数を読む)は呼び出し側で行い、引数で受け取る
+// (テストが、実際のデータフォルダの有無に依存しないようにする。text_file_io.rsのwrite_text_file_impl
+// と同じ方針)。
 fn validate_export_dest_path_impl(dest_path: &str, app_paths: Result<AppPaths, String>) -> Result<PathBuf, String> {
     let path = profile_store::normalize_and_reject_special_forms(dest_path).map_err(|e| e.to_string())?;
     if !has_smx_extension(&path) {
@@ -173,23 +170,28 @@ fn to_entry_dto(entry: &AllImportEntry, profile: &RuleProfile, tags: &[String]) 
 }
 
 // tauri::Stateに依存しない形にして単体テスト可能にする(profiles.rsのwith_storeと同じ方針)。
+// app_pathsは、書き出し先がアプリのデータフォルダの内側でないことの検証に使う。
 fn export_profile_to_file_impl(
     state: &ProfileStoreState,
+    app_paths: Result<AppPaths, String>,
     name: &str,
     passphrase: SecretString,
     dest_path: &str,
 ) -> Result<(), ExportImportError> {
-    let dest_path = validate_export_dest_path(dest_path).map_err(ExportImportError::InvalidInput)?;
+    let dest_path =
+        validate_export_dest_path_impl(dest_path, app_paths).map_err(ExportImportError::InvalidInput)?;
     let bytes = with_store(state, |store| store.export_profile(name, passphrase)).map_err(ExportImportError::Failed)?;
     std::fs::write(&dest_path, bytes).map_err(|_| ExportImportError::Failed(GENERIC_IO_ERROR.to_string()))
 }
 
 fn export_all_to_file_impl(
     state: &ProfileStoreState,
+    app_paths: Result<AppPaths, String>,
     passphrase: SecretString,
     dest_path: &str,
 ) -> Result<(), ExportImportError> {
-    let dest_path = validate_export_dest_path(dest_path).map_err(ExportImportError::InvalidInput)?;
+    let dest_path =
+        validate_export_dest_path_impl(dest_path, app_paths).map_err(ExportImportError::InvalidInput)?;
     let bytes = with_store(state, |store| store.export_all(passphrase)).map_err(ExportImportError::Failed)?;
     std::fs::write(&dest_path, bytes).map_err(|_| ExportImportError::Failed(GENERIC_IO_ERROR.to_string()))
 }
@@ -253,7 +255,7 @@ pub async fn export_profile_to_file(
     passphrase: SecretString,
     dest_path: String,
 ) -> Result<(), ExportImportError> {
-    export_profile_to_file_impl(&state, &name, passphrase, &dest_path)
+    export_profile_to_file_impl(&state, resolve_paths(), &name, passphrase, &dest_path)
 }
 
 #[tauri::command]
@@ -262,7 +264,7 @@ pub async fn export_all_to_file(
     passphrase: SecretString,
     dest_path: String,
 ) -> Result<(), ExportImportError> {
-    export_all_to_file_impl(&state, passphrase, &dest_path)
+    export_all_to_file_impl(&state, resolve_paths(), passphrase, &dest_path)
 }
 
 /// DBはまだ変更しない。復号結果はPendingImportStateに保持し、フロントエンドには
@@ -376,6 +378,7 @@ mod tests {
         let source_state = ProfileStoreState::with_store_for_test(source_store);
         export_profile_to_file_impl(
             &source_state,
+            Ok(AppPaths::at(source_dir.path())),
             "元プロファイル",
             passphrase("correct horse battery staple"),
             export_file.path().to_str().unwrap(),
@@ -433,6 +436,7 @@ mod tests {
         let source_state = ProfileStoreState::with_store_for_test(source_store);
         export_all_to_file_impl(
             &source_state,
+            Ok(AppPaths::at(source_dir.path())),
             passphrase("correct horse battery staple"),
             export_file.path().to_str().unwrap(),
         )
@@ -489,6 +493,7 @@ mod tests {
         let source_state = ProfileStoreState::with_store_for_test(source_store);
         export_profile_to_file_impl(
             &source_state,
+            Ok(AppPaths::at(source_dir.path())),
             "元プロファイル",
             passphrase("correct horse battery staple"),
             export_file.path().to_str().unwrap(),
@@ -527,6 +532,7 @@ mod tests {
         let source_state = ProfileStoreState::with_store_for_test(source_store);
         export_all_to_file_impl(
             &source_state,
+            Ok(AppPaths::at(source_dir.path())),
             passphrase("correct horse battery staple"),
             export_file.path().to_str().unwrap(),
         )
@@ -566,6 +572,7 @@ mod tests {
         let source_state = ProfileStoreState::with_store_for_test(source_store);
         export_profile_to_file_impl(
             &source_state,
+            Ok(AppPaths::at(source_dir.path())),
             "元プロファイル",
             passphrase("correct horse battery staple"),
             export_file.path().to_str().unwrap(),
@@ -613,6 +620,7 @@ mod tests {
         let source_state = ProfileStoreState::with_store_for_test(source_store);
         export_profile_to_file_impl(
             &source_state,
+            Ok(AppPaths::at(source_dir.path())),
             "元プロファイル",
             passphrase("correct horse battery staple"),
             export_file.path().to_str().unwrap(),
@@ -678,6 +686,65 @@ mod tests {
 
         validate_export_dest_path_impl(dest.to_str().unwrap(), Ok(app_paths))
             .expect("データフォルダ外への正常な保存は許可されるはず");
+    }
+
+    // 書き出しの検証は、環境から解決したデータフォルダでなく、渡されたデータフォルダで行う
+    // (テストが、実際のデータフォルダの有無に依存しないようにするため、これを固定する)。
+    #[test]
+    fn export_profile_to_file_rejects_a_destination_inside_the_given_data_dir() {
+        let source_dir = tempfile::tempdir().unwrap();
+        let source_store = init_store_with_one_profile(source_dir.path(), "元プロファイル");
+        let source_state = ProfileStoreState::with_store_for_test(source_store);
+        let inside = source_dir.path().join("sneaky.smx");
+
+        let err = export_profile_to_file_impl(
+            &source_state,
+            Ok(AppPaths::at(source_dir.path())),
+            "元プロファイル",
+            passphrase("correct horse battery staple"),
+            inside.to_str().unwrap(),
+        )
+        .expect_err("渡したデータフォルダの内側への書き出しは拒否されるはず");
+        assert!(err.to_string().contains("データフォルダ"), "予期しないエラー文言: {err}");
+        assert!(!inside.exists(), "拒否したのにファイルが書かれている");
+    }
+
+    #[test]
+    fn export_all_to_file_rejects_a_destination_inside_the_given_data_dir() {
+        let source_dir = tempfile::tempdir().unwrap();
+        let source_store = init_store_with_two_profiles(source_dir.path());
+        let source_state = ProfileStoreState::with_store_for_test(source_store);
+        let inside = source_dir.path().join("sneaky.smx");
+
+        let err = export_all_to_file_impl(
+            &source_state,
+            Ok(AppPaths::at(source_dir.path())),
+            passphrase("correct horse battery staple"),
+            inside.to_str().unwrap(),
+        )
+        .expect_err("渡したデータフォルダの内側への書き出しは拒否されるはず");
+        assert!(err.to_string().contains("データフォルダ"), "予期しないエラー文言: {err}");
+        assert!(!inside.exists(), "拒否したのにファイルが書かれている");
+    }
+
+    #[test]
+    fn export_fails_closed_when_the_data_dir_cannot_be_resolved() {
+        let source_dir = tempfile::tempdir().unwrap();
+        let source_store = init_store_with_one_profile(source_dir.path(), "元プロファイル");
+        let source_state = ProfileStoreState::with_store_for_test(source_store);
+        let dest_dir = tempfile::tempdir().unwrap();
+        let dest = dest_dir.path().join("export.smx");
+
+        let err = export_profile_to_file_impl(
+            &source_state,
+            Err("resolution failed".to_string()),
+            "元プロファイル",
+            passphrase("correct horse battery staple"),
+            dest.to_str().unwrap(),
+        )
+        .expect_err("データフォルダを解決できないときは、書き出さない(fail-closed)はず");
+        assert!(matches!(err, ExportImportError::InvalidInput(_)));
+        assert!(!dest.exists(), "解決できなかったのにファイルが書かれている");
     }
 
     // 字句上のstarts_with比較では、NTFSが大文字小文字を区別しないことを利用して
