@@ -11,6 +11,9 @@
 //   (この画面が始めた復号の後始末が終わってから、次の復号を受け付ける)。
 // - 復号の結果が届き、確認画面へ進むときは、その保留の識別子を、この画面が所有するものとして、確認画面を
 //   出すより前に記録する。確認画面の描画を待つと、その前に画面を離れたときに、保留を破棄できない。
+// - 記録する時点で、既に所有している保留(確認画面の描画より前に画面が閉じられて、確認されないまま残ったもの)が
+//   あれば、その識別子を先に破棄する。上書きすると、その保留は誰にも破棄されなくなる。この破棄の完了は待たない
+//   (待つ間に画面が閉じられうるため、記録と確認画面へ進む操作は、同期的に続ける)。
 
 // 復号の結果。pendingIdは、Rust側に保留された、その復号済みの内容の識別子。
 export interface PendingPreview {
@@ -26,8 +29,8 @@ export interface ImportPassphraseDeps<Preview extends PendingPreview> {
   isStillOpen: (session: number) => boolean;
   showConfirm: (preview: Preview) => void;
   showError: (error: unknown) => void;
-  // 届いた結果の保留(Rust側の、復号済みの内容)だけを、その識別子を指定して破棄する。
-  discardPending: (preview: Preview) => Promise<void>;
+  // 指定した識別子の保留(Rust側の、復号済みの内容)だけを破棄する。
+  discardPending: (pendingId: number) => Promise<void>;
   // 復号を始める・終えるたびに呼ぶ(OKなどの無効化の表示に使う)。
   onBusyChange: (busy: boolean) => void;
 }
@@ -50,8 +53,13 @@ export function createImportPassphraseHandlers<Preview extends PendingPreview>(
       try {
         const preview = await deps.preview(target.sourcePath, target.passphrase);
         if (!deps.isStillOpen(target.session)) {
-          await deps.discardPending(preview);
+          await deps.discardPending(preview.pendingId);
           return;
+        }
+        const previousPendingId = ownedPendingId.current;
+        if (previousPendingId !== null) {
+          // 破棄の失敗は、前の保留の後始末の失敗であり、この結果の失敗ではない。
+          deps.discardPending(previousPendingId).catch(() => {});
         }
         ownedPendingId.current = preview.pendingId;
         deps.showConfirm(preview);

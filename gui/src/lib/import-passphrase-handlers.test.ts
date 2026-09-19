@@ -55,8 +55,8 @@ describe.each([0, 7])("createImportPassphraseHandlers(届いた結果の識別�
       showConfirm: (preview) =>
         calls.push(`showConfirm:${preview.label}:owned=${ownedPendingId.current}`),
       showError: (error) => calls.push(`showError:${(error as Error).message}`),
-      discardPending: (preview) => {
-        calls.push(`discardPending:${preview.pendingId}`);
+      discardPending: (discardedId) => {
+        calls.push(`discardPending:${discardedId}`);
         return Promise.resolve();
       },
       onBusyChange: (busy) => calls.push(`busy:${busy}`),
@@ -144,6 +144,92 @@ describe.each([0, 7])("createImportPassphraseHandlers(届いた結果の識別�
     expect(ownedPendingId.current).toBe(other);
   });
 
+  // 確認画面の描画より前に画面が閉じられると、所有する保留(記録済みの識別子)を確認する人が居ないまま、画面は
+  // 離れられずに残る。次のインポートの結果が届いたとき、記録を上書きすると、その保留は誰にも破棄されなくなる。
+  describe("確認画面の描画より前に画面が閉じられ、確認されないまま所有する保留が残っているとき", () => {
+    const SECOND_PREVIEW: DummyPreview = { pendingId: other, label: "dummy-preview-2" };
+
+    // 1回目の復号の結果が届き(所有する識別子を記録し)、確認画面が描画される前に画面が閉じられた状態を作る
+    // (画面を離れる操作は起きないため、記録は残る)。2回目の復号は、呼び出し側が決着させる。
+    async function afterFirstResultLeftUnconfirmed(
+      overrides: Partial<ImportPassphraseDeps<DummyPreview>> = {}
+    ) {
+      const results = [deferred<DummyPreview>(), deferred<DummyPreview>()];
+      let started = 0;
+      const setupResult = setup({ preview: () => results[started++].promise, ...overrides });
+      const first = setupResult.handlers.onConfirm();
+      results[0].resolve(PREVIEW);
+      await first;
+      expect(setupResult.ownedPendingId.current).toBe(pendingId);
+      setupResult.calls.length = 0;
+      return { ...setupResult, secondResult: results[1] };
+    }
+
+    it("次の結果が届いたら、確認画面へ進む前に、前の保留をその識別子で破棄し、新しい保留の識別子を記録する", async () => {
+      const { calls, ownedPendingId, secondResult, handlers } = await afterFirstResultLeftUnconfirmed();
+
+      const second = handlers.onConfirm();
+      secondResult.resolve(SECOND_PREVIEW);
+      await second;
+
+      // 前の保留の破棄が先で、その後に、新しい識別子を記録して、確認画面へ進む。
+      expect(calls).toEqual([
+        "busy:true",
+        `discardPending:${pendingId}`,
+        `showConfirm:dummy-preview-2:owned=${other}`,
+        "busy:false",
+      ]);
+      expect(ownedPendingId.current).toBe(other);
+    });
+
+    it("前の保留の破棄が終わるのを待たずに、新しい識別子を記録して、確認画面へ進む(待つ間に画面が閉じられうるため)", async () => {
+      const discard = deferred<void>();
+      const { calls, ownedPendingId, secondResult, handlers } = await afterFirstResultLeftUnconfirmed({
+        discardPending: (discardedId) => {
+          calls.push(`discardPending:${discardedId}`);
+          return discard.promise;
+        },
+      });
+
+      const second = handlers.onConfirm();
+      secondResult.resolve(SECOND_PREVIEW);
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(calls).toEqual([
+        "busy:true",
+        `discardPending:${pendingId}`,
+        `showConfirm:dummy-preview-2:owned=${other}`,
+        "busy:false",
+      ]);
+      expect(ownedPendingId.current).toBe(other);
+
+      discard.resolve();
+      await second;
+    });
+
+    it("前の保留の破棄に失敗しても、エラーは表示せず、確認画面へ進む(前の保留の後始末の失敗を、新しい結果の失敗にしない)", async () => {
+      const { calls, ownedPendingId, secondResult, handlers } = await afterFirstResultLeftUnconfirmed({
+        discardPending: (discardedId) => {
+          calls.push(`discardPending:${discardedId}`);
+          return Promise.reject(new Error("dummy discard failure"));
+        },
+      });
+
+      const second = handlers.onConfirm();
+      secondResult.resolve(SECOND_PREVIEW);
+      await second;
+
+      expect(calls).toEqual([
+        "busy:true",
+        `discardPending:${pendingId}`,
+        `showConfirm:dummy-preview-2:owned=${other}`,
+        "busy:false",
+      ]);
+      expect(ownedPendingId.current).toBe(other);
+    });
+  });
+
   it("開いたままかは、OKを押した時の画面(セッション)で判定する。同じファイルを開き直した別の画面は、開いたままとは見なさない", async () => {
     const openSessions = new Set([2]);
     const asked: number[] = [];
@@ -167,8 +253,8 @@ describe.each([0, 7])("createImportPassphraseHandlers(届いた結果の識別�
     const discard = deferred<void>();
     const { calls, decryption, handlers } = setup({
       isStillOpen: () => false,
-      discardPending: (preview) => {
-        calls.push(`discardPending:${preview.pendingId}`);
+      discardPending: (discardedId) => {
+        calls.push(`discardPending:${discardedId}`);
         return discard.promise;
       },
     });
@@ -187,8 +273,8 @@ describe.each([0, 7])("createImportPassphraseHandlers(届いた結果の識別�
   it("破棄に失敗しても、待ちは解ける(次の復号を始められなくならない)", async () => {
     const { calls, decryption, handlers } = setup({
       isStillOpen: () => false,
-      discardPending: (preview) => {
-        calls.push(`discardPending:${preview.pendingId}`);
+      discardPending: (discardedId) => {
+        calls.push(`discardPending:${discardedId}`);
         return Promise.reject(new Error("dummy discard failure"));
       },
     });

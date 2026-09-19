@@ -203,7 +203,7 @@ function ProfilesRoute() {
             : "パスフレーズが誤っているか、対応していないファイル形式です"
         );
       },
-      discardPending: (result) => appState.clearPendingImport(result.pendingId),
+      discardPending: (pendingId) => appState.clearPendingImport(pendingId),
       onBusyChange: setImportBusy,
     },
     importDecrypting,
