@@ -229,6 +229,31 @@ async function measureDecryptMs(sourcePath: string, passphrase: string): Promise
   );
 }
 
+// 画面を介さず、IPCで復号し、保留の識別子を返す(保留は、画面の状態に結び付かず、残る)。
+async function previewPendingImportViaIpc(sourcePath: string, passphrase: string): Promise<number> {
+  return browser.tauri.execute(
+    async ({ core }, p, s) => {
+      const result = (await core.invoke("preview_import", { sourcePath: p, passphrase: s })) as {
+        pending_id: number;
+      };
+      return result.pending_id;
+    },
+    sourcePath,
+    passphrase
+  );
+}
+
+// 画面を介さず、IPCで復号を始め、結果を待たずに戻る(復号している最中に、ページを読み込み直すため)。
+async function startPreviewImportViaIpc(sourcePath: string, passphrase: string): Promise<void> {
+  await browser.tauri.execute(
+    ({ core }, p, s) => {
+      void core.invoke("preview_import", { sourcePath: p, passphrase: s }).catch(() => {});
+    },
+    sourcePath,
+    passphrase
+  );
+}
+
 // アサーションが落ちたとき、その失敗のメッセージの先頭に、原因の手がかりを付けて投げ直す
 // (expectは、matcherごとのメッセージを引数に取れないため)。
 function withHint(hint: string, assertion: () => unknown): void {
@@ -1659,5 +1684,85 @@ describe("エクスポートの実行(ファイルダイアログの差し替え
       expect(await commitLastReceivedPendingImportError()).toBe(NO_PENDING_IMPORT_MESSAGE);
       if (route === "profiles") await returnToMainScreen();
     });
+  });
+
+  // Rust側の保留は、メインウィンドウのページの読み込みが始まったときに、全て破棄される(ページを読み込み直すと、
+  // 保留の識別子を持つ画面が無くなるため)。ページ内の画面遷移(履歴による切り替え)は、ページの読み込みを起こさず、
+  // 破棄されない。
+  it("ページ内の画面遷移では、復号済みの内容(Rust側の保留)は破棄されない", async () => {
+    await completeInitialSetup();
+    const profileName = "E2E画面遷移保留確認";
+    const smxPath = path.join(exportDir, "route-keeps-pending.smx");
+    const passphrase = await exportAndDeleteProfile(profileName, smxPath);
+
+    const pendingId = await previewPendingImportViaIpc(smxPath, passphrase);
+    // 画面を行き来する(プロファイル管理画面 → メイン画面 → プロファイル管理画面)。
+    await returnToMainScreen();
+    await openProfileManagement();
+
+    // 画面の遷移の後も、保留は残っていて、確定できる(取り込まれる)。
+    expect(await commitPendingImportError(pendingId)).toBeNull();
+    expect(await listProfileNames()).toContain(profileName);
+
+    await deleteProfileViaIpc(profileName);
+    await returnToMainScreen();
+  });
+
+  it("ページを読み込み直すと、復号済みの内容(Rust側の保留)は破棄される", async () => {
+    await completeInitialSetup();
+    const profileName = "E2E再読み込み保留確認";
+    const smxPath = path.join(exportDir, "reload-discards-pending.smx");
+    const passphrase = await exportAndDeleteProfile(profileName, smxPath);
+    await returnToMainScreen();
+
+    const pendingId = await previewPendingImportViaIpc(smxPath, passphrase);
+    await browser.refresh();
+    await completeInitialSetup();
+
+    expect(await commitPendingImportError(pendingId)).toBe(NO_PENDING_IMPORT_MESSAGE);
+    expect(await listProfileNames()).not.toContain(profileName);
+  });
+
+  it("確認画面を開いたままページを読み込み直すと、確認画面で得た保留は、読み込み直しの後に確定できない", async () => {
+    await completeInitialSetup();
+    const profileName = "E2E確認中再読み込み確認";
+    const passphrase = await exportAndDeleteProfile(profileName, path.join(exportDir, "reload-with-confirm.smx"));
+    await returnToMainScreen();
+
+    await openImportConfirmDialog(passphrase);
+    const ids = await receivedPendingImportIds();
+    expect(ids).toHaveLength(1);
+    await browser.refresh();
+    await completeInitialSetup();
+
+    // 読み込み直した画面は、確認画面を持たない。確認画面が持っていた保留は、確定できない。
+    expect(await $('[role="alertdialog"]').isExisting()).toBe(false);
+    expect(await commitPendingImportError(ids[0])).toBe(NO_PENDING_IMPORT_MESSAGE);
+    expect(await listProfileNames()).not.toContain(profileName);
+  });
+
+  it("復号している最中にページを読み込み直しても、その復号の結果は、保留として残らない", async () => {
+    await completeInitialSetup();
+    const profileName = "E2E復号中再読み込み確認";
+    const smxPath = path.join(exportDir, "reload-while-decrypting.smx");
+    const passphrase = await exportAndDeleteProfile(profileName, smxPath);
+    await returnToMainScreen();
+
+    // 前後に空白のあるパスフレーズは、入力どおりで復号に失敗してから再試行するため、復号が約2倍かかる
+    // (ページの読み込みが始まるより前に、復号が終わらないようにする)。
+    const decryptMs = await measureDecryptMs(smxPath, passphrase);
+    await startPreviewImportViaIpc(smxPath, ` ${passphrase} `);
+    await browser.refresh();
+    await completeInitialSetup();
+    // 読み込み直す前に始めた復号が、終わるまで待つ。
+    await browser.pause(Math.max(3000, decryptMs * 4));
+
+    // 復号の結果が、保留として残っていれば、その直前の識別子(次に払い出される識別子の1つ前)で確定できてしまう。
+    // 残っていなければ(結果を捨てていれば)、失敗する。次の識別子が1以上でないと、この確認は何も確かめない。
+    const nextId = await previewPendingImportViaIpc(smxPath, passphrase);
+    expect(nextId).toBeGreaterThanOrEqual(1);
+    expect(await commitPendingImportError(nextId - 1)).toBe(NO_PENDING_IMPORT_MESSAGE);
+    expect(await listProfileNames()).not.toContain(profileName);
+    await clearPendingImportDirectly(nextId);
   });
 });
