@@ -60,6 +60,19 @@ export default defineConfig(() => ({
           }]
         }
       }
+    }, {
+      // 状態遷移などの純関数のテスト。DOMもブラウザも使わないためNodeで実行する
+      // (storybookプロジェクトのようにChromiumを起動しないので、素早く回せる)。
+      resolve: {
+        alias: {
+          "@": path.resolve(dirname, "./src")
+        }
+      },
+      test: {
+        name: 'unit',
+        environment: 'node',
+        include: ['src/**/*.test.ts']
+      }
     }]
   }
 }));

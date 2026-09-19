@@ -13,6 +13,16 @@ import type { RuleListItem } from "@/components/rule-edit-screen";
 import { useAppState, SMX_FILE_FILTERS, toImportPreviewRows } from "@/lib/app-state";
 import { isExportImportError } from "@/lib/profile-ipc";
 import { openFileDialog, saveFileDialog } from "@/lib/file-dialog";
+import {
+  abortExport,
+  beginExport,
+  canRegenerate,
+  canStartExport,
+  completeExport,
+  openExportDialog,
+  regeneratePassphrase,
+  type ExportDialogState,
+} from "@/lib/export-dialog-state";
 import { writeClipboardText, clearClipboardIfMatches } from "@/lib/clipboard-ipc";
 import { readTextFile } from "@/lib/text-file-ipc";
 import { previewEnvImport, type EnvCandidate } from "@/lib/env-import-ipc";
@@ -69,7 +79,7 @@ type DialogState =
   | { kind: "templateSelect" }
   | { kind: "profileNameFromTemplate"; templateValue: string }
   | { kind: "tagManagement" }
-  | { kind: "export"; target: string; profileId: string | null }
+  | { kind: "export"; target: string; profileId: string | null; session: ExportDialogState }
   | { kind: "importPassphrase"; sourcePath: string; fileName: string }
   | { kind: "importConfirm"; rows: ImportPreviewRow[] }
   | { kind: "envImportSelect"; candidates: EnvCandidate[] }
@@ -96,7 +106,8 @@ function ProfilesRoute() {
   const [newTagName, setNewTagName] = useState("");
   const [tagError, setTagError] = useState<string | undefined>();
   const [invalidTagId, setInvalidTagId] = useState<string | "new" | undefined>();
-  const [passphrase, setPassphrase] = useState("");
+  // エクスポート画面を開くたびに増やす識別子(export-dialog-state.tsのsessionId)。
+  const exportSessionCounter = useRef(0);
   const [importPassphrase, setImportPassphrase] = useState("");
   const [importPassphraseError, setImportPassphraseError] = useState<string | undefined>();
   const clipboardClearTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -195,6 +206,46 @@ function ProfilesRoute() {
       });
   };
 
+  // エクスポートの進行状況を、実行を始めた画面(sessionId)に対してだけ更新する。
+  // 閉じて開き直した後に届いた古い実行の結果を、新しい画面へ反映しないため。
+  const updateExportSession = (update: (session: ExportDialogState) => ExportDialogState) =>
+    setDialog((current) =>
+      current.kind === "export" ? { ...current, session: update(current.session) } : current
+    );
+
+  const exportToFile = async () => {
+    if (dialog.kind !== "export" || !canStartExport(dialog.session)) return;
+    const { profileId } = dialog;
+    // 書き出したファイルを復号できるのは、実行を押した時点のパスフレーズだけである。
+    const { sessionId, passphrase: exportedPassphrase } = dialog.session;
+    updateExportSession(beginExport);
+    try {
+      // プロファイル名を既定ファイル名に使うと、暗号文の外側(ファイル名・最近使った
+      // ファイルの履歴)に平文メタデータとして残ってしまうため、汎用名にする。
+      const defaultPath = `${profileId === null ? "sensitivemasker_all" : "sensitivemasker_export"}.smx`;
+      // 保存先の選択そのものが失敗した場合は、appState側のtoastを通らないため、ここで通知する。
+      const destPath = await saveFileDialog({ defaultPath, filters: SMX_FILE_FILTERS }).catch(
+        (error) => {
+          console.error("save dialog failed", error);
+          toast.error("保存先を選択できませんでした");
+          return null;
+        }
+      );
+      if (!destPath) {
+        updateExportSession((session) => abortExport(session, sessionId));
+        return;
+      }
+      if (profileId === null) await appState.exportAll(exportedPassphrase, destPath);
+      else await appState.exportProfile(profileId, exportedPassphrase, destPath);
+      toast.success("エクスポートが完了しました");
+      updateExportSession((session) => completeExport(session, sessionId));
+    } catch {
+      // エクスポート自体の失敗の通知は、appState側のtoastが行う。ダイアログは開いたままにし、
+      // 別の保存先で再試行できるようにする。
+      updateExportSession((session) => abortExport(session, sessionId));
+    }
+  };
+
   const confirmNewProfileName = async () => {
     if (profiles.some((p) => p.name === draftName)) {
       setDraftError("同じ名前のプロファイルが既に存在します");
@@ -252,8 +303,12 @@ function ProfilesRoute() {
           setDialog({ kind: "tagManagement" });
         }}
         onExportAll={() => {
-          setPassphrase(generatePassphrase());
-          setDialog({ kind: "export", target: "全プロファイル", profileId: null });
+          setDialog({
+            kind: "export",
+            target: "全プロファイル",
+            profileId: null,
+            session: openExportDialog(++exportSessionCounter.current, generatePassphrase()),
+          });
         }}
         onImport={async () => {
           const path = await openFileDialog({ multiple: false, filters: SMX_FILE_FILTERS });
@@ -277,7 +332,11 @@ function ProfilesRoute() {
               toast.warning("ファイルの一部に不正なバイト列があったため、置き換えて読み込みました");
             }
             const candidates = await previewEnvImport(text);
-            setDialog({ kind: "envImportSelect", candidates });
+            // ファイルの読み込み中に開かれたエクスポート画面を置き換えると、書き出し中・書き出し済みの
+            // パスフレーズを失うため、置き換えない。
+            setDialog((current) =>
+              current.kind === "export" ? current : { kind: "envImportSelect", candidates }
+            );
           } catch (error) {
             console.error("preview_env_import failed", error);
             toast.error("ファイルを読み込めませんでした");
@@ -289,8 +348,12 @@ function ProfilesRoute() {
         onDuplicateProfile={(id, newName) => appState.duplicateProfile(id, newName)}
         onExportProfile={(id) => {
           const target = profiles.find((p) => p.id === id)?.name ?? "";
-          setPassphrase(generatePassphrase());
-          setDialog({ kind: "export", target, profileId: id });
+          setDialog({
+            kind: "export",
+            target,
+            profileId: id,
+            session: openExportDialog(++exportSessionCounter.current, generatePassphrase()),
+          });
         }}
         onDeleteProfile={(id) => appState.deleteProfile(id)}
         onProfileTagsChange={(id, tags) => {
@@ -391,49 +454,31 @@ function ProfilesRoute() {
 
       <ExportModal
         open={dialog.kind === "export"}
-        onOpenChange={(open) => {
-          if (open) return;
-          closeDialog();
-          // パスフレーズをReact state上に残さない(画面録画・共有のアーカイブや
-          // メモリダンプからの事後的な読み取りを避けるため)。
-          setPassphrase("");
-        }}
+        // 閉じるとパスフレーズは画面の状態ごと破棄される(画面録画・共有のアーカイブや
+        // メモリダンプからの事後的な読み取りを避けるため)。クリップボードの自動クリアは
+        // 画面を閉じても継続する(コピーしたパスフレーズを他所に控える目的で閉じた場合も
+        // クリアされるべきため)。実行中・成功後に閉じる操作は、ExportModalが受け付けない。
+        onOpenChange={(open) => !open && closeDialog()}
         target={dialog.kind === "export" ? dialog.target : ""}
-        passphrase={passphrase}
+        passphrase={dialog.kind === "export" ? dialog.session.passphrase : ""}
+        status={dialog.kind === "export" ? dialog.session.phase : "editing"}
         clipboardBusy={clipboardBusy}
         onCopy={() => {
           // ボタンの無効化が再描画で反映されるより前に届いたクリックも防ぐため、同期的に判定する。
           if (clipboardOperationCount.current > 0) return;
-          copyPassphraseWithAutoClear(passphrase);
+          // 閉じる途中(フェードアウト中)に届いたクリックで、空文字をコピーしないため。
+          if (dialog.kind !== "export") return;
+          copyPassphraseWithAutoClear(dialog.session.passphrase);
         }}
         onRegenerate={() => {
           if (clipboardOperationCount.current > 0) return;
+          if (dialog.kind !== "export" || !canRegenerate(dialog.session)) return;
           // 旧パスフレーズが既にコピーされていた場合、タイマーの取り消しだけでは
           // クリップボードに残り続けるため、その場でクリアを試みる。
           clearCopiedPassphraseNow();
-          setPassphrase(generatePassphrase());
+          updateExportSession((session) => regeneratePassphrase(session, generatePassphrase()));
         }}
-        onExport={async () => {
-          if (dialog.kind !== "export") return;
-          const { profileId } = dialog;
-          // プロファイル名を既定ファイル名に使うと、暗号文の外側(ファイル名・最近使った
-          // ファイルの履歴)に平文メタデータとして残ってしまうため、汎用名にする。
-          const defaultPath = `${profileId === null ? "sensitivemasker_all" : "sensitivemasker_export"}.smx`;
-          const destPath = await saveFileDialog({ defaultPath, filters: SMX_FILE_FILTERS });
-          if (!destPath) return;
-          try {
-            if (profileId === null) await appState.exportAll(passphrase, destPath);
-            else await appState.exportProfile(profileId, passphrase, destPath);
-            toast.success("エクスポートが完了しました");
-            // クリップボードの自動クリアはダイアログを閉じても継続する(コピーした
-            // パスフレーズを他所に控える目的で閉じた場合もクリアされるべきため)。
-            closeDialog();
-            setPassphrase("");
-          } catch {
-            // 失敗の通知はappState側のtoastが行う。ダイアログは開いたままにし、
-            // 別の保存先で再試行できるようにする。
-          }
-        }}
+        onExport={exportToFile}
       />
 
       <ImportPassphraseDialog

@@ -130,6 +130,11 @@ cargo test --workspace
 # フロントエンドの型チェック
 cd gui && bunx tsc --noEmit
 
+# フロントエンドのテスト(純関数の単体テストとStorybookのplayテスト。それぞれ単独でも実行できる)
+cd gui && bun run test
+cd gui && bun run test:unit
+cd gui && bun run test:stories
+
 # E2Eテスト(WebDriver。e2e-testing featureでdebugビルドしてから実行する)
 cd gui && bun run e2e:build && bun run e2e
 ```

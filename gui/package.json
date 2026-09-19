@@ -10,6 +10,9 @@
     "tauri": "tauri",
     "storybook": "storybook dev -p 6006",
     "build-storybook": "storybook build",
+    "test": "vitest run",
+    "test:unit": "vitest run --project=unit",
+    "test:stories": "vitest run --project=storybook",
     "e2e:build": "bun run scripts/generate-e2e-config.ts && VITE_E2E_TESTING=true tauri build --debug --features e2e-testing --no-bundle --config src-tauri/tauri.e2e.conf.json && cargo build -p masker",
     "e2e": "wdio run wdio.conf.ts --spec e2e/initial-setup.spec.ts && wdio run wdio.conf.ts --spec e2e/export-import.spec.ts && wdio run wdio.conf.ts --spec e2e/csp.spec.ts && wdio run wdio.conf.ts --spec e2e/profile-management.spec.ts && wdio run wdio.conf.ts --spec e2e/main-screen-file-and-clipboard.spec.ts"
   },
