@@ -111,7 +111,7 @@ export interface AppStateValue {
   exportProfile: (id: string, passphrase: string, destPath: string) => Promise<void>;
   exportAll: (passphrase: string, destPath: string) => Promise<void>;
   previewImport: (sourcePath: string, passphrase: string) => Promise<ImportPreviewResult>;
-  // 確定・破棄は、previewImportの結果のpendingIdで、その保留だけを指す。
+  // 確定・破棄は、previewImportの結果の保留の識別子(pendingId)で、その保留だけを指す。
   commitImport: (pendingId: number) => Promise<void>;
   clearPendingImport: (pendingId: number) => Promise<void>;
 
@@ -414,7 +414,8 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
             toast.info(`プロファイル「${activated_profile_name}」がアクティブになりました`);
           }
         }),
-      // キャンセル操作からのみ呼ばれる想定(commit成功/失敗時はRust側で既に消費済み)。
+      // 確認画面の取り消し・画面を離れるとき・閉じられた画面へ遅れて届いた復号結果の破棄・確認されないまま
+      // 残った前の保留の破棄で呼ばれる(確定は、成否に関わらずRust側で保留を消費済みのため、その後には呼ばれない)。
       // 失敗しても致命的ではない(プロセス内メモリの後始末のみ)ためトーストは出さない。
       clearPendingImport: (pendingId) => ipcClearPendingImport(pendingId).catch(() => {}),
 

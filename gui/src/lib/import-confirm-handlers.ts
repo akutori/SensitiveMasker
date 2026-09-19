@@ -2,7 +2,7 @@
 // プロファイル管理画面とメイン画面が、同じ流れを使うために共有する。
 //
 // 確認画面の操作は、この画面が所有する保留(復号の結果として届いた、Rust側の復号済みの内容)だけを対象にし、
-// その識別子を指定して、確定・破棄する。他の画面が始めた復号の保留には、触れない。
+// その保留の識別子を指定して、確定・破棄する。他の画面が始めた復号の保留には、触れない。
 //
 // 「インポート実行」は、確定(commit)を始めた後で、画面を閉じる操作(onOpenChange(false))も呼ぶ
 // (この呼び出し順は、Radixのボタンの実装が保証する)。その閉じる操作から、保留中の内容の破棄
@@ -14,9 +14,9 @@
 export interface ImportConfirmDeps {
   // 確認画面がいま開いているか(閉じる途中に届いた2回目の押下を、確定にしないため)。
   isOpen: () => boolean;
-  // 指定した識別子の保留を確定する。失敗の通知は、この関数の側で行う。
+  // 保留の識別子で指定した保留を確定する。失敗の通知は、この関数の側で行う。
   commit: (pendingId: number) => Promise<void>;
-  // 指定した識別子の保留(復号済みの内容)を、Rust側から破棄する。
+  // 保留の識別子で指定した保留(復号済みの内容)を、Rust側から破棄する。
   discardPending: (pendingId: number) => void;
   close: () => void;
   // 確定の完了を待つ間に、別の画面が開かれていた場合は閉じない(確認画面のままの場合だけ閉じる)。
@@ -29,7 +29,7 @@ export function createImportConfirmHandlers(
   deps: ImportConfirmDeps,
   ownedPendingId: { current: number | null }
 ) {
-  // 所有する保留を、所有しない扱いにして、その識別子を返す(以後、この画面は、その保留を確定も破棄もしない)。
+  // 所有する保留を、所有しない扱いにして、その保留の識別子を返す(以後、この画面は、その保留を確定も破棄もしない)。
   const releaseOwnedPendingId = (): number | null => {
     const pendingId = ownedPendingId.current;
     ownedPendingId.current = null;

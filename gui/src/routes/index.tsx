@@ -60,7 +60,7 @@ function MainRoute() {
   // パスフレーズ入力画面で、復号している間だけtrue(理由はimport-passphrase-handlers.ts)。
   const importDecrypting = useRef(false);
   // この画面が所有する保留(復号の結果として、Rust側に保留された内容)の識別子。確認画面の確定・破棄・離脱は、
-  // この識別子の保留だけを対象にする(他の画面が始めた復号の保留には触れない)。無ければnull。
+  // その保留だけを対象にする(他の画面が始めた復号の保留には触れない)。無ければnull。
   const ownedPendingImportId = useRef<number | null>(null);
   const [importBusy, setImportBusy] = useState(false);
   // 非同期の完了時に、最新の画面の状態を読むための写し(クロージャは、操作した時点の古い状態を掴む)。
@@ -68,7 +68,7 @@ function MainRoute() {
   useLayoutEffect(() => {
     dialogRef.current = dialog;
   });
-  // パスフレーズ入力画面を開くたびに増やす識別子。同じファイルを開き直しても、別の画面として区別する
+  // パスフレーズ入力画面を開いた回の番号(開くたびに増やす)。同じファイルを開き直しても、別の画面として区別する
   // (復号の結果を、OKを押した時の画面にだけ返すため。理由はimport-passphrase-handlers.ts)。
   const importSessionCounter = useRef(0);
   // この画面が破棄されていないか(破棄された後に届いた復号の結果は、見る人が居ない)。

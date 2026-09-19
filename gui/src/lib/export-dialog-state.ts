@@ -12,7 +12,7 @@ export type ExportPhase = "editing" | "exporting" | "exported";
 
 export interface ExportDialogState {
   phase: ExportPhase;
-  // 画面を開くたびに変わる識別子。閉じて開き直した後に、古い実行の完了通知が
+  // 画面を開いた回の番号(開くたびに変わる)。閉じて開き直した後に、古い実行の完了通知が
   // 新しい画面へ反映されないようにするために使う。
   sessionId: number;
   passphrase: string;
@@ -44,7 +44,7 @@ export function regeneratePassphrase(
   return canRegenerate(state) ? { ...state, passphrase } : state;
 }
 
-// 実行を押した時点の画面(識別子とパスフレーズ)と、今の状態が一致するときだけ実行中にする。
+// 実行を押した時点の画面(開いた回の番号とパスフレーズ)と、今の状態が一致するときだけ実行中にする。
 // 食い違ったまま書き出すと、画面に出ているものと違うパスフレーズでファイルができてしまう。
 export function beginExport(
   state: ExportDialogState,

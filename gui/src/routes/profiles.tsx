@@ -110,7 +110,7 @@ function ProfilesRoute() {
   const [newTagName, setNewTagName] = useState("");
   const [tagError, setTagError] = useState<string | undefined>();
   const [invalidTagId, setInvalidTagId] = useState<string | "new" | undefined>();
-  // エクスポート画面を開くたびに増やす識別子(export-dialog-state.tsのsessionId)。
+  // エクスポート画面を開いた回の番号(開くたびに増やす。export-dialog-state.tsのsessionId)。
   const exportSessionCounter = useRef(0);
   // エクスポートの進行状況(編集中→実行中→成功後)の、同期的に読める正。React 19は離散イベントの
   // 更新を再描画するまで反映しないため、同じ瞬間に届いた複数の操作(再生成の直後の実行、実行の
@@ -120,7 +120,7 @@ function ProfilesRoute() {
   // パスフレーズ入力画面で、復号している間だけtrue(理由はimport-passphrase-handlers.ts)。
   const importDecrypting = useRef(false);
   // この画面が所有する保留(復号の結果として、Rust側に保留された内容)の識別子。確認画面の確定・破棄・離脱は、
-  // この識別子の保留だけを対象にする(他の画面が始めた復号の保留には触れない)。無ければnull。
+  // その保留だけを対象にする(他の画面が始めた復号の保留には触れない)。無ければnull。
   const ownedPendingImportId = useRef<number | null>(null);
   const [importBusy, setImportBusy] = useState(false);
   // 非同期の完了時に、最新の画面の状態を読むための写し(クロージャは、操作した時点の古い状態を掴む)。
@@ -128,7 +128,7 @@ function ProfilesRoute() {
   useLayoutEffect(() => {
     dialogRef.current = dialog;
   });
-  // パスフレーズ入力画面を開くたびに増やす識別子。同じファイルを開き直しても、別の画面として区別する
+  // パスフレーズ入力画面を開いた回の番号(開くたびに増やす)。同じファイルを開き直しても、別の画面として区別する
   // (復号の結果を、OKを押した時の画面にだけ返すため。理由はimport-passphrase-handlers.ts)。
   const importSessionCounter = useRef(0);
   // この画面が破棄されていないか(破棄された後に届いた復号の結果は、見る人が居ない)。
@@ -246,7 +246,7 @@ function ProfilesRoute() {
   };
 
   // 進行状況の遷移を、正へ先に適用し、画面の状態へ写す。閉じて開き直した後に届いた古い実行の
-  // 結果は、識別子が異なるため、新しい画面へ反映しない。
+  // 結果は、開いた回の番号が異なるため、新しい画面へ反映しない。
   const transitionExportSession = (update: (session: ExportDialogState) => ExportDialogState) => {
     const current = exportSessionRef.current;
     if (!current) return;

@@ -230,7 +230,7 @@ describe.each([0, 7])("createImportPassphraseHandlers(届いた結果の識別�
     });
   });
 
-  it("開いたままかは、OKを押した時の画面(セッション)で判定する。同じファイルを開き直した別の画面は、開いたままとは見なさない", async () => {
+  it("開いたままかは、OKを押した時の画面(開いた回の番号)で判定する。同じファイルを開き直した別の画面は、開いたままとは見なさない", async () => {
     const openSessions = new Set([2]);
     const asked: number[] = [];
     const { calls, ownedPendingId, decryption, handlers } = setup({

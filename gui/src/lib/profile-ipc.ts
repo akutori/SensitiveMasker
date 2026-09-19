@@ -148,7 +148,7 @@ export type ImportPreviewDto =
   | { kind: "single"; name: string; rules: ImportRuleDto[]; tags: string[] }
   | { kind: "all"; will_activate_profile_name: string | null; entries: ImportEntryDto[] };
 
-// previewImportの結果。pendingIdは、Rust側に保留された、復号済みの内容の識別子で、確定
+// previewImportの結果。pendingIdは、復号済みの内容をRust側に保留した、保留の識別子で、確定
 // (commitPendingImport)と破棄(clearPendingImport)は、この識別子で、その保留だけを指す。
 export interface ImportPreviewResult {
   pendingId: number;
@@ -186,15 +186,15 @@ export interface CommitImportResultDto {
   activated_profile_name: string | null;
 }
 
-// 指定した識別子の保留だけを確定する。その保留が無い(破棄済み・確定済み・保持数の上限で捨てられた)場合は失敗する。
+// 保留の識別子で指定した保留だけを確定する。その保留が無い(破棄済み・確定済み・保持数の上限で捨てられた)場合は失敗する。
 export async function commitPendingImport(pendingId: number): Promise<CommitImportResultDto> {
   assertPendingId(pendingId);
   return invoke<CommitImportResultDto>("commit_pending_import", { pendingId });
 }
 
-// 確認ダイアログのキャンセル・離脱時に呼ぶ。preview_importが復号した平文を
-// プロセス内に残さないためと、キャンセル後にcommitPendingImportを呼んでも
-// 確定しないようにするため。指定した識別子の保留だけを破棄する(他の保留は消さない)。
+// 保留の識別子で指定した保留だけを破棄する(他の保留は消さない)。preview_importが復号した平文をプロセス内に
+// 残さないためと、破棄した後にcommitPendingImportを呼んでも確定しないようにするため、確認画面の取り消し・
+// 画面を離れるとき・閉じられた画面へ遅れて届いた復号結果の破棄・確認されないまま残った前の保留の破棄で呼ぶ。
 // 識別子を省略して全ての保留を消す呼び方(E2Eの後片付け用)は、意図せず他の保留を消さないよう、ここには設けない。
 export async function clearPendingImport(pendingId: number): Promise<void> {
   assertPendingId(pendingId);
