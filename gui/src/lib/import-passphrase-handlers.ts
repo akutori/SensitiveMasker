@@ -6,10 +6,18 @@
 //   復号している間は、再入を受け付けない。
 // - 復号している間に画面が閉じられる(同じファイルで開き直される場合も含む)と、復号が終わった時点で、
 //   復号済みの内容がRust側に保留される(確認画面へ進む画面が、もう無いのに)。その内容が残り続けない
-//   よう、OKを押した時の画面(セッション)が開いたままでなければ、破棄する。破棄が終わるまでは、待ちを
-//   解かない(次の復号が、破棄と入れ違いになって、保留を消されないようにするため)。
+//   よう、OKを押した時の画面(セッション)が開いたままでなければ、届いた結果の保留を、その識別子を指定して
+//   破棄する(他の画面・他の復号の保留には触れない)。破棄が終わるまでは、待ちを解かない
+//   (この画面が始めた復号の後始末が終わってから、次の復号を受け付ける)。
+// - 復号の結果が届き、確認画面へ進むときは、その保留の識別子を、この画面が所有するものとして、確認画面を
+//   出すより前に記録する。確認画面の描画を待つと、その前に画面を離れたときに、保留を破棄できない。
 
-export interface ImportPassphraseDeps<Preview> {
+// 復号の結果。pendingIdは、Rust側に保留された、その復号済みの内容の識別子。
+export interface PendingPreview {
+  pendingId: number;
+}
+
+export interface ImportPassphraseDeps<Preview extends PendingPreview> {
   // OKを押した時点の、入力画面の対象。開いていなければ(閉じる途中に届いた押下)null。
   // sessionは、画面を開くたびに変わる識別子(同じファイルを開き直しても、別の画面として区別する)。
   target: () => { session: number; sourcePath: string; passphrase: string } | null;
@@ -18,17 +26,19 @@ export interface ImportPassphraseDeps<Preview> {
   isStillOpen: (session: number) => boolean;
   showConfirm: (preview: Preview) => void;
   showError: (error: unknown) => void;
-  // Rust側に保留された、復号済みの内容を破棄する。
-  discardPending: () => Promise<void>;
+  // 届いた結果の保留(Rust側の、復号済みの内容)だけを、その識別子を指定して破棄する。
+  discardPending: (preview: Preview) => Promise<void>;
   // 復号を始める・終えるたびに呼ぶ(OKなどの無効化の表示に使う)。
   onBusyChange: (busy: boolean) => void;
 }
 
-// decryptingは、復号を始めてから終えるまでの間だけtrueになる。再描画をまたいで保つため、呼び出し側が
-// 持つ(refを渡す)。
-export function createImportPassphraseHandlers<Preview>(
+// decryptingは、復号を始めてから終えるまでの間だけtrueになる。ownedPendingIdは、この画面が所有する保留
+// (確認画面へ進んだ結果の識別子。無ければnull)で、確認画面の操作(import-confirm-handlers.ts)が使う。
+// どちらも再描画をまたいで保つため、呼び出し側が持つ(refを渡す)。
+export function createImportPassphraseHandlers<Preview extends PendingPreview>(
   deps: ImportPassphraseDeps<Preview>,
-  decrypting: { current: boolean }
+  decrypting: { current: boolean },
+  ownedPendingId: { current: number | null }
 ) {
   return {
     async onConfirm() {
@@ -40,9 +50,10 @@ export function createImportPassphraseHandlers<Preview>(
       try {
         const preview = await deps.preview(target.sourcePath, target.passphrase);
         if (!deps.isStillOpen(target.session)) {
-          await deps.discardPending();
+          await deps.discardPending(preview);
           return;
         }
+        ownedPendingId.current = preview.pendingId;
         deps.showConfirm(preview);
       } catch (error) {
         // 閉じられた後の失敗(破棄の失敗を含む)は、見る人がいないため、表示しない。

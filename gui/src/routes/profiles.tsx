@@ -117,10 +117,11 @@ function ProfilesRoute() {
   // 二重押下など)が古い描画の状態を見て、画面に出ているものと違うパスフレーズで書き出したり、
   // 二重に実行したりしてしまう。遷移はこちらへ先に適用し、画面の状態(dialog)へ写す。
   const exportSessionRef = useRef<ExportDialogState | null>(null);
-  // 確認画面の「インポート実行」の確定を、始めてから終えるまでの間だけtrue(理由はimport-confirm-handlers.ts)。
-  const importConfirmStarted = useRef(false);
   // パスフレーズ入力画面で、復号している間だけtrue(理由はimport-passphrase-handlers.ts)。
   const importDecrypting = useRef(false);
+  // この画面が所有する保留(復号の結果として、Rust側に保留された内容)の識別子。確認画面の確定・破棄・離脱は、
+  // この識別子の保留だけを対象にする(他の画面が始めた復号の保留には触れない)。無ければnull。
+  const ownedPendingImportId = useRef<number | null>(null);
   const [importBusy, setImportBusy] = useState(false);
   // 非同期の完了時に、最新の画面の状態を読むための写し(クロージャは、操作した時点の古い状態を掴む)。
   const dialogRef = useRef(dialog);
@@ -163,15 +164,15 @@ function ProfilesRoute() {
   const importConfirmHandlers = createImportConfirmHandlers(
     {
       isOpen: () => dialog.kind === "importConfirm",
-      commit: () => appState.commitImport(),
-      discardPending: () => {
-        void appState.clearPendingImport();
+      commit: (pendingId) => appState.commitImport(pendingId),
+      discardPending: (pendingId) => {
+        void appState.clearPendingImport(pendingId);
       },
       close: closeDialog,
       closeIfStillOpen: () =>
         setDialog((current) => (current.kind === "importConfirm" ? { kind: "none" } : current)),
     },
-    importConfirmStarted
+    ownedPendingImportId
   );
 
   const importPassphraseHandlers = createImportPassphraseHandlers(
@@ -185,8 +186,8 @@ function ProfilesRoute() {
         const shown = dialogRef.current;
         return mounted.current && shown.kind === "importPassphrase" && shown.session === session;
       },
-      showConfirm: (preview) => {
-        setDialog({ kind: "importConfirm", rows: toImportPreviewRows(preview) });
+      showConfirm: (result) => {
+        setDialog({ kind: "importConfirm", rows: toImportPreviewRows(result.preview) });
         // 復号は完了済みでこの先パスフレーズ自体は不要になるため、state上に残さない。
         setImportPassphrase("");
       },
@@ -202,15 +203,16 @@ function ProfilesRoute() {
             : "パスフレーズが誤っているか、対応していないファイル形式です"
         );
       },
-      discardPending: () => appState.clearPendingImport(),
+      discardPending: (result) => appState.clearPendingImport(result.pendingId),
       onBusyChange: setImportBusy,
     },
-    importDecrypting
+    importDecrypting,
+    ownedPendingImportId
   );
 
-  // この画面を離れる(破棄される)と、復号済みの内容(Rust側の保留)を確認する人が居なくなるため、破棄する
-  // (破棄しない場合の理由はimport-confirm-handlers.ts)。復号している最中に離れた場合は、結果が届いた時に、
-  // isStillOpenがfalseになって破棄される。
+  // この画面を離れる(破棄される)と、復号済みの内容(Rust側の保留)を確認する人が居なくなるため、この画面が
+  // 所有する保留を破棄する(破棄しない場合の理由はimport-confirm-handlers.ts)。復号している最中に離れた場合は、
+  // 結果が届いた時に、isStillOpenがfalseになって、その結果の保留が破棄される。
   useEffect(() => {
     mounted.current = true;
     return () => {

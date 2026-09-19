@@ -1,5 +1,6 @@
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 
 use masking_core::{Mode, PatternType, Rule, RuleProfile};
 use profile_store::{decrypt_import_payload, AllImportEntry, AppPaths, ImportPreview, SecretString};
@@ -65,10 +66,62 @@ fn validate_import_source_path(source_path: &str) -> Result<PathBuf, String> {
     Ok(path)
 }
 
+/// 保留として同時に保持する復号済みの内容の件数の上限。復号済みの内容(平文)が、プロセス内に
+/// 無制限に溜まらないようにする。上限を超えると、最も古い保留から捨てる。
+const MAX_PENDING_IMPORTS: usize = 4;
+
 /// preview_importが復号した内容(ルール本体を含む)をIPCで往復させないための保持先。
-/// commit_pending_importが呼ばれるまでの間だけメモリ上に置く。
+/// commit_pending_import・clear_pending_importが呼ばれるまでの間だけメモリ上に置く。
+///
+/// 復号のたびに識別子を払い出して保持し、確定・破棄は、その識別子で、その保留だけを指す。
+/// 画面ごとに復号は独立して走るため、復号が重なっても、互いの保留を取り違えたり消したりしない。
+/// 保持できる件数には上限(MAX_PENDING_IMPORTS)がある。
 #[derive(Default)]
-pub struct PendingImportState(Mutex<Option<ImportPreview>>);
+pub struct PendingImportState(Mutex<PendingImports>);
+
+#[derive(Default)]
+struct PendingImports {
+    /// 次に払い出す識別子。単調に増え、再利用しない(捨てられた保留の識別子が、後から払い出された
+    /// 別の保留を指さないようにするため)。
+    next_id: u64,
+    /// 保留を、挿入順(古い順)に持つ。
+    entries: VecDeque<(u64, ImportPreview)>,
+}
+
+impl PendingImportState {
+    fn lock(&self) -> MutexGuard<'_, PendingImports> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// 保留を追加し、払い出した識別子を返す。識別子の払い出しと挿入は、同じロックの中で行う。
+    /// 保持数が上限に達している場合は、最も古い保留を捨ててから追加する。
+    fn insert(&self, preview: ImportPreview) -> u64 {
+        let mut pending = self.lock();
+        let id = pending.next_id;
+        pending.next_id += 1;
+        if pending.entries.len() >= MAX_PENDING_IMPORTS {
+            pending.entries.pop_front();
+        }
+        pending.entries.push_back((id, preview));
+        id
+    }
+
+    /// 指定した識別子の保留を取り出す(他の保留には触れない)。無ければNone。
+    fn take(&self, id: u64) -> Option<ImportPreview> {
+        let mut pending = self.lock();
+        let index = pending.entries.iter().position(|(entry_id, _)| *entry_id == id)?;
+        pending.entries.remove(index).map(|(_, preview)| preview)
+    }
+
+    /// Some(id)なら、その識別子の保留だけを、Noneなら、全ての保留を破棄する。
+    fn discard(&self, id: Option<u64>) {
+        let mut pending = self.lock();
+        match id {
+            Some(id) => pending.entries.retain(|(entry_id, _)| *entry_id != id),
+            None => pending.entries.clear(),
+        }
+    }
+}
 
 #[derive(Debug, serde::Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -86,6 +139,14 @@ pub enum ImportPreviewDto {
         will_activate_profile_name: Option<String>,
         entries: Vec<ImportEntryDto>,
     },
+}
+
+/// preview_importの結果。pending_idは、保留した復号済みの内容の識別子で、commit_pending_import・
+/// clear_pending_importは、この識別子で、その保留だけを指す。
+#[derive(Debug, serde::Serialize)]
+pub struct PreviewImportResultDto {
+    pub pending_id: u64,
+    pub preview: ImportPreviewDto,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -201,7 +262,7 @@ fn preview_import_impl(
     pending: &PendingImportState,
     source_path: &str,
     passphrase: SecretString,
-) -> Result<ImportPreviewDto, ExportImportError> {
+) -> Result<PreviewImportResultDto, ExportImportError> {
     let source_path = validate_import_source_path(source_path).map_err(ExportImportError::InvalidInput)?;
     let metadata = std::fs::metadata(&source_path)
         .map_err(|_| ExportImportError::Failed(GENERIC_IO_ERROR.to_string()))?;
@@ -216,8 +277,8 @@ fn preview_import_impl(
         with_store(state, |store| store.resolve_import_preview(payload)).map_err(ExportImportError::Failed)?;
     let has_active = with_store(state, |store| store.has_active_profile()).map_err(ExportImportError::Failed)?;
     let dto = to_dto(&preview, has_active);
-    *pending.0.lock().unwrap_or_else(|e| e.into_inner()) = Some(preview);
-    Ok(dto)
+    let pending_id = pending.insert(preview);
+    Ok(PreviewImportResultDto { pending_id, preview: dto })
 }
 
 /// インポート確定後、実際にどのプロファイルがアクティブになったか(無ければNone)。
@@ -227,16 +288,15 @@ pub struct CommitImportResultDto {
     pub activated_profile_name: Option<String>,
 }
 
+/// 指定した識別子の保留だけを確定する(他の保留には触れない)。その保留が無い(破棄済み・確定済み・
+/// 保持数の上限で捨てられた・払い出されていない識別子)場合は失敗する。保留は、確定の成否に関わらず、
+/// 取り出した時点で消費される。
 fn commit_pending_import_impl(
     state: &ProfileStoreState,
     pending: &PendingImportState,
+    pending_id: u64,
 ) -> Result<CommitImportResultDto, String> {
-    let preview = pending
-        .0
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .take()
-        .ok_or_else(|| "確認待ちのインポートがありません".to_string())?;
+    let preview = pending.take(pending_id).ok_or_else(|| "確認待ちのインポートがありません".to_string())?;
     let outcome = with_store(state, |store| store.commit_import(preview))?;
     Ok(match outcome {
         profile_store::ImportOutcome::Single { name, activated } => {
@@ -268,7 +328,8 @@ pub async fn export_all_to_file(
 }
 
 /// DBはまだ変更しない。復号結果はPendingImportStateに保持し、フロントエンドには
-/// 表示に必要な要約(名前・リネーム有無)のみを返す(ルール本体を往復させないため)。
+/// 表示に必要な要約(名前・リネーム有無)と、その保留の識別子(pending_id)のみを返す
+/// (ルール本体を往復させないため)。
 ///
 /// 悪意ある.smxファイルは、パスフレーズの正誤を検証する前に最大2^22相当(≒4GiB)の
 /// メモリ確保を要求しうる(export.rsのMAX_WORK_FACTOR_LOG_N参照)。
@@ -284,7 +345,7 @@ pub async fn preview_import(
     app: tauri::AppHandle,
     source_path: String,
     passphrase: SecretString,
-) -> Result<ImportPreviewDto, ExportImportError> {
+) -> Result<PreviewImportResultDto, ExportImportError> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<ProfileStoreState>();
         let pending = app.state::<PendingImportState>();
@@ -299,8 +360,9 @@ pub async fn commit_pending_import(
     app: tauri::AppHandle,
     state: tauri::State<'_, ProfileStoreState>,
     pending: tauri::State<'_, PendingImportState>,
+    pending_id: u64,
 ) -> Result<CommitImportResultDto, String> {
-    let result = commit_pending_import_impl(&state, &pending)?;
+    let result = commit_pending_import_impl(&state, &pending, pending_id)?;
     let _ = app.emit("profiles-changed", ());
     let _ = app.emit("tags-changed", ());
     Ok(result)
@@ -309,15 +371,20 @@ pub async fn commit_pending_import(
 /// 確認ダイアログのキャンセル・離脱時に呼ぶ。preview_importが復号した平文
 /// (ルール本体を含む)をプロセス内に残さないためと、キャンセル後にcommit_pending_import
 /// が呼ばれても確定しないようにするため(意思決定をRust側の状態にも反映する)。
+/// Some(id)なら、その識別子の保留だけを破棄する(他の保留は消さない)。Noneなら全ての保留を
+/// 破棄する(画面は使わない。E2Eの後片付けなどの全消去用)。
 /// 保留中の内容が無い場合も含め常に成功する(呼び出し側は「無かったこと」を
 /// エラーとして扱う必要が無いように、副作用の無い操作として設計する)。
-fn clear_pending_import_impl(pending: &PendingImportState) {
-    *pending.0.lock().unwrap_or_else(|e| e.into_inner()) = None;
+fn clear_pending_import_impl(pending: &PendingImportState, pending_id: Option<u64>) {
+    pending.discard(pending_id);
 }
 
 #[tauri::command]
-pub async fn clear_pending_import(pending: tauri::State<'_, PendingImportState>) -> Result<(), String> {
-    clear_pending_import_impl(&pending);
+pub async fn clear_pending_import(
+    pending: tauri::State<'_, PendingImportState>,
+    pending_id: Option<u64>,
+) -> Result<(), String> {
+    clear_pending_import_impl(&pending, pending_id);
     Ok(())
 }
 
@@ -366,6 +433,67 @@ mod tests {
         store
     }
 
+    const TEST_PASSPHRASE: &str = "correct horse battery staple";
+
+    /// ルール1件のプロファイル1件を書き出した、.smxのファイル。
+    fn export_profile_smx(profile_name: &str) -> tempfile::NamedTempFile {
+        let source_dir = tempfile::tempdir().unwrap();
+        // source_pathの検証が.smx拡張子を要求するため、テスト用の一時ファイルも
+        // 実際の運用(保存ダイアログのフィルタで常に.smxになる)に合わせる。
+        let file = tempfile::Builder::new().suffix(".smx").tempfile().unwrap();
+        let source_state =
+            ProfileStoreState::with_store_for_test(init_store_with_one_profile(source_dir.path(), profile_name));
+        export_profile_to_file_impl(
+            &source_state,
+            Ok(AppPaths::at(source_dir.path())),
+            profile_name,
+            passphrase(TEST_PASSPHRASE),
+            file.path().to_str().unwrap(),
+        )
+        .expect("エクスポートは成功するはず");
+        file
+    }
+
+    /// 何も取り込まれていない、取り込み先のストア。
+    struct EmptyDestination {
+        state: ProfileStoreState,
+        // stateがDBを閉じた後に、フォルダを消す(フィールドは、宣言した順に破棄される)。
+        _dir: tempfile::TempDir,
+    }
+
+    impl EmptyDestination {
+        fn new() -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let paths = AppPaths::at(dir.path());
+            profile_store::init_at(&paths).unwrap();
+            let store = ProfileStore::open_at(&paths).unwrap();
+            Self { state: ProfileStoreState::with_store_for_test(store), _dir: dir }
+        }
+
+        fn preview(&self, pending: &PendingImportState, file: &tempfile::NamedTempFile) -> PreviewImportResultDto {
+            preview_import_impl(&self.state, pending, file.path().to_str().unwrap(), passphrase(TEST_PASSPHRASE))
+                .expect("正しいパスフレーズでのpreviewは成功するはず")
+        }
+
+        fn profile_names(&self) -> Vec<String> {
+            with_store(&self.state, |s| s.list_profiles()).unwrap().into_iter().map(|p| p.name).collect()
+        }
+    }
+
+    /// 保留に入れる、実際のImportPreview(1件のプロファイルを、空の取り込み先へプレビューしたもの)。
+    fn sample_import_preview(profile_name: &str) -> ImportPreview {
+        let source_dir = tempfile::tempdir().unwrap();
+        let source_store = init_store_with_one_profile(source_dir.path(), profile_name);
+        let bytes = source_store.export_profile(profile_name, passphrase(TEST_PASSPHRASE)).unwrap();
+        let dest = EmptyDestination::new();
+        with_store(&dest.state, |store| store.preview_import(&bytes, passphrase(TEST_PASSPHRASE))).unwrap()
+    }
+
+    /// いま保持している保留の件数。
+    fn pending_count(pending: &PendingImportState) -> usize {
+        pending.0.lock().unwrap().entries.len()
+    }
+
     #[test]
     fn export_then_preview_then_commit_round_trips_into_a_different_store() {
         let source_dir = tempfile::tempdir().unwrap();
@@ -391,14 +519,14 @@ mod tests {
         let dest_state = ProfileStoreState::with_store_for_test(dest_store);
         let pending = PendingImportState::default();
 
-        let dto = preview_import_impl(
+        let preview_result = preview_import_impl(
             &dest_state,
             &pending,
             export_file.path().to_str().unwrap(),
             passphrase("correct horse battery staple"),
         )
         .expect("正しいパスフレーズでのpreviewは成功するはず");
-        match dto {
+        match preview_result.preview {
             ImportPreviewDto::Single { name, rules, tags } => {
                 assert_eq!(name, "元プロファイル");
                 // 確認前にルールの中身(名前・パターン・有効/無効)が見える必要があるため、
@@ -412,7 +540,8 @@ mod tests {
             ImportPreviewDto::All { .. } => panic!("単一プロファイルのエクスポートのはず"),
         }
 
-        let result = commit_pending_import_impl(&dest_state, &pending).expect("commitは成功するはず");
+        let result = commit_pending_import_impl(&dest_state, &pending, preview_result.pending_id)
+            .expect("commitは成功するはず");
         assert_eq!(
             result.activated_profile_name.as_deref(),
             Some("元プロファイル"),
@@ -454,7 +583,8 @@ mod tests {
             export_file.path().to_str().unwrap(),
             passphrase("correct horse battery staple"),
         )
-        .expect("正しいパスフレーズでのpreviewは成功するはず");
+        .expect("正しいパスフレーズでのpreviewは成功するはず")
+        .preview;
 
         // entries[i]とexported[i]のインデックス対応(zip)に依存しているため、名前で
         // エントリを探した上でそのルールが正しく自分自身のものであることを固定する
@@ -512,7 +642,8 @@ mod tests {
             export_file.path().to_str().unwrap(),
             passphrase("correct horse battery staple"),
         )
-        .expect("正しいパスフレーズでのpreviewは成功するはず");
+        .expect("正しいパスフレーズでのpreviewは成功するはず")
+        .preview;
 
         match dto {
             // インポートで無警告のままグローバルなタグ集合へ追加されうる問題への対応
@@ -549,7 +680,8 @@ mod tests {
             export_file.path().to_str().unwrap(),
             passphrase("correct horse battery staple"),
         )
-        .expect("正しいパスフレーズでのpreviewは成功するはず");
+        .expect("正しいパスフレーズでのpreviewは成功するはず")
+        .preview;
 
         match dto {
             ImportPreviewDto::All { will_activate_profile_name, .. } => {
@@ -592,8 +724,9 @@ mod tests {
         // エラーとして表示してよい種別(Failed)になっているはず。
         assert!(matches!(err, ExportImportError::Failed(_)));
 
-        // previewが失敗した場合、commitできる状態が残っていてはならない。
-        let commit_err = commit_pending_import_impl(&source_state, &pending)
+        // previewが失敗した場合、保留が残っていてはならない(どの識別子でも、確定できない)。
+        assert_eq!(pending_count(&pending), 0);
+        let commit_err = commit_pending_import_impl(&source_state, &pending, 0)
             .expect_err("previewが無いのでcommitも失敗するはず");
         assert_eq!(commit_err, "確認待ちのインポートがありません");
     }
@@ -605,7 +738,7 @@ mod tests {
         let state = ProfileStoreState::with_store_for_test(store);
         let pending = PendingImportState::default();
 
-        let err = commit_pending_import_impl(&state, &pending).expect_err("previewを呼んでいないので失敗するはず");
+        let err = commit_pending_import_impl(&state, &pending, 0).expect_err("previewを呼んでいないので失敗するはず");
         assert_eq!(err, "確認待ちのインポートがありません");
     }
 
@@ -613,38 +746,202 @@ mod tests {
     fn clear_pending_import_prevents_a_later_commit_from_succeeding() {
         // キャンセル操作をclear_pending_importで反映した後は、それより後に
         // commit_pending_importが呼ばれても(直接IPCを叩く経路を含め)確定しないはず。
-        let source_dir = tempfile::tempdir().unwrap();
-        let dest_dir = tempfile::tempdir().unwrap();
-        let export_file = tempfile::Builder::new().suffix(".smx").tempfile().unwrap();
-        let source_store = init_store_with_one_profile(source_dir.path(), "元プロファイル");
-        let source_state = ProfileStoreState::with_store_for_test(source_store);
-        export_profile_to_file_impl(
-            &source_state,
-            Ok(AppPaths::at(source_dir.path())),
-            "元プロファイル",
-            passphrase("correct horse battery staple"),
-            export_file.path().to_str().unwrap(),
-        )
-        .unwrap();
-
-        let dest_paths = AppPaths::at(dest_dir.path());
-        profile_store::init_at(&dest_paths).unwrap();
-        let dest_store = ProfileStore::open_at(&dest_paths).unwrap();
-        let dest_state = ProfileStoreState::with_store_for_test(dest_store);
+        let export_file = export_profile_smx("元プロファイル");
+        let dest = EmptyDestination::new();
         let pending = PendingImportState::default();
-        preview_import_impl(
-            &dest_state,
-            &pending,
-            export_file.path().to_str().unwrap(),
-            passphrase("correct horse battery staple"),
-        )
-        .expect("previewは成功するはず");
+        let pending_id = dest.preview(&pending, &export_file).pending_id;
 
-        clear_pending_import_impl(&pending);
+        clear_pending_import_impl(&pending, Some(pending_id));
 
-        let err = commit_pending_import_impl(&dest_state, &pending)
+        let err = commit_pending_import_impl(&dest.state, &pending, pending_id)
             .expect_err("キャンセル済みのはずなのでcommitは拒否されるはず");
         assert_eq!(err, "確認待ちのインポートがありません");
+        assert!(dest.profile_names().is_empty(), "拒否したのに取り込まれている");
+    }
+
+    // 別の識別子の確定は、失敗し、指定していない保留を消費しない(その保留は、その識別子で、そのまま確定できる)。
+    #[test]
+    fn commit_with_a_different_id_fails_and_does_not_consume_the_pending_import() {
+        let export_file = export_profile_smx("元プロファイル");
+        let dest = EmptyDestination::new();
+        let pending = PendingImportState::default();
+        let pending_id = dest.preview(&pending, &export_file).pending_id;
+
+        let err = commit_pending_import_impl(&dest.state, &pending, pending_id + 1)
+            .expect_err("払い出されていない識別子の確定は失敗するはず");
+        assert_eq!(err, "確認待ちのインポートがありません");
+        assert!(dest.profile_names().is_empty(), "別の識別子の確定で、取り込まれている");
+        assert_eq!(pending_count(&pending), 1, "別の識別子の確定が、保留を消費している");
+
+        commit_pending_import_impl(&dest.state, &pending, pending_id).expect("本来の識別子なら、確定できるはず");
+        assert_eq!(dest.profile_names(), vec!["元プロファイル".to_string()]);
+    }
+
+    // 別の識別子の破棄は、何もしない(その保留は、その識別子で、そのまま確定できる)。
+    #[test]
+    fn clear_with_a_different_id_does_nothing() {
+        let export_file = export_profile_smx("元プロファイル");
+        let dest = EmptyDestination::new();
+        let pending = PendingImportState::default();
+        let pending_id = dest.preview(&pending, &export_file).pending_id;
+
+        clear_pending_import_impl(&pending, Some(pending_id + 1));
+        assert_eq!(pending_count(&pending), 1, "別の識別子の破棄が、保留を消している");
+
+        commit_pending_import_impl(&dest.state, &pending, pending_id).expect("本来の識別子なら、確定できるはず");
+        assert_eq!(dest.profile_names(), vec!["元プロファイル".to_string()]);
+    }
+
+    // 復号が重なった2件(識別子の違う2つの保留)は、互いに独立して、どの順でも確定できる。
+    // 確定は、指定した識別子の内容だけを取り込む(取り違えない)。
+    #[test]
+    fn two_pending_imports_commit_independently_in_either_order() {
+        let file_a = export_profile_smx("プロファイルA");
+        let file_b = export_profile_smx("プロファイルB");
+        let dest = EmptyDestination::new();
+        let pending = PendingImportState::default();
+        let id_a = dest.preview(&pending, &file_a).pending_id;
+        let id_b = dest.preview(&pending, &file_b).pending_id;
+        assert_ne!(id_a, id_b, "復号のたびに、別の識別子が払い出されるはず");
+
+        commit_pending_import_impl(&dest.state, &pending, id_b).expect("Bの確定は成功するはず");
+        assert_eq!(dest.profile_names(), vec!["プロファイルB".to_string()], "Bの識別子で、Aが取り込まれている");
+
+        commit_pending_import_impl(&dest.state, &pending, id_a).expect("Bの確定の後でも、Aの確定は成功するはず");
+        let mut names = dest.profile_names();
+        names.sort();
+        assert_eq!(names, vec!["プロファイルA".to_string(), "プロファイルB".to_string()]);
+        assert_eq!(pending_count(&pending), 0);
+    }
+
+    // 一方の破棄は、もう一方の保留に影響しない。先に復号が終わった側(識別子が小さい方)を破棄しても、
+    // 後から復号が終わった側(識別子が大きい方)を破棄しても、残った側は確定できる。
+    #[test]
+    fn discarding_one_pending_import_leaves_the_other_committable() {
+        let file_a = export_profile_smx("プロファイルA");
+        let file_b = export_profile_smx("プロファイルB");
+        for discard_the_earlier in [true, false] {
+            let dest = EmptyDestination::new();
+            let pending = PendingImportState::default();
+            let earlier = dest.preview(&pending, &file_a).pending_id;
+            let later = dest.preview(&pending, &file_b).pending_id;
+            let (discarded, kept, kept_name) = if discard_the_earlier {
+                (earlier, later, "プロファイルB")
+            } else {
+                (later, earlier, "プロファイルA")
+            };
+
+            clear_pending_import_impl(&pending, Some(discarded));
+
+            let err = commit_pending_import_impl(&dest.state, &pending, discarded)
+                .expect_err("破棄した保留の確定は失敗するはず");
+            assert_eq!(err, "確認待ちのインポートがありません");
+            commit_pending_import_impl(&dest.state, &pending, kept).expect("破棄していない保留は、確定できるはず");
+            assert_eq!(dest.profile_names(), vec![kept_name.to_string()]);
+        }
+    }
+
+    // 確定は、成否に関わらず、指定した保留を消費する(同じ識別子での再度の確定は、失敗する)。
+    #[test]
+    fn commit_consumes_the_pending_import_even_when_the_commit_fails() {
+        let export_file = export_profile_smx("元プロファイル");
+        let dest = EmptyDestination::new();
+        let pending = PendingImportState::default();
+        let pending_id = dest.preview(&pending, &export_file).pending_id;
+        // 確認から確定までの間に、同名のプロファイルが作られると、確定は失敗する。
+        with_store(&dest.state, |store| {
+            store.create_profile(&RuleProfile::new("元プロファイル", None, vec![]).unwrap())
+        })
+        .unwrap();
+
+        commit_pending_import_impl(&dest.state, &pending, pending_id).expect_err("同名があるので、確定は失敗するはず");
+
+        assert_eq!(pending_count(&pending), 0, "失敗した確定が、保留を残している");
+        let err = commit_pending_import_impl(&dest.state, &pending, pending_id)
+            .expect_err("消費済みの保留は、再度の確定で失敗するはず");
+        assert_eq!(err, "確認待ちのインポートがありません");
+    }
+
+    // 保持数の上限を超えると、最も古い保留だけが捨てられ、その確定は、既存と同じ文言で失敗する。
+    #[test]
+    fn the_oldest_pending_import_is_dropped_when_the_limit_is_exceeded() {
+        let sample = sample_import_preview("元プロファイル");
+        let dest = EmptyDestination::new();
+        let pending = PendingImportState::default();
+
+        let ids: Vec<u64> = (0..=MAX_PENDING_IMPORTS).map(|_| pending.insert(sample.clone())).collect();
+
+        assert_eq!(pending_count(&pending), MAX_PENDING_IMPORTS, "保持数が、上限を超えている");
+        let err = commit_pending_import_impl(&dest.state, &pending, ids[0])
+            .expect_err("捨てられた最古の保留の確定は失敗するはず");
+        assert_eq!(err, "確認待ちのインポートがありません");
+        assert!(dest.profile_names().is_empty(), "捨てられた保留が、取り込まれている");
+
+        // 最古以外は、全て残っている。
+        commit_pending_import_impl(&dest.state, &pending, ids[MAX_PENDING_IMPORTS])
+            .expect("最新の保留は、確定できるはず");
+        for id in &ids[1..MAX_PENDING_IMPORTS] {
+            assert!(pending.take(*id).is_some(), "上限内の保留(識別子{id})が、捨てられている");
+        }
+    }
+
+    // 保持数が上限に達するまでは、何も捨てない。
+    #[test]
+    fn no_pending_import_is_dropped_up_to_the_limit() {
+        let sample = sample_import_preview("元プロファイル");
+        let pending = PendingImportState::default();
+
+        let ids: Vec<u64> = (0..MAX_PENDING_IMPORTS).map(|_| pending.insert(sample.clone())).collect();
+
+        assert_eq!(pending_count(&pending), MAX_PENDING_IMPORTS);
+        for id in ids {
+            assert!(pending.take(id).is_some(), "上限内の保留(識別子{id})が、捨てられている");
+        }
+    }
+
+    // 識別子は、取り出し・破棄・上限による廃棄の後も、再利用しない(古い識別子が、後から払い出された
+    // 別の保留を指さないようにする)。
+    #[test]
+    fn an_id_is_never_reused_after_its_pending_import_is_gone() {
+        let sample = sample_import_preview("元プロファイル");
+        let pending = PendingImportState::default();
+
+        let first = pending.insert(sample.clone());
+        assert!(pending.take(first).is_some());
+        let second = pending.insert(sample.clone());
+        pending.discard(Some(second));
+        let mut issued = vec![first, second];
+        for _ in 0..=MAX_PENDING_IMPORTS {
+            issued.push(pending.insert(sample.clone()));
+        }
+
+        let mut unique = issued.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique.len(), issued.len(), "識別子が再利用されている: {issued:?}");
+        assert!(issued.windows(2).all(|pair| pair[0] < pair[1]), "識別子が、払い出した順に増えていない: {issued:?}");
+        // 上限で捨てられた保留の識別子も、後から払い出された別の保留を指さない。
+        assert!(pending.take(first).is_none());
+        assert!(pending.take(second).is_none());
+    }
+
+    // 識別子を指定しない破棄は、全ての保留を破棄する(E2Eの後片付けなどの全消去用)。
+    #[test]
+    fn clearing_without_an_id_discards_every_pending_import() {
+        let sample = sample_import_preview("元プロファイル");
+        let dest = EmptyDestination::new();
+        let pending = PendingImportState::default();
+        let ids: Vec<u64> = (0..MAX_PENDING_IMPORTS).map(|_| pending.insert(sample.clone())).collect();
+
+        clear_pending_import_impl(&pending, None);
+
+        assert_eq!(pending_count(&pending), 0);
+        for id in ids {
+            let err = commit_pending_import_impl(&dest.state, &pending, id)
+                .expect_err("全消去の後は、どの保留も確定できないはず");
+            assert_eq!(err, "確認待ちのインポートがありません");
+        }
+        assert!(dest.profile_names().is_empty());
     }
 
     // UNCの表記はWindowsのパスの形式で、Unixでは、区切りではない文字を含む相対パスの名前になるため、

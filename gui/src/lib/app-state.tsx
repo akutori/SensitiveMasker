@@ -32,6 +32,7 @@ import {
   updateProfile as ipcUpdateProfile,
   isExportImportError,
   type ImportPreviewDto,
+  type ImportPreviewResult,
   type ProfileDetail,
 } from "./profile-ipc";
 
@@ -109,9 +110,10 @@ export interface AppStateValue {
   setProfileTags: (id: string, tags: string[]) => Promise<void>;
   exportProfile: (id: string, passphrase: string, destPath: string) => Promise<void>;
   exportAll: (passphrase: string, destPath: string) => Promise<void>;
-  previewImport: (sourcePath: string, passphrase: string) => Promise<ImportPreviewDto>;
-  commitImport: () => Promise<void>;
-  clearPendingImport: () => Promise<void>;
+  previewImport: (sourcePath: string, passphrase: string) => Promise<ImportPreviewResult>;
+  // 確定・破棄は、previewImportの結果のpendingIdで、その保留だけを指す。
+  commitImport: (pendingId: number) => Promise<void>;
+  clearPendingImport: (pendingId: number) => Promise<void>;
 
   tags: Tag[];
   createTag: (name: string) => Promise<void>;
@@ -401,9 +403,9 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
       // 想定内の入力ミスであり、モックアップ通り呼び出し元(パスフレーズ入力欄)で
       // インラインエラーとして表示する。
       previewImport: (sourcePath, passphrase) => ipcPreviewImport(sourcePath, passphrase),
-      commitImport: () =>
+      commitImport: (pendingId) =>
         reportAndRethrow("インポートに失敗しました", async () => {
-          const { activated_profile_name } = await ipcCommitPendingImport();
+          const { activated_profile_name } = await ipcCommitPendingImport(pendingId);
           await Promise.all([refreshProfiles(), refreshTags()]);
           // アクティブ未設定だった場合、無言でインポート内容がアクティブ化されうる
           // (監査指摘対応)。プレビュー画面でも事前に示されるが、実際に確定した
@@ -414,7 +416,7 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
         }),
       // キャンセル操作からのみ呼ばれる想定(commit成功/失敗時はRust側で既に消費済み)。
       // 失敗しても致命的ではない(プロセス内メモリの後始末のみ)ためトーストは出さない。
-      clearPendingImport: () => ipcClearPendingImport().catch(() => {}),
+      clearPendingImport: (pendingId) => ipcClearPendingImport(pendingId).catch(() => {}),
 
       tags,
       createTag: (name) =>
