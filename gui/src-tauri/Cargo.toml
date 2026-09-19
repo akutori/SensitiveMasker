@@ -57,3 +57,6 @@ e2e-testing = ["dep:tauri-plugin-wdio", "dep:tauri-plugin-wdio-webdriver"]
 
 [dev-dependencies]
 tempfile = "3.27.0"
+# 実際のコマンドを、IPCの境界(JSON)を通して呼ぶテスト(tauri::test)のため。dev-dependenciesに置くので、
+# 配布用ビルドの機能には含まれない。
+tauri = { version = "2.11", features = ["test"] }

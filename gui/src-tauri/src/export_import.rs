@@ -327,6 +327,9 @@ pub async fn export_all_to_file(
     export_all_to_file_impl(&state, resolve_paths(), passphrase, &dest_path)
 }
 
+// preview_import・commit_pending_importは、AppHandleのランタイムを型引数(R)で受け取る。実アプリ(Wry)と、
+// テスト用のtauri::test::MockRuntimeの、どちらでも、同じコマンドをIPCの境界(JSON)を通して呼べるようにするため。
+
 /// DBはまだ変更しない。復号結果はPendingImportStateに保持し、フロントエンドには
 /// 表示に必要な要約(名前・リネーム有無)と、その保留の識別子(pending_id)のみを返す
 /// (ルール本体を往復させないため)。
@@ -341,8 +344,8 @@ pub async fn export_all_to_file(
 /// tauri::Stateは'staticではなくこのスレッドへ直接持ち込めないため、AppHandle
 /// (Clone可能)経由でスレッド内から改めて状態を取得する。
 #[tauri::command]
-pub async fn preview_import(
-    app: tauri::AppHandle,
+pub async fn preview_import<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     source_path: String,
     passphrase: SecretString,
 ) -> Result<PreviewImportResultDto, ExportImportError> {
@@ -356,8 +359,8 @@ pub async fn preview_import(
 }
 
 #[tauri::command]
-pub async fn commit_pending_import(
-    app: tauri::AppHandle,
+pub async fn commit_pending_import<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     state: tauri::State<'_, ProfileStoreState>,
     pending: tauri::State<'_, PendingImportState>,
     pending_id: u64,
@@ -393,6 +396,7 @@ mod tests {
     use super::*;
     use masking_core::{Mode, PatternType, Rule, RuleProfile};
     use profile_store::{AppPaths, ProfileStore};
+    use serde_json::json;
 
     fn passphrase(s: &str) -> SecretString {
         SecretString::from(s.to_owned())
@@ -1191,5 +1195,296 @@ mod tests {
         // パスフレーズを試す前の事前検証で弾かれているため、フロントエンドが
         // パスフレーズエラーとして誤表示してはならない種別(InvalidInput)のはず。
         assert!(matches!(err, ExportImportError::InvalidInput(_)));
+    }
+
+    // 以下は、実際のコマンド(#[tauri::command]の関数)を、tauri::testのMockRuntime上で、IPCの境界(JSON)を通して
+    // 呼ぶテスト。フロントエンドとの取り決め(応答のキー名・引数のキー名・エラーの形)は、*_implを直接呼ぶテストでも、
+    // フロントエンド側のinvokeを差し替えるテストでも、確かめられない。
+
+    /// 本番と同じ3つのコマンド(preview_import・commit_pending_import・clear_pending_import)と状態を登録した、
+    /// MockRuntime上のアプリ。取り込み先は、空のストア(一時フォルダ内)で、開発機の実際のデータフォルダや
+    /// 環境変数には依存しない。
+    struct IpcHarness {
+        // フィールドは、宣言した順に破棄される(ウィンドウ、アプリ(ストアがDBを閉じる)、フォルダの順)。
+        webview: tauri::WebviewWindow<tauri::test::MockRuntime>,
+        app: tauri::App<tauri::test::MockRuntime>,
+        _dir: tempfile::TempDir,
+    }
+
+    impl IpcHarness {
+        fn new() -> Self {
+            let EmptyDestination { state, _dir } = EmptyDestination::new();
+            let app = tauri::test::mock_builder()
+                .manage(state)
+                .manage(PendingImportState::default())
+                .invoke_handler(tauri::generate_handler![preview_import, commit_pending_import, clear_pending_import])
+                .build(tauri::test::mock_context(tauri::test::noop_assets()))
+                .expect("MockRuntimeのアプリを組み立てられるはず");
+            let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
+                .build()
+                .expect("MockRuntimeのウィンドウを作れるはず");
+            Self { webview, app, _dir }
+        }
+
+        /// コマンドを、JSONの引数で呼ぶ。成功なら応答のJSON、失敗ならエラーのJSONを返す。
+        fn invoke(&self, cmd: &str, args: serde_json::Value) -> Result<serde_json::Value, serde_json::Value> {
+            let request = tauri::webview::InvokeRequest {
+                cmd: cmd.into(),
+                callback: tauri::ipc::CallbackFn(0),
+                error: tauri::ipc::CallbackFn(1),
+                url: if cfg!(any(windows, target_os = "android")) {
+                    "http://tauri.localhost"
+                } else {
+                    "tauri://localhost"
+                }
+                .parse()
+                .unwrap(),
+                body: tauri::ipc::InvokeBody::Json(args),
+                headers: Default::default(),
+                invoke_key: tauri::test::INVOKE_KEY.to_string(),
+            };
+            tauri::test::get_ipc_response(&self.webview, request)
+                .map(|body| body.deserialize::<serde_json::Value>().expect("応答は、JSONのはず"))
+        }
+
+        /// .smxのファイルを、正しいパスフレーズでpreview_importへ渡した、応答(JSON)。
+        fn preview(&self, file: &tempfile::NamedTempFile) -> serde_json::Value {
+            self.invoke(
+                "preview_import",
+                json!({ "sourcePath": file.path().to_str().unwrap(), "passphrase": TEST_PASSPHRASE }),
+            )
+            .expect("正しいパスフレーズでのpreview_importは成功するはず")
+        }
+
+        /// preview_importの応答から、保留の識別子を取り出す。
+        fn preview_pending_id(&self, file: &tempfile::NamedTempFile) -> u64 {
+            self.preview(file)["pending_id"].as_u64().expect("応答のpending_idは、整数のはず")
+        }
+
+        /// 取り込み先にあるプロファイルの名前(昇順)。
+        fn profile_names(&self) -> Vec<String> {
+            let state = self.app.state::<ProfileStoreState>();
+            let mut names: Vec<String> =
+                with_store(&state, |s| s.list_profiles()).unwrap().into_iter().map(|p| p.name).collect();
+            names.sort();
+            names
+        }
+
+        /// いま保持している保留の件数。
+        fn pending_count(&self) -> usize {
+            let pending = self.app.state::<PendingImportState>();
+            pending_count(&pending)
+        }
+    }
+
+    /// 2件のプロファイル(プロファイルA・B)を、全体エクスポートした、.smxのファイル。
+    fn export_all_smx() -> tempfile::NamedTempFile {
+        let source_dir = tempfile::tempdir().unwrap();
+        let file = tempfile::Builder::new().suffix(".smx").tempfile().unwrap();
+        let source_state = ProfileStoreState::with_store_for_test(init_store_with_two_profiles(source_dir.path()));
+        export_all_to_file_impl(
+            &source_state,
+            Ok(AppPaths::at(source_dir.path())),
+            passphrase(TEST_PASSPHRASE),
+            file.path().to_str().unwrap(),
+        )
+        .expect("エクスポートは成功するはず");
+        file
+    }
+
+    fn sorted_keys(value: &serde_json::Value) -> Vec<&str> {
+        let mut keys: Vec<&str> =
+            value.as_object().expect("JSONのオブジェクトのはず").keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        keys
+    }
+
+    /// 確認画面に出す、ルール1件のJSON(有効な、連番のリテラルのルール)。
+    fn rule_json(name: &str, pattern: &str, prefix: &str) -> serde_json::Value {
+        json!({
+            "name": name,
+            "pattern_type": "literal",
+            "pattern": pattern,
+            "mode": "sequential",
+            "fixed_value": null,
+            "prefix": prefix,
+            "enabled": true,
+        })
+    }
+
+    #[test]
+    fn preview_import_over_ipc_returns_pending_id_and_a_single_profile_preview() {
+        let harness = IpcHarness::new();
+
+        let response = harness.preview(&export_profile_smx("元プロファイル"));
+
+        // フロントエンドは、この2つのキー名で応答を読む。
+        assert_eq!(sorted_keys(&response), ["pending_id", "preview"]);
+        assert!(response["pending_id"].is_u64(), "pending_idが整数でない: {response}");
+        assert_eq!(
+            response["preview"],
+            json!({
+                "kind": "single",
+                "name": "元プロファイル",
+                "rules": [rule_json("電話番号", "0120", "TEL")],
+                "tags": [],
+            })
+        );
+        assert_eq!(harness.pending_count(), 1, "応答した識別子の保留が、Rust側に残っているはず");
+    }
+
+    #[test]
+    fn preview_import_over_ipc_returns_the_all_profiles_preview() {
+        let harness = IpcHarness::new();
+
+        let response = harness.preview(&export_all_smx());
+
+        assert_eq!(sorted_keys(&response), ["pending_id", "preview"]);
+        let preview = &response["preview"];
+        assert_eq!(sorted_keys(preview), ["entries", "kind", "will_activate_profile_name"]);
+        assert_eq!(preview["kind"], "all");
+        // 取り込み先はアクティブ未設定のため、取り込み元でアクティブだった(先に作成した)プロファイルAが、
+        // このインポートでアクティブになる。
+        assert_eq!(preview["will_activate_profile_name"], "プロファイルA");
+        let entries = preview["entries"].as_array().expect("entriesは配列のはず");
+        assert_eq!(entries.len(), 2);
+        // エントリの並びには依存せず、名前で探す。
+        let entry = |name: &str| {
+            entries
+                .iter()
+                .find(|e| e["original_name"] == name)
+                .unwrap_or_else(|| panic!("{name}のエントリがあるはず: {entries:?}"))
+        };
+        assert_eq!(
+            *entry("プロファイルA"),
+            json!({
+                "original_name": "プロファイルA",
+                "resolved_name": "プロファイルA",
+                "renamed": false,
+                "rules": [rule_json("Aルール", "AAA", "A")],
+                "tags": [],
+            })
+        );
+        assert_eq!(
+            *entry("プロファイルB"),
+            json!({
+                "original_name": "プロファイルB",
+                "resolved_name": "プロファイルB",
+                "renamed": false,
+                "rules": [rule_json("Bルール", "BBB", "B")],
+                "tags": [],
+            })
+        );
+    }
+
+    #[test]
+    fn preview_import_over_ipc_reports_a_rejected_source_as_kind_and_message() {
+        let harness = IpcHarness::new();
+        let dir = tempfile::tempdir().unwrap();
+        let wrong_extension = dir.path().join("import.txt");
+
+        let err = harness
+            .invoke(
+                "preview_import",
+                json!({ "sourcePath": wrong_extension.to_str().unwrap(), "passphrase": TEST_PASSPHRASE }),
+            )
+            .expect_err("拡張子が.smxでないファイルは、拒否されるはず");
+
+        // フロントエンド(isExportImportError)は、kindとmessageの2つのキーで、エラーを判別する。
+        assert_eq!(err, json!({ "kind": "invalid_input", "message": "拡張子が.smxのファイルを選択してください" }));
+        assert_eq!(harness.pending_count(), 0);
+    }
+
+    #[test]
+    fn commit_pending_import_over_ipc_commits_only_the_pending_import_of_the_given_id() {
+        let harness = IpcHarness::new();
+        let id_a = harness.preview_pending_id(&export_profile_smx("プロファイルA"));
+        let id_b = harness.preview_pending_id(&export_profile_smx("プロファイルB"));
+        assert_ne!(id_a, id_b, "復号のたびに、別の識別子が払い出されるはず");
+
+        // 識別子は、キーpendingIdで渡す(フロントエンドが、この名前で渡す)。
+        let result = harness
+            .invoke("commit_pending_import", json!({ "pendingId": id_b }))
+            .expect("Bの識別子の確定は成功するはず");
+        // 取り込み先はアクティブ未設定だったため、Bがアクティブになる。
+        assert_eq!(result, json!({ "activated_profile_name": "プロファイルB" }));
+        assert_eq!(harness.profile_names(), ["プロファイルB"], "Bの識別子で、Aが取り込まれている");
+        assert_eq!(harness.pending_count(), 1, "指定していないAの保留が、消費されている");
+
+        let result = harness
+            .invoke("commit_pending_import", json!({ "pendingId": id_a }))
+            .expect("Bの確定の後でも、Aの識別子の確定は成功するはず");
+        // 既にBがアクティブなため、Aはアクティブにならない。
+        assert_eq!(result, json!({ "activated_profile_name": null }));
+        assert_eq!(harness.profile_names(), ["プロファイルA", "プロファイルB"]);
+        assert_eq!(harness.pending_count(), 0);
+    }
+
+    #[test]
+    fn commit_pending_import_over_ipc_fails_for_a_missing_or_wrong_id_and_consumes_nothing() {
+        let harness = IpcHarness::new();
+        let id = harness.preview_pending_id(&export_profile_smx("元プロファイル"));
+
+        // キー(pendingId)が無い呼び出しは、失敗する。エラーは、足りないキーの名前を含む。
+        let err = harness.invoke("commit_pending_import", json!({})).expect_err("キーが無いので、失敗するはず");
+        assert!(err.as_str().is_some_and(|message| message.contains("pendingId")), "予期しないエラー: {err}");
+        // 別の綴り(pending_id)のキーでは、識別子を受け取れない。
+        harness
+            .invoke("commit_pending_import", json!({ "pending_id": id }))
+            .expect_err("別の綴りのキーでは、失敗するはず");
+        // 払い出されていない識別子は、既存と同じ文言で失敗する。
+        let err = harness
+            .invoke("commit_pending_import", json!({ "pendingId": id + 1 }))
+            .expect_err("払い出されていない識別子は、失敗するはず");
+        assert_eq!(err, json!("確認待ちのインポートがありません"));
+
+        assert!(harness.profile_names().is_empty(), "失敗した確定で、取り込まれている");
+        assert_eq!(harness.pending_count(), 1, "失敗した確定が、保留を消費している");
+        harness
+            .invoke("commit_pending_import", json!({ "pendingId": id }))
+            .expect("本来の識別子なら、確定できるはず");
+        assert_eq!(harness.profile_names(), ["元プロファイル"]);
+    }
+
+    #[test]
+    fn clear_pending_import_over_ipc_discards_only_the_pending_import_of_the_given_id() {
+        let harness = IpcHarness::new();
+        let id_a = harness.preview_pending_id(&export_profile_smx("プロファイルA"));
+        let id_b = harness.preview_pending_id(&export_profile_smx("プロファイルB"));
+
+        // 識別子は、キーpendingIdで渡す(フロントエンドが、この名前で渡す)。
+        let response = harness
+            .invoke("clear_pending_import", json!({ "pendingId": id_a }))
+            .expect("識別子を指定した破棄は成功するはず");
+        assert_eq!(response, serde_json::Value::Null);
+
+        assert_eq!(harness.pending_count(), 1, "指定していないBの保留が、消えている");
+        let err = harness
+            .invoke("commit_pending_import", json!({ "pendingId": id_a }))
+            .expect_err("破棄したAは、確定できないはず");
+        assert_eq!(err, json!("確認待ちのインポートがありません"));
+        harness
+            .invoke("commit_pending_import", json!({ "pendingId": id_b }))
+            .expect("破棄していないBは、確定できるはず");
+        assert_eq!(harness.profile_names(), ["プロファイルB"]);
+    }
+
+    // キーが無い呼び出しは、全ての保留を破棄する(E2Eの後片付けが使う)。
+    #[test]
+    fn clear_pending_import_over_ipc_without_a_key_discards_every_pending_import() {
+        let harness = IpcHarness::new();
+        let id_a = harness.preview_pending_id(&export_profile_smx("プロファイルA"));
+        let id_b = harness.preview_pending_id(&export_profile_smx("プロファイルB"));
+
+        harness.invoke("clear_pending_import", json!({})).expect("キーの無い破棄は成功するはず");
+
+        assert_eq!(harness.pending_count(), 0);
+        for id in [id_a, id_b] {
+            let err = harness
+                .invoke("commit_pending_import", json!({ "pendingId": id }))
+                .expect_err("全消去の後は、どの保留も確定できないはず");
+            assert_eq!(err, json!("確認待ちのインポートがありません"));
+        }
+        assert!(harness.profile_names().is_empty());
     }
 }
