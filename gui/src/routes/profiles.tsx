@@ -25,13 +25,11 @@ import {
   type ExportDialogState,
 } from "@/lib/export-dialog-state";
 import { createOperationCounter } from "@/lib/operation-counter";
+import { createPassphraseClipboard } from "@/lib/passphrase-clipboard";
 import { createImportConfirmHandlers } from "@/lib/import-confirm-handlers";
 import { createImportPassphraseHandlers } from "@/lib/import-passphrase-handlers";
 import { writeClipboardText, clearClipboardIfMatches } from "@/lib/clipboard-ipc";
-import {
-  CLIPBOARD_CLEAR_DELAY_MS,
-  CLIPBOARD_CLEAR_DELAY_SECONDS,
-} from "@/lib/clipboard-clear-delay";
+import { CLIPBOARD_CLEAR_DELAY_SECONDS } from "@/lib/clipboard-clear-delay";
 import { readTextFile } from "@/lib/text-file-ipc";
 import { previewEnvImport, type EnvCandidate } from "@/lib/env-import-ipc";
 
@@ -131,17 +129,29 @@ function ProfilesRoute() {
   });
   const [importPassphrase, setImportPassphrase] = useState("");
   const [importPassphraseError, setImportPassphraseError] = useState<string | undefined>();
-  const clipboardClearTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // 直近でコピーに成功したパスフレーズ(自動クリア待ちの間だけ保持)。再生成時に
-  // その場でクリアするため、タイマーの生存とは別に値そのものを覚えておく。
-  const lastCopiedPassphrase = useRef<string | null>(null);
-  // コピー処理の完了(Rustへの書き込み確認)を待つ間に再生成された場合、後から
-  // 解決した古い呼び出しがタイマー・状態を上書きしないようにするための世代カウンタ。
-  const copyGeneration = useRef(0);
   // コピー/クリアのIPC応答待ちの間は、コピー・再生成を受け付けない(理由はoperation-counter.ts)。
   // ボタンの無効化に使うstateは、件数の変化の写しである。
   const [clipboardBusy, setClipboardBusy] = useState(false);
   const [clipboardOperations] = useState(() => createOperationCounter(setClipboardBusy));
+  // パスフレーズのコピーと、その自動クリアの制御(理由と仕様はpassphrase-clipboard.ts)。
+  const [passphraseClipboard] = useState(() =>
+    createPassphraseClipboard({
+      write: writeClipboardText,
+      clearIfMatches: clearClipboardIfMatches,
+      track: clipboardOperations.track,
+      notify: {
+        copied: () =>
+          toast.success(
+            `パスフレーズをコピーしました(${CLIPBOARD_CLEAR_DELAY_SECONDS}秒後に自動クリアを試みます)`
+          ),
+        copyFailed: () => toast.error("クリップボードへのコピーに失敗しました"),
+        notCleared: () =>
+          toast.warning(
+            "クリップボードの内容を確認できませんでした。パスフレーズが残っている場合は手動でクリアしてください"
+          ),
+      },
+    })
+  );
 
   const closeDialog = () => setDialog({ kind: "none" });
 
@@ -202,75 +212,6 @@ function ProfilesRoute() {
     disabled: !(dialog.kind === "export" && isPassphraseAtRisk(dialog.session.phase)),
     enableBeforeUnload: false,
   });
-
-  const cancelClipboardClear = () => {
-    if (clipboardClearTimer.current) {
-      clearTimeout(clipboardClearTimer.current);
-      clipboardClearTimer.current = null;
-    }
-  };
-
-  // 「確認できなかった」だけでは「まだ残っている」とは断定できない(他の内容に既に
-  // 上書きされていた場合も読み取り自体は失敗しうるため)。断定形の警告にしない。
-  const warnClipboardNotClearedAutomatically = () =>
-    toast.warning("クリップボードの内容を確認できませんでした。パスフレーズが残っている場合は手動でクリアしてください");
-
-  // 書き込み・確認・クリアは全てRust側のコマンドで行う。navigator.clipboard.readText()は
-  // ウィンドウのフォーカスとclipboard-read権限を要求し、コピー後に他アプリへ切り替える
-  // という最も一般的な操作フローで失敗するため使わない。
-  //
-  // copyGenerationは「この呼び出しが今なお最新の操作か」の判定に一本化して使う
-  // (書き込み完了時の判定だけでなく、自動クリアの結果が返ってきた時点でも同じ
-  // 判定に使う)。既に次のコピー/再生成が発生していれば、古い呼び出しの結果は
-  // (成功・失敗を問わず)警告や状態更新の対象にしない。
-  const copyPassphraseWithAutoClear = (value: string) => {
-    cancelClipboardClear();
-    const generation = ++copyGeneration.current;
-    clipboardOperations.track(writeClipboardText(value))
-      .then(() => {
-        if (copyGeneration.current !== generation) return;
-        lastCopiedPassphrase.current = value;
-        toast.success(
-          `パスフレーズをコピーしました(${CLIPBOARD_CLEAR_DELAY_SECONDS}秒後に自動クリアを試みます)`
-        );
-        clipboardClearTimer.current = setTimeout(() => {
-          clipboardClearTimer.current = null;
-          clipboardOperations.track(clearClipboardIfMatches(value))
-            .then((result) => {
-              if (copyGeneration.current !== generation) return;
-              if (result.outcome === "skipped_unable_to_verify") {
-                warnClipboardNotClearedAutomatically();
-              }
-              lastCopiedPassphrase.current = null;
-            })
-            .catch(() => {
-              if (copyGeneration.current === generation) warnClipboardNotClearedAutomatically();
-            });
-        }, CLIPBOARD_CLEAR_DELAY_MS);
-      })
-      .catch(() => {
-        if (copyGeneration.current !== generation) return;
-        toast.error("クリップボードへのコピーに失敗しました");
-      });
-  };
-
-  // タイマーの取り消しだけでは、既にコピー済みの値はクリップボードに残り続ける
-  // ため、再生成時はその場でクリアを試みる。
-  const clearCopiedPassphraseNow = () => {
-    cancelClipboardClear();
-    const generation = ++copyGeneration.current;
-    const copied = lastCopiedPassphrase.current;
-    if (!copied) return;
-    lastCopiedPassphrase.current = null;
-    clipboardOperations.track(clearClipboardIfMatches(copied))
-      .then((result) => {
-        if (copyGeneration.current !== generation) return;
-        if (result.outcome === "skipped_unable_to_verify") warnClipboardNotClearedAutomatically();
-      })
-      .catch(() => {
-        if (copyGeneration.current === generation) warnClipboardNotClearedAutomatically();
-      });
-  };
 
   // エクスポートを開く。パスフレーズはここで生成し、進行状況の正(exportSessionRef)にも置く。
   const openExportSession = (target: string, profileId: string | null) => {
@@ -558,7 +499,7 @@ function ProfilesRoute() {
           // 閉じる途中(フェードアウト中)に届いたクリックで、空文字をコピーしないため。
           const session = currentExportSession();
           if (!session) return;
-          copyPassphraseWithAutoClear(session.passphrase);
+          passphraseClipboard.copy(session.passphrase);
         }}
         onRegenerate={() => {
           if (clipboardOperations.isBusy()) return;
@@ -566,7 +507,7 @@ function ProfilesRoute() {
           if (!session || !canRegenerate(session)) return;
           // 旧パスフレーズが既にコピーされていた場合、タイマーの取り消しだけでは
           // クリップボードに残り続けるため、その場でクリアを試みる。
-          clearCopiedPassphraseNow();
+          passphraseClipboard.clearNow();
           transitionExportSession((current) => regeneratePassphrase(current, generatePassphrase()));
         }}
         onExport={exportToFile}
