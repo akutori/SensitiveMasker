@@ -46,7 +46,7 @@ fn has_smx_extension(path: &Path) -> bool {
 // データフォルダの解決(resolve_paths。環境変数を読む)は呼び出し側で行い、引数で受け取る
 // (テストが、実際のデータフォルダの有無に依存しないようにする。text_file_io.rsのwrite_text_file_impl
 // と同じ方針)。
-fn validate_export_dest_path_impl(dest_path: &str, app_paths: Result<AppPaths, String>) -> Result<PathBuf, String> {
+fn validate_export_dest_path(dest_path: &str, app_paths: Result<AppPaths, String>) -> Result<PathBuf, String> {
     let path = profile_store::normalize_and_reject_special_forms(dest_path).map_err(|e| e.to_string())?;
     if !has_smx_extension(&path) {
         return Err("保存先には拡張子.smxを指定してください".to_string());
@@ -179,7 +179,7 @@ fn export_profile_to_file_impl(
     dest_path: &str,
 ) -> Result<(), ExportImportError> {
     let dest_path =
-        validate_export_dest_path_impl(dest_path, app_paths).map_err(ExportImportError::InvalidInput)?;
+        validate_export_dest_path(dest_path, app_paths).map_err(ExportImportError::InvalidInput)?;
     let bytes = with_store(state, |store| store.export_profile(name, passphrase)).map_err(ExportImportError::Failed)?;
     std::fs::write(&dest_path, bytes).map_err(|_| ExportImportError::Failed(GENERIC_IO_ERROR.to_string()))
 }
@@ -191,7 +191,7 @@ fn export_all_to_file_impl(
     dest_path: &str,
 ) -> Result<(), ExportImportError> {
     let dest_path =
-        validate_export_dest_path_impl(dest_path, app_paths).map_err(ExportImportError::InvalidInput)?;
+        validate_export_dest_path(dest_path, app_paths).map_err(ExportImportError::InvalidInput)?;
     let bytes = with_store(state, |store| store.export_all(passphrase)).map_err(ExportImportError::Failed)?;
     std::fs::write(&dest_path, bytes).map_err(|_| ExportImportError::Failed(GENERIC_IO_ERROR.to_string()))
 }
@@ -652,7 +652,7 @@ mod tests {
     #[test]
     #[cfg(windows)]
     fn validate_export_dest_path_rejects_unc_paths() {
-        let err = validate_export_dest_path_impl(r"\\server\share\export.smx", Err("unused".to_string()))
+        let err = validate_export_dest_path(r"\\server\share\export.smx", Err("unused".to_string()))
             .expect_err("UNCパスは拒否されるはず");
         assert!(err.contains("特殊な形式"), "予期しないエラー文言: {err}");
     }
@@ -661,7 +661,7 @@ mod tests {
     fn validate_export_dest_path_rejects_wrong_extension() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("export.txt");
-        let err = validate_export_dest_path_impl(path.to_str().unwrap(), Err("unused".to_string()))
+        let err = validate_export_dest_path(path.to_str().unwrap(), Err("unused".to_string()))
             .expect_err(".smx以外の拡張子は拒否されるはず");
         assert!(err.contains(".smx"), "予期しないエラー文言: {err}");
     }
@@ -672,7 +672,7 @@ mod tests {
         let app_paths = AppPaths::at(data_dir.path());
         let inside = data_dir.path().join("sneaky.smx");
 
-        let err = validate_export_dest_path_impl(inside.to_str().unwrap(), Ok(app_paths))
+        let err = validate_export_dest_path(inside.to_str().unwrap(), Ok(app_paths))
             .expect_err("アプリのデータフォルダ内への書き込みは拒否されるはず");
         assert!(err.contains("データフォルダ"), "予期しないエラー文言: {err}");
     }
@@ -684,7 +684,7 @@ mod tests {
         let app_paths = AppPaths::at(data_dir.path());
         let dest = export_dir.path().join("export.smx");
 
-        validate_export_dest_path_impl(dest.to_str().unwrap(), Ok(app_paths))
+        validate_export_dest_path(dest.to_str().unwrap(), Ok(app_paths))
             .expect("データフォルダ外への正常な保存は許可されるはず");
     }
 
@@ -759,7 +759,7 @@ mod tests {
         let differently_cased = data_dir.path().to_string_lossy().to_uppercase();
         let sneaky = format!("{differently_cased}\\SNEAKY.smx");
 
-        let err = validate_export_dest_path_impl(&sneaky, Ok(app_paths))
+        let err = validate_export_dest_path(&sneaky, Ok(app_paths))
             .expect_err("大文字小文字が違うだけの同一フォルダも拒否されるはず");
         assert!(err.contains("データフォルダ"), "予期しないエラー文言: {err}");
     }
@@ -794,7 +794,7 @@ mod tests {
         }
 
         let sneaky = link_path.join("sneaky.smx");
-        let err = validate_export_dest_path_impl(sneaky.to_str().unwrap(), Ok(app_paths))
+        let err = validate_export_dest_path(sneaky.to_str().unwrap(), Ok(app_paths))
             .expect_err("ジャンクション経由でのデータフォルダアクセスも拒否されるはず");
         assert!(err.contains("データフォルダ"), "予期しないエラー文言: {err}");
     }
@@ -807,7 +807,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let dest = dir.path().join("export.smx");
 
-        validate_export_dest_path_impl(dest.to_str().unwrap(), Err("データディレクトリ解決失敗".to_string()))
+        validate_export_dest_path(dest.to_str().unwrap(), Err("データディレクトリ解決失敗".to_string()))
             .expect_err("データフォルダの場所を解決できない場合は安全側に倒して拒否するはず");
     }
 
@@ -823,7 +823,7 @@ mod tests {
         let export_dir = tempfile::tempdir().unwrap();
         let dest = export_dir.path().join("export.smx");
 
-        validate_export_dest_path_impl(dest.to_str().unwrap(), Ok(app_paths))
+        validate_export_dest_path(dest.to_str().unwrap(), Ok(app_paths))
             .expect_err("データフォルダの実体を確認できない場合は安全側に倒して拒否するはず");
     }
 
