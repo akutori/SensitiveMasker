@@ -12,7 +12,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
 import { CLIPBOARD_CLEAR_DELAY_SECONDS } from "@/lib/clipboard-clear-delay";
-import type { ExportPhase } from "@/lib/export-dialog-state";
+import { isPassphraseAtRisk, type ExportPhase } from "@/lib/export-dialog-state";
 
 export interface ExportModalProps {
   open: boolean;
@@ -60,7 +60,7 @@ export function ExportModal({
   // Escapeと背景を押す操作は、操作の意図を確かめずに閉じてしまう。編集中(まだ何も書き出して
   // いない)以外は、パスフレーズを失うため受け付けない。
   const preventImplicitClose = (event: Event) => {
-    if (status !== "editing") event.preventDefault();
+    if (isPassphraseAtRisk(status)) event.preventDefault();
   };
 
   // 開くたびに非表示から始める(前回の表示状態を引き継がない)。呼び出し元は

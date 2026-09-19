@@ -22,6 +22,13 @@ export function openExportDialog(sessionId: number, passphrase: string): ExportD
   return { phase: "editing", sessionId, passphrase };
 }
 
+// 書き出しが始まった後は、この画面のパスフレーズが、書き出したファイルを開ける唯一の手がかりになる。
+// 誤操作(Escape・背景クリック・履歴の移動など)で、画面ごと失わせてはならない局面かどうか。
+// 編集中は、まだ何も書き出していないので、失っても失うものがない。
+export function isPassphraseAtRisk(phase: ExportPhase): boolean {
+  return phase !== "editing";
+}
+
 export function canRegenerate(state: ExportDialogState): boolean {
   return state.phase === "editing";
 }

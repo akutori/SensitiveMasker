@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { createFileRoute, useBlocker, useNavigate } from "@tanstack/react-router";
 import { toast } from "sonner";
 import { ProfileManagementScreen, type SortOption } from "@/components/profile-management-screen";
@@ -19,10 +19,12 @@ import {
   canRegenerate,
   canStartExport,
   completeExport,
+  isPassphraseAtRisk,
   openExportDialog,
   regeneratePassphrase,
   type ExportDialogState,
 } from "@/lib/export-dialog-state";
+import { createOperationCounter } from "@/lib/operation-counter";
 import { writeClipboardText, clearClipboardIfMatches } from "@/lib/clipboard-ipc";
 import {
   CLIPBOARD_CLEAR_DELAY_MS,
@@ -52,6 +54,8 @@ function sortProfiles<T extends { name: string; updatedAt: string }>(
   else sorted.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
   return sorted;
 }
+
+const blockAlways = () => true;
 
 function generatePassphrase(): string {
   return crypto.randomUUID().replace(/-/g, "").slice(0, 20);
@@ -108,8 +112,11 @@ function ProfilesRoute() {
   const [invalidTagId, setInvalidTagId] = useState<string | "new" | undefined>();
   // エクスポート画面を開くたびに増やす識別子(export-dialog-state.tsのsessionId)。
   const exportSessionCounter = useRef(0);
-  // 書き出し(保存先の選択から完了まで)を実行している間だけtrue。
-  const exportInFlight = useRef(false);
+  // エクスポートの進行状況(編集中→実行中→成功後)の、同期的に読める正。React 19は離散イベントの
+  // 更新を再描画するまで反映しないため、同じ瞬間に届いた複数の操作(再生成の直後の実行、実行の
+  // 二重押下など)が古い描画の状態を見て、画面に出ているものと違うパスフレーズで書き出したり、
+  // 二重に実行したりしてしまう。遷移はこちらへ先に適用し、画面の状態(dialog)へ写す。
+  const exportSessionRef = useRef<ExportDialogState | null>(null);
   const [importPassphrase, setImportPassphrase] = useState("");
   const [importPassphraseError, setImportPassphraseError] = useState<string | undefined>();
   const clipboardClearTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -119,22 +126,18 @@ function ProfilesRoute() {
   // コピー処理の完了(Rustへの書き込み確認)を待つ間に再生成された場合、後から
   // 解決した古い呼び出しがタイマー・状態を上書きしないようにするための世代カウンタ。
   const copyGeneration = useRef(0);
-  // コピー/クリアのIPC応答待ちの件数。1件以上ある間はコピー・再生成を受け付けない。
-  // 応答待ちの間に他方を押すと世代カウンタが進み、後から解決した側の.then()が世代不一致で
-  // 早期returnして自動クリアの設置が行われなくなるため。件数で数えるのは、自動クリアの
-  // タイマー発火によるクリアが他の操作と重なっても、最後の1件が終わるまで受け付けないままにするため。
-  // ハンドラが再描画を待たずに同期的に判定できるよう、件数はrefを正とし、ボタンの無効化に
-  // 使うstateはその写しとする。
-  const clipboardOperationCount = useRef(0);
+  // コピー/クリアのIPC応答待ちの間は、コピー・再生成を受け付けない(理由はoperation-counter.ts)。
+  // ボタンの無効化に使うstateは、件数の変化の写しである。
   const [clipboardBusy, setClipboardBusy] = useState(false);
+  const clipboardOperations = useMemo(() => createOperationCounter(setClipboardBusy), []);
 
   const closeDialog = () => setDialog({ kind: "none" });
 
   // 書き出し中・書き出し済みの画面は、履歴の移動(マウスの戻るボタンなど)でこの画面ごと消えると、
   // パスフレーズを失うため、移動を止める(Escapeや背景の操作を受け付けないのと同じ理由)。
   useBlocker({
-    shouldBlockFn: () => true,
-    disabled: !(dialog.kind === "export" && dialog.session.phase !== "editing"),
+    shouldBlockFn: blockAlways,
+    disabled: !(dialog.kind === "export" && isPassphraseAtRisk(dialog.session.phase)),
     enableBeforeUnload: false,
   });
 
@@ -143,17 +146,6 @@ function ProfilesRoute() {
       clearTimeout(clipboardClearTimer.current);
       clipboardClearTimer.current = null;
     }
-  };
-
-  // 成功・失敗のどちらでも必ず件数を戻す(戻し忘れると、コピー・再生成が無効のまま
-  // 戻らなくなるため)。
-  const trackClipboardOperation = <T,>(operation: Promise<T>): Promise<T> => {
-    clipboardOperationCount.current += 1;
-    setClipboardBusy(true);
-    return operation.finally(() => {
-      clipboardOperationCount.current = Math.max(0, clipboardOperationCount.current - 1);
-      setClipboardBusy(clipboardOperationCount.current > 0);
-    });
   };
 
   // 「確認できなかった」だけでは「まだ残っている」とは断定できない(他の内容に既に
@@ -172,7 +164,7 @@ function ProfilesRoute() {
   const copyPassphraseWithAutoClear = (value: string) => {
     cancelClipboardClear();
     const generation = ++copyGeneration.current;
-    trackClipboardOperation(writeClipboardText(value))
+    clipboardOperations.track(writeClipboardText(value))
       .then(() => {
         if (copyGeneration.current !== generation) return;
         lastCopiedPassphrase.current = value;
@@ -181,7 +173,7 @@ function ProfilesRoute() {
         );
         clipboardClearTimer.current = setTimeout(() => {
           clipboardClearTimer.current = null;
-          trackClipboardOperation(clearClipboardIfMatches(value))
+          clipboardOperations.track(clearClipboardIfMatches(value))
             .then((result) => {
               if (copyGeneration.current !== generation) return;
               if (result.outcome === "skipped_unable_to_verify") {
@@ -208,7 +200,7 @@ function ProfilesRoute() {
     const copied = lastCopiedPassphrase.current;
     if (!copied) return;
     lastCopiedPassphrase.current = null;
-    trackClipboardOperation(clearClipboardIfMatches(copied))
+    clipboardOperations.track(clearClipboardIfMatches(copied))
       .then((result) => {
         if (copyGeneration.current !== generation) return;
         if (result.outcome === "skipped_unable_to_verify") warnClipboardNotClearedAutomatically();
@@ -218,23 +210,43 @@ function ProfilesRoute() {
       });
   };
 
-  // エクスポートの進行状況を、実行を始めた画面(sessionId)に対してだけ更新する。
-  // 閉じて開き直した後に届いた古い実行の結果を、新しい画面へ反映しないため。
-  const updateExportSession = (update: (session: ExportDialogState) => ExportDialogState) =>
-    setDialog((current) =>
-      current.kind === "export" ? { ...current, session: update(current.session) } : current
+  // エクスポートを開く。パスフレーズはここで生成し、進行状況の正(exportSessionRef)にも置く。
+  const openExportSession = (target: string, profileId: string | null) => {
+    const session = openExportDialog(++exportSessionCounter.current, generatePassphrase());
+    exportSessionRef.current = session;
+    setDialog({ kind: "export", target, profileId, session });
+  };
+
+  // 画面に出ているエクスポートの、最新の状態。古い描画からの操作(再描画の前に届いたものや、
+  // 閉じて開き直す前の画面のもの)は、今の画面のものではないため、nullにする。
+  const currentExportSession = (): ExportDialogState | null => {
+    const session = exportSessionRef.current;
+    return dialog.kind === "export" && session?.sessionId === dialog.session.sessionId
+      ? session
+      : null;
+  };
+
+  // 進行状況の遷移を、正へ先に適用し、画面の状態へ写す。閉じて開き直した後に届いた古い実行の
+  // 結果は、識別子が異なるため、新しい画面へ反映しない。
+  const transitionExportSession = (update: (session: ExportDialogState) => ExportDialogState) => {
+    const current = exportSessionRef.current;
+    if (!current) return;
+    const next = update(current);
+    exportSessionRef.current = next;
+    setDialog((shown) =>
+      shown.kind === "export" && shown.session.sessionId === next.sessionId
+        ? { ...shown, session: next }
+        : shown
     );
+  };
 
   const exportToFile = async () => {
-    // ボタンの無効化は再描画されるまで効かず、同じ瞬間に届いた2回目の押下は、実行中になる前の
-    // 状態を見てしまう。実行が終わるまで次の実行を始めないよう、同期的に止める。
-    if (exportInFlight.current) return;
-    if (dialog.kind !== "export" || !canStartExport(dialog.session)) return;
-    exportInFlight.current = true;
+    const session = currentExportSession();
+    if (dialog.kind !== "export" || !session || !canStartExport(session)) return;
     const { profileId } = dialog;
     // 書き出したファイルを復号できるのは、実行を押した時点のパスフレーズだけである。
-    const { sessionId, passphrase: exportedPassphrase } = dialog.session;
-    updateExportSession((session) => beginExport(session, sessionId, exportedPassphrase));
+    const { sessionId, passphrase: exportedPassphrase } = session;
+    transitionExportSession((current) => beginExport(current, sessionId, exportedPassphrase));
     try {
       // プロファイル名を既定ファイル名に使うと、暗号文の外側(ファイル名・最近使った
       // ファイルの履歴)に平文メタデータとして残ってしまうため、汎用名にする。
@@ -248,19 +260,17 @@ function ProfilesRoute() {
         }
       );
       if (!destPath) {
-        updateExportSession((session) => abortExport(session, sessionId));
+        transitionExportSession((current) => abortExport(current, sessionId));
         return;
       }
       if (profileId === null) await appState.exportAll(exportedPassphrase, destPath);
       else await appState.exportProfile(profileId, exportedPassphrase, destPath);
       toast.success("エクスポートが完了しました");
-      updateExportSession((session) => completeExport(session, sessionId));
+      transitionExportSession((current) => completeExport(current, sessionId));
     } catch {
       // エクスポート自体の失敗の通知は、appState側のtoastが行う。ダイアログは開いたままにし、
       // 別の保存先で再試行できるようにする。
-      updateExportSession((session) => abortExport(session, sessionId));
-    } finally {
-      exportInFlight.current = false;
+      transitionExportSession((current) => abortExport(current, sessionId));
     }
   };
 
@@ -320,14 +330,7 @@ function ProfilesRoute() {
           setInvalidTagId(undefined);
           setDialog({ kind: "tagManagement" });
         }}
-        onExportAll={() => {
-          setDialog({
-            kind: "export",
-            target: "全プロファイル",
-            profileId: null,
-            session: openExportDialog(++exportSessionCounter.current, generatePassphrase()),
-          });
-        }}
+        onExportAll={() => openExportSession("全プロファイル", null)}
         onImport={async () => {
           const path = await openFileDialog({ multiple: false, filters: SMX_FILE_FILTERS });
           if (!path || Array.isArray(path)) return;
@@ -365,13 +368,7 @@ function ProfilesRoute() {
         onEditProfile={(id) => navigate({ to: "/rules/$profileId", params: { profileId: id } })}
         onDuplicateProfile={(id, newName) => appState.duplicateProfile(id, newName)}
         onExportProfile={(id) => {
-          const target = profiles.find((p) => p.id === id)?.name ?? "";
-          setDialog({
-            kind: "export",
-            target,
-            profileId: id,
-            session: openExportDialog(++exportSessionCounter.current, generatePassphrase()),
-          });
+          openExportSession(profiles.find((p) => p.id === id)?.name ?? "", id);
         }}
         onDeleteProfile={(id) => appState.deleteProfile(id)}
         onProfileTagsChange={(id, tags) => {
@@ -484,18 +481,20 @@ function ProfilesRoute() {
         clipboardBusy={clipboardBusy}
         onCopy={() => {
           // ボタンの無効化が再描画で反映されるより前に届いたクリックも防ぐため、同期的に判定する。
-          if (clipboardOperationCount.current > 0) return;
+          if (clipboardOperations.isBusy()) return;
           // 閉じる途中(フェードアウト中)に届いたクリックで、空文字をコピーしないため。
-          if (dialog.kind !== "export") return;
-          copyPassphraseWithAutoClear(dialog.session.passphrase);
+          const session = currentExportSession();
+          if (!session) return;
+          copyPassphraseWithAutoClear(session.passphrase);
         }}
         onRegenerate={() => {
-          if (clipboardOperationCount.current > 0) return;
-          if (dialog.kind !== "export" || !canRegenerate(dialog.session)) return;
+          if (clipboardOperations.isBusy()) return;
+          const session = currentExportSession();
+          if (!session || !canRegenerate(session)) return;
           // 旧パスフレーズが既にコピーされていた場合、タイマーの取り消しだけでは
           // クリップボードに残り続けるため、その場でクリアを試みる。
           clearCopiedPassphraseNow();
-          updateExportSession((session) => regeneratePassphrase(session, generatePassphrase()));
+          transitionExportSession((current) => regeneratePassphrase(current, generatePassphrase()));
         }}
         onExport={exportToFile}
       />

@@ -98,9 +98,14 @@ export const OpenByDefault: Story = {
   play: async () => {
     const input = await screen.findByLabelText(PASSPHRASE_LABEL);
     await expect(input).toHaveAttribute("type", "password");
+    // 伏せ字でも表示でも、入力したパスフレーズが自動補完の履歴や綴り確認の対象にならない。
+    await expect(input).toHaveAttribute("autocomplete", "off");
+    await expect(input).toHaveAttribute("spellcheck", "false");
 
     await userEvent.click(screen.getByRole("button", { name: "パスフレーズを表示" }));
     await expect(input).toHaveAttribute("type", "text");
+    await expect(input).toHaveAttribute("autocomplete", "off");
+    await expect(input).toHaveAttribute("spellcheck", "false");
     await expect(input).toHaveValue("wrong-passphrase");
 
     await userEvent.click(screen.getByRole("button", { name: "パスフレーズを隠す" }));

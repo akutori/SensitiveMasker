@@ -5,6 +5,7 @@ import {
   canRegenerate,
   canStartExport,
   completeExport,
+  isPassphraseAtRisk,
   openExportDialog,
   regeneratePassphrase,
   type ExportDialogState,
@@ -101,6 +102,17 @@ describe("abortExport", () => {
 
   it("成功後は編集中へ戻らない(書き出し済みのファイルと画面のパスフレーズの対応を保つ)", () => {
     expect(abortExport(exported(2), 2)).toEqual(exported(2));
+  });
+});
+
+describe("isPassphraseAtRisk", () => {
+  it("編集中は、まだ何も書き出していないので、失っても失うものがない", () => {
+    expect(isPassphraseAtRisk("editing")).toBe(false);
+  });
+
+  it("実行中と成功後は、書き出したファイルを開ける唯一の手がかりなので、失わせてはならない", () => {
+    expect(isPassphraseAtRisk("exporting")).toBe(true);
+    expect(isPassphraseAtRisk("exported")).toBe(true);
   });
 });
 
