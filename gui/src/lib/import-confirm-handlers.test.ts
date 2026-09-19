@@ -91,4 +91,33 @@ describe("createImportConfirmHandlers", () => {
     await handlers.onConfirm();
     expect(calls).toEqual([]);
   });
+
+  it("画面を離れると、確認画面が開いているかに関わらず、保留中の内容を破棄する(復号の結果が届いてから確認画面が描画されるまでの間に離れても、保留を残さない)", () => {
+    for (const isOpen of [true, false]) {
+      const { calls, handlers } = setup({ isOpen: () => isOpen });
+      handlers.onLeave();
+      expect(calls).toEqual(["discardPending"]);
+    }
+  });
+
+  it("確定している間に画面を離れても、保留中の内容を破棄しない(確定が、それを使う)", async () => {
+    const { calls, commit, handlers } = setup();
+    const confirming = handlers.onConfirm();
+    handlers.onLeave();
+    expect(calls).toEqual(["commit"]);
+
+    commit.resolve();
+    await confirming;
+  });
+
+  it("確定が終わった後に画面を離れたら、再び破棄する", async () => {
+    const { calls, commit, handlers } = setup();
+    const confirming = handlers.onConfirm();
+    commit.resolve();
+    await confirming;
+
+    calls.length = 0;
+    handlers.onLeave();
+    expect(calls).toEqual(["discardPending"]);
+  });
 });

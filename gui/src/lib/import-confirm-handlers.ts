@@ -31,6 +31,13 @@ export function createImportConfirmHandlers(deps: ImportConfirmDeps, started: { 
       // 残り続ける。
       deps.discardPending();
     },
+    // 画面が破棄される(離れる)とき。復号済みの内容を確認する人が居なくなるため、破棄する。確認画面が開いて
+    // いるかは見ない: 復号の結果が届いてから確認画面が描画されるまでの間に離れる場合も、保留を残さないため
+    // (保留が無ければ、破棄は何も起こさない)。確定を始めていれば、その確定が保留を使うため、破棄しない。
+    onLeave() {
+      if (started.current) return;
+      deps.discardPending();
+    },
     async onConfirm() {
       if (started.current || !deps.isOpen()) return;
       started.current = true;

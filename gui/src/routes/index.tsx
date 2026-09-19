@@ -72,16 +72,6 @@ function MainRoute() {
   const importSessionCounter = useRef(0);
   // この画面が破棄されていないか(破棄された後に届いた復号の結果は、見る人が居ない)。
   const mounted = useRef(true);
-  // この画面を離れる(破棄される)と、復号済みの内容(Rust側の保留)を確認する人が居なくなる。残らないよう
-  // 破棄する(画面の状態でなく、無条件に。保留が無ければ、何も起きない)。確定を始めていれば、その確定が
-  // 使うため、破棄しない。復号している最中に離れた場合は、結果が届いた時に、isStillOpenがfalseになって破棄される。
-  useEffect(() => {
-    mounted.current = true;
-    return () => {
-      mounted.current = false;
-      if (!importConfirmStarted.current) void appState.clearPendingImport();
-    };
-  }, []);
 
   const closeDialog = () => setDialog({ kind: "none" });
 
@@ -132,6 +122,17 @@ function MainRoute() {
     },
     importDecrypting
   );
+
+  // この画面を離れる(破棄される)と、復号済みの内容(Rust側の保留)を確認する人が居なくなるため、破棄する
+  // (破棄しない場合の理由はimport-confirm-handlers.ts)。復号している最中に離れた場合は、結果が届いた時に、
+  // isStillOpenがfalseになって破棄される。
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      importConfirmHandlers.onLeave();
+    };
+  }, []);
 
   const confirmNewProfileName = async () => {
     if (profiles.some((p) => p.name === draftName)) {

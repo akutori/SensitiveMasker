@@ -132,16 +132,6 @@ function ProfilesRoute() {
   const importSessionCounter = useRef(0);
   // この画面が破棄されていないか(破棄された後に届いた復号の結果は、見る人が居ない)。
   const mounted = useRef(true);
-  // この画面を離れる(破棄される)と、復号済みの内容(Rust側の保留)を確認する人が居なくなる。残らないよう
-  // 破棄する(画面の状態でなく、無条件に。保留が無ければ、何も起きない)。確定を始めていれば、その確定が
-  // 使うため、破棄しない。復号している最中に離れた場合は、結果が届いた時に、isStillOpenがfalseになって破棄される。
-  useEffect(() => {
-    mounted.current = true;
-    return () => {
-      mounted.current = false;
-      if (!importConfirmStarted.current) void appState.clearPendingImport();
-    };
-  }, []);
   const [importPassphrase, setImportPassphrase] = useState("");
   const [importPassphraseError, setImportPassphraseError] = useState<string | undefined>();
   // コピー/クリアのIPC応答待ちの間は、コピー・再生成を受け付けない(理由はoperation-counter.ts)。
@@ -217,6 +207,17 @@ function ProfilesRoute() {
     },
     importDecrypting
   );
+
+  // この画面を離れる(破棄される)と、復号済みの内容(Rust側の保留)を確認する人が居なくなるため、破棄する
+  // (破棄しない場合の理由はimport-confirm-handlers.ts)。復号している最中に離れた場合は、結果が届いた時に、
+  // isStillOpenがfalseになって破棄される。
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      importConfirmHandlers.onLeave();
+    };
+  }, []);
 
   // 書き出し中・書き出し済みの画面は、履歴の移動(マウスの戻るボタンなど)でこの画面ごと消えると、
   // パスフレーズを失うため、移動を止める(Escapeや背景の操作を受け付けないのと同じ理由)。
