@@ -72,7 +72,7 @@ fn validate_import_source_path(source_path: &str) -> Result<PathBuf, String> {
 /// 無制限に溜まらないようにする。上限を超えると、最も古い保留から捨てる。
 const MAX_PENDING_IMPORTS: usize = 4;
 
-/// preview_importが復号した内容(ルール本体を含む)をIPCで往復させないための保持先。
+/// preview_importが復号した内容(ImportPreview。ルール本体を含む)そのものを、IPCで往復させないための保持先。
 /// commit_pending_import・clear_pending_importが呼ばれるか、メインウィンドウのページの読み込みが始まる
 /// (discard_pending_imports_on_page_load)までの間だけメモリ上に置く。
 ///
@@ -353,9 +353,9 @@ pub async fn export_all_to_file(
 // preview_import・commit_pending_importは、AppHandleのランタイムを型引数(R)で受け取る。実アプリ(Wry)と、
 // テスト用のtauri::test::MockRuntimeの、どちらでも、同じコマンドをIPCの境界(JSON)を通して呼べるようにするため。
 
-/// DBはまだ変更しない。復号結果はPendingImportStateに保持し、フロントエンドには
-/// 表示に必要な要約(名前・リネーム有無)と、その保留の識別子(pending_id)のみを返す
-/// (ルール本体を往復させないため)。
+/// DBはまだ変更しない。復号結果(ImportPreview)はPendingImportStateに保持し、フロントエンドには、
+/// 確認画面の表示用のDTO(名前・ルールの中身・タグなど)と、その保留の識別子(pending_id)だけを返す。
+/// 復号済みの内容そのもの(ImportPreview)は往復させない(確定は、識別子だけを受け取る)。
 ///
 /// 悪意ある.smxファイルは、パスフレーズの正誤を検証する前に最大2^22相当(≒4GiB)の
 /// メモリ確保を要求しうる(export.rsのMAX_WORK_FACTOR_LOG_N参照)。
@@ -394,13 +394,17 @@ pub async fn commit_pending_import<R: tauri::Runtime>(
     Ok(result)
 }
 
-/// 確認ダイアログのキャンセル・離脱時に呼ぶ。preview_importが復号した平文
-/// (ルール本体を含む)をプロセス内に残さないためと、キャンセル後にcommit_pending_import
-/// が呼ばれても確定しないようにするため(意思決定をRust側の状態にも反映する)。
-/// Some(id)なら、その識別子の保留だけを破棄する(他の保留は消さない)。Noneなら全ての保留を
-/// 破棄する(画面は使わない。E2Eの後片付けなどの全消去用)。
-/// 保留中の内容が無い場合も含め常に成功する(呼び出し側は「無かったこと」を
-/// エラーとして扱う必要が無いように、副作用の無い操作として設計する)。
+/// 保留を破棄する。preview_importが復号した平文(ルール本体を含む)をプロセス内に残さないためと、
+/// 破棄した保留に対して、後からcommit_pending_importが呼ばれても確定しないようにするため
+/// (意思決定をRust側の状態にも反映する)。
+///
+/// Some(id)なら、その識別子の保留だけを破棄する(他の保留は消さない)。画面からは、この形で呼ばれる:
+/// 確認画面の取り消し、画面を離れるとき(その画面が所有する保留)、閉じられた画面(離れた画面)へ
+/// 遅れて届いた復号結果の保留。Noneなら、全ての保留を破棄する。画面は使わず、E2Eの後片付けが、
+/// 全消去のために使う。
+///
+/// 保留が無い場合も含め常に成功する(呼び出し側が、「無かったこと」をエラーとして扱わなくてよいように、
+/// 副作用の無い操作として設計する)。
 fn clear_pending_import_impl(pending: &PendingImportState, pending_id: Option<u64>) {
     pending.discard(pending_id);
 }
