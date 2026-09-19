@@ -213,11 +213,21 @@ async function waitForExportNotice(dialog: WebdriverIO.Element) {
   return notice;
 }
 
-// 失敗したテストが残した状態(保留中のダイアログ、開いたままの画面)を片付け、後続のテストへ
-// 連鎖させない。成功したテストでは何も起きない。片付けそのものの失敗は、テストの失敗にしない。
-afterEach(async () => {
+// 片付けの1手順を実行する。片付けそのものの失敗は、テストの失敗にしない(元のテストの結果を覆い隠さない)。
+async function bestEffort(step: () => Promise<unknown>) {
   try {
-    await browser.tauri.execute(() => {
+    await step();
+  } catch {
+    // 片付けは最善を尽くすだけ。
+  }
+}
+
+// 失敗したテストが残した状態(保留中のダイアログ、開いたままの画面)を片付け、後続のテストへ
+// 連鎖させない。成功したテストでは何も起きない。手順は互いに独立に行い、1つの失敗で残りを飛ばさない
+// (メイン画面へ戻れないと、次のテストは「初期設定画面もメイン画面も表示されなかった」という別の症状で落ちる)。
+afterEach(async () => {
+  await bestEffort(() =>
+    browser.tauri.execute(() => {
       const w = window as unknown as {
         __e2eFileDialogPaths?: unknown;
         __e2eSaveControl?: { resolve: (path: string | null) => void };
@@ -229,7 +239,9 @@ afterEach(async () => {
       w.__e2eSaveControl = undefined;
       w.__e2eOpenControl = undefined;
       w.__e2eFileDialogPaths = undefined;
-    });
+    })
+  );
+  await bestEffort(async () => {
     for (let attempt = 0; attempt < 3; attempt++) {
       const openDialog = await $('[role="dialog"], [role="alertdialog"]');
       if (!(await openDialog.isExisting())) break;
@@ -238,13 +250,14 @@ afterEach(async () => {
       else await browser.keys("Escape");
       await browser.pause(300);
     }
-    // 保留中の復号済みの内容(Rust側)を、次のテストへ持ち越さない。
-    await browser.tauri.execute(({ core }) => core.invoke("clear_pending_import"));
+  });
+  await bestEffort(async () => {
     const backButton = await $("button=閉じる(メイン画面へ)");
     if (await backButton.isExisting()) await backButton.click();
-  } catch {
-    // 片付けは最善を尽くすだけで、失敗しても元のテストの結果を覆い隠さない。
-  }
+  });
+  // 保留中の復号済みの内容(Rust側)を、次のテストへ持ち越さない。画面を離れる後始末が、既に破棄していれば、
+  // 何も起きない。
+  await bestEffort(() => browser.tauri.execute(({ core }) => core.invoke("clear_pending_import")));
 });
 
 async function openProfileManagement() {
@@ -1165,25 +1178,43 @@ describe("エクスポートの実行(ファイルダイアログの差し替え
     await importDialog.waitForExist({ timeout: 10000 });
     await (await importDialog.$("input")).setValue(passphrase);
 
-    // OKを押すのと同じJSタスクの中で閉じる(復号の結果が届くより前に、必ず閉じる)。
-    await browser.tauri.execute(() => {
-      const buttons = Array.from(document.querySelectorAll<HTMLButtonElement>('[role="dialog"] button'));
-      const find = (label: string) => buttons.find((b) => b.textContent?.trim() === label);
-      const ok = find("OK");
-      const cancel = find("キャンセル");
+    // OKを押すのと同じJSタスクの流れの中で閉じ、続けて、同じファイルを開き直す(復号の結果が届くより前に、必ず行う。
+    // WebDriverの往復を挟むと、復号が先に終わりうる)。開き直した時点の状態も、その場で読む。
+    const reopenedState = await browser.tauri.execute(async () => {
+      const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+      const openDialogs = () =>
+        Array.from(document.querySelectorAll<HTMLElement>('[role="dialog"][data-state="open"]'));
+      const buttonNamed = (root: ParentNode, label: string) =>
+        Array.from(root.querySelectorAll<HTMLButtonElement>("button")).find(
+          (b) => b.textContent?.trim() === label
+        );
+      const waitUntil = async (condition: () => boolean, what: string) => {
+        for (let i = 0; i < 300 && !condition(); i++) await sleep(10);
+        if (!condition()) throw new Error(`${what}が起きなかった`);
+      };
+
+      const first = openDialogs()[0];
+      const ok = first && buttonNamed(first, "OK");
+      const cancel = first && buttonNamed(first, "キャンセル");
       if (!ok || !cancel) throw new Error("ボタンが見つからない");
       ok.click();
       cancel.click();
-    });
-    await importDialog.waitForExist({ reverse: true, timeout: 10000 });
+      await waitUntil(() => openDialogs().length === 0, "画面が閉じること");
 
-    // 同じファイルを開き直す。復号が終わるまでは、開き直した画面も、入力できない状態のまま(復号の終了を待てる)。
-    await (await $("button=インポート")).click();
-    const reopened = await $('[role="dialog"]');
-    await reopened.waitForExist({ timeout: 10000 });
-    const reopenedInput = await reopened.$("input");
+      const importButton = buttonNamed(document.body, "インポート");
+      if (!importButton) throw new Error("インポートのボタンが見つからない");
+      importButton.click();
+      await waitUntil(() => openDialogs().length === 1, "画面が開き直されること");
+      const input = openDialogs()[0].querySelector<HTMLInputElement>("input");
+      if (!input) throw new Error("入力欄が見つからない");
+      return { readOnly: input.readOnly };
+    });
     // 開き直した時点で、古い復号がまだ終わっていない(この検証の前提。終わっていたら、ここで落とす)。
-    expect(await reopenedInput.getProperty("readOnly")).toBe(true);
+    expect(reopenedState).toEqual({ readOnly: true });
+
+    // 復号が終わるまでは、開き直した画面も、入力できない状態のまま(復号の終了を待てる)。
+    const reopened = await $('[role="dialog"]');
+    const reopenedInput = await reopened.$("input");
     await browser.waitUntil(async () => !(await reopenedInput.getProperty("readOnly")), {
       timeout: 15000,
       timeoutMsg: "復号が終わらなかった(入力できる状態へ戻らなかった)",
