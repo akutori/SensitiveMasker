@@ -101,6 +101,8 @@ export const OpenByDefault: Story = {
     // 入力があり、復号していなければ、OKを押せる。
     await expect(screen.getByRole("button", { name: "OK" })).toBeEnabled();
     await expect(input).not.toHaveAttribute("readonly");
+    // 状態の領域は、復号していない間は、書き出す前から置いてあって、中身は空である。
+    await expect(screen.getByRole("status")).toBeEmptyDOMElement();
     // 伏せ字でも表示でも、入力したパスフレーズが自動補完の履歴や綴り確認の対象にならない。
     await expect(input).toHaveAttribute("autocomplete", "off");
     await expect(input).toHaveAttribute("spellcheck", "false");
@@ -149,7 +151,7 @@ export const RevealKeepsTyping: Story = {
   },
 };
 
-// 復号している間は、OKを押せず、入力も変えられない。復号を待つ間も、閉じることはできる。
+// 復号している間は、OKを押せず、入力も変えられず、その理由を文言で示す。復号を待つ間も、閉じることはできる。
 export const Busy: Story = {
   args: {
     open: true,
@@ -163,7 +165,55 @@ export const Busy: Story = {
   play: async () => {
     await expect(await screen.findByRole("button", { name: "OK" })).toBeDisabled();
     await expect(screen.getByLabelText(PASSPHRASE_LABEL)).toHaveAttribute("readonly");
+    await expect(screen.getByRole("status")).toHaveTextContent("復号しています");
     await expect(screen.getByRole("button", { name: "キャンセル" })).toBeEnabled();
+  },
+};
+
+// OKを押して復号が始まると、押したボタンが無効になってフォーカスを失い、Tabで背景の画面へ出られてしまうため、
+// フォーカスを入力欄へ移す。復号が終わると、OKと入力が元に戻り、状態の文言は消える。
+function BusyDemo() {
+  const [busy, setBusy] = useState(false);
+  const [passphrase, setPassphrase] = useState("dummy-passphrase-0001");
+  return (
+    <ImportPassphraseDialog
+      open
+      onOpenChange={() => {}}
+      fileName={FILE_NAME}
+      passphrase={passphrase}
+      onPassphraseChange={setPassphrase}
+      busy={busy}
+      onConfirm={() => {
+        setBusy(true);
+        window.setTimeout(() => setBusy(false), 600);
+      }}
+    />
+  );
+}
+
+export const BusyMovesFocus: Story = {
+  args: {
+    open: true,
+    onOpenChange: () => {},
+    fileName: FILE_NAME,
+    passphrase: "dummy-passphrase-0001",
+    onPassphraseChange: () => {},
+    onConfirm: () => {},
+  },
+  render: () => <BusyDemo />,
+  play: async () => {
+    const input = await screen.findByLabelText(PASSPHRASE_LABEL);
+    const ok = screen.getByRole("button", { name: "OK" });
+    await expect(screen.getByRole("status")).toBeEmptyDOMElement();
+
+    await userEvent.click(ok);
+    await waitFor(() => expect(ok).toBeDisabled());
+    await expect(input).toHaveFocus();
+    await expect(screen.getByRole("status")).toHaveTextContent("復号しています");
+
+    await waitFor(() => expect(ok).toBeEnabled());
+    await expect(input).not.toHaveAttribute("readonly");
+    await expect(screen.getByRole("status")).toBeEmptyDOMElement();
   },
 };
 

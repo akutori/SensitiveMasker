@@ -15,7 +15,11 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
-const TARGET = { sourcePath: "C:/dummy/export.smx", passphrase: "dummy-passphrase-0001" };
+const TARGET = {
+  session: 1,
+  sourcePath: "C:/dummy/export.smx",
+  passphrase: "dummy-passphrase-0001",
+};
 const PREVIEW_CALL = `preview:${TARGET.sourcePath}:${TARGET.passphrase}`;
 
 // 呼び出された操作を、順に記録する依存を作る。
@@ -32,7 +36,10 @@ function setup(overrides: Partial<ImportPassphraseDeps<string>> = {}) {
     isStillOpen: () => true,
     showConfirm: (preview) => calls.push(`showConfirm:${preview}`),
     showError: (error) => calls.push(`showError:${(error as Error).message}`),
-    discardPending: () => calls.push("discardPending"),
+    discardPending: () => {
+      calls.push("discardPending");
+      return Promise.resolve();
+    },
     onBusyChange: (busy) => calls.push(`busy:${busy}`),
     ...overrides,
   };
@@ -71,6 +78,59 @@ describe("createImportPassphraseHandlers", () => {
 
   it("復号している間に画面が閉じられたら、復号済みの内容が保留されたまま残らないよう、破棄する", async () => {
     const { calls, decryption, handlers } = setup({ isStillOpen: () => false });
+
+    const confirming = handlers.onConfirm();
+    decryption.resolve("dummy-preview");
+    await confirming;
+    expect(calls).toEqual(["busy:true", PREVIEW_CALL, "discardPending", "busy:false"]);
+  });
+
+  it("開いたままかは、OKを押した時の画面(セッション)で判定する。同じファイルを開き直した別の画面は、開いたままとは見なさない", async () => {
+    const openSessions = new Set([2]);
+    const asked: number[] = [];
+    const { calls, decryption, handlers } = setup({
+      isStillOpen: (session) => {
+        asked.push(session);
+        return openSessions.has(session);
+      },
+    });
+
+    const confirming = handlers.onConfirm();
+    decryption.resolve("dummy-preview");
+    await confirming;
+    expect(asked).toEqual([TARGET.session]);
+    expect(calls).toEqual(["busy:true", PREVIEW_CALL, "discardPending", "busy:false"]);
+  });
+
+  it("破棄が終わるまで、待ちを解かない(次の復号が、破棄と入れ違いにならない)", async () => {
+    const discard = deferred<void>();
+    const { calls, decryption, handlers } = setup({
+      isStillOpen: () => false,
+      discardPending: () => {
+        calls.push("discardPending");
+        return discard.promise;
+      },
+    });
+
+    const confirming = handlers.onConfirm();
+    decryption.resolve("dummy-preview");
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(calls).toEqual(["busy:true", PREVIEW_CALL, "discardPending"]);
+
+    discard.resolve();
+    await confirming;
+    expect(calls).toEqual(["busy:true", PREVIEW_CALL, "discardPending", "busy:false"]);
+  });
+
+  it("破棄に失敗しても、待ちは解ける(次の復号を始められなくならない)", async () => {
+    const { calls, decryption, handlers } = setup({
+      isStillOpen: () => false,
+      discardPending: () => {
+        calls.push("discardPending");
+        return Promise.reject(new Error("dummy discard failure"));
+      },
+    });
 
     const confirming = handlers.onConfirm();
     decryption.resolve("dummy-preview");

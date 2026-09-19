@@ -47,6 +47,12 @@ export function ImportPassphraseDialog({
     if (open) setRevealed(false);
   }, [open]);
 
+  // 復号が始まると、押したボタンが無効になってフォーカスを失い、フォーカストラップが効かなくなる
+  // (Tabで背景の画面へ出られる)ため、フォーカスを入力欄へ移しておく。
+  useLayoutEffect(() => {
+    if (busy) inputRef.current?.focus();
+  }, [busy]);
+
   // マウスやタッチで「表示」を押した後も、続けて入力できるよう、入力欄へフォーカスとキャレット位置を
   // 戻す(ボタンにフォーカスが残ると、続けて打った文字が入力されない)。キーボードで押したときは、
   // 繰り返し切り替えられるよう、フォーカスをボタンに残す(キーボード操作のclickはdetailが0)。
@@ -98,6 +104,11 @@ export function ImportPassphraseDialog({
               {revealed ? <EyeOff /> : <Eye />}
             </Button>
           </div>
+          {/* OKと入力が無効になる理由を、見える文言と読み上げの両方で伝える。領域は、復号する前から置いておく
+              (領域ごと後から現れると、読み上げられないことがあるため)。 */}
+          <p role="status" className={busy ? "text-sm text-muted-foreground" : "sr-only"}>
+            {busy ? "復号しています…" : null}
+          </p>
         </div>
 
         {errorMessage && <ValidationErrorBox message={errorMessage} />}

@@ -4,19 +4,22 @@
 // 復号(scrypt)は数百ミリ秒〜数秒かかり、その間もこの画面は操作できる。
 // - 復号している間に、もう一度OKが押されると、同じ復号が並行して走り、負荷が無駄に増える。
 //   復号している間は、再入を受け付けない。
-// - 復号している間に画面が閉じられると、復号が終わった時点で、復号済みの内容がRust側に保留される
-//   (確認画面へ進む画面が、もう無いのに)。その内容が残り続けないよう、閉じられていたら破棄する。
+// - 復号している間に画面が閉じられる(同じファイルで開き直される場合も含む)と、復号が終わった時点で、
+//   復号済みの内容がRust側に保留される(確認画面へ進む画面が、もう無いのに)。その内容が残り続けない
+//   よう、OKを押した時の画面(セッション)が開いたままでなければ、破棄する。破棄が終わるまでは、待ちを
+//   解かない(次の復号が、破棄と入れ違いになって、保留を消されないようにするため)。
 
 export interface ImportPassphraseDeps<Preview> {
   // OKを押した時点の、入力画面の対象。開いていなければ(閉じる途中に届いた押下)null。
-  target: () => { sourcePath: string; passphrase: string } | null;
+  // sessionは、画面を開くたびに変わる識別子(同じファイルを開き直しても、別の画面として区別する)。
+  target: () => { session: number; sourcePath: string; passphrase: string } | null;
   preview: (sourcePath: string, passphrase: string) => Promise<Preview>;
-  // 復号が終わった時点で、同じファイルの入力画面が、まだ開いているか(最新の状態で判定する)。
-  isStillOpen: (sourcePath: string) => boolean;
+  // 復号が終わった時点で、OKを押した時の画面(セッション)が、まだ開いているか(最新の状態で判定する)。
+  isStillOpen: (session: number) => boolean;
   showConfirm: (preview: Preview) => void;
   showError: (error: unknown) => void;
   // Rust側に保留された、復号済みの内容を破棄する。
-  discardPending: () => void;
+  discardPending: () => Promise<void>;
   // 復号を始める・終えるたびに呼ぶ(OKなどの無効化の表示に使う)。
   onBusyChange: (busy: boolean) => void;
 }
@@ -36,14 +39,14 @@ export function createImportPassphraseHandlers<Preview>(
       deps.onBusyChange(true);
       try {
         const preview = await deps.preview(target.sourcePath, target.passphrase);
-        if (!deps.isStillOpen(target.sourcePath)) {
-          deps.discardPending();
+        if (!deps.isStillOpen(target.session)) {
+          await deps.discardPending();
           return;
         }
         deps.showConfirm(preview);
       } catch (error) {
-        // 閉じられた後の失敗は、見る人がいないため、表示しない。
-        if (deps.isStillOpen(target.sourcePath)) deps.showError(error);
+        // 閉じられた後の失敗(破棄の失敗を含む)は、見る人がいないため、表示しない。
+        if (deps.isStillOpen(target.session)) deps.showError(error);
       } finally {
         decrypting.current = false;
         deps.onBusyChange(false);

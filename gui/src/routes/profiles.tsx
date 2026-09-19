@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createFileRoute, useBlocker, useNavigate } from "@tanstack/react-router";
 import { toast } from "sonner";
 import { ProfileManagementScreen, type SortOption } from "@/components/profile-management-screen";
@@ -84,7 +84,7 @@ type DialogState =
   | { kind: "profileNameFromTemplate"; templateValue: string }
   | { kind: "tagManagement" }
   | { kind: "export"; target: string; profileId: string | null; session: ExportDialogState }
-  | { kind: "importPassphrase"; sourcePath: string; fileName: string }
+  | { kind: "importPassphrase"; session: number; sourcePath: string; fileName: string }
   | { kind: "importConfirm"; rows: ImportPreviewRow[] }
   | { kind: "envImportSelect"; candidates: EnvCandidate[] }
   | { kind: "envImportName"; selectedRules: Omit<RuleListItem, "id">[] };
@@ -127,6 +127,23 @@ function ProfilesRoute() {
   useLayoutEffect(() => {
     dialogRef.current = dialog;
   });
+  // パスフレーズ入力画面を開くたびに増やす識別子。同じファイルを開き直しても、別の画面として区別する
+  // (復号の結果を、OKを押した時の画面にだけ返すため。理由はimport-passphrase-handlers.ts)。
+  const importSessionCounter = useRef(0);
+  // この画面が破棄されていないか(破棄された後に届いた復号の結果は、見る人が居ない)。
+  const mounted = useRef(true);
+  // この画面を離れる(破棄される)と、確認画面を見る人が居なくなる。復号済みの内容(Rust側の保留)が
+  // 残らないよう破棄する。確定を始めていれば、その確定が使うため、破棄しない。復号している最中に離れた
+  // 場合は、結果が届いた時に、isStillOpenがfalseになって破棄される。
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      if (dialogRef.current.kind === "importConfirm" && !importConfirmStarted.current) {
+        void appState.clearPendingImport();
+      }
+    };
+  }, []);
   const [importPassphrase, setImportPassphrase] = useState("");
   const [importPassphraseError, setImportPassphraseError] = useState<string | undefined>();
   // コピー/クリアのIPC応答待ちの間は、コピー・再生成を受け付けない(理由はoperation-counter.ts)。
@@ -173,12 +190,12 @@ function ProfilesRoute() {
     {
       target: () =>
         dialog.kind === "importPassphrase"
-          ? { sourcePath: dialog.sourcePath, passphrase: importPassphrase }
+          ? { session: dialog.session, sourcePath: dialog.sourcePath, passphrase: importPassphrase }
           : null,
       preview: (sourcePath, passphrase) => appState.previewImport(sourcePath, passphrase),
-      isStillOpen: (sourcePath) => {
+      isStillOpen: (session) => {
         const shown = dialogRef.current;
-        return shown.kind === "importPassphrase" && shown.sourcePath === sourcePath;
+        return mounted.current && shown.kind === "importPassphrase" && shown.session === session;
       },
       showConfirm: (preview) => {
         setDialog({ kind: "importConfirm", rows: toImportPreviewRows(preview) });
@@ -197,9 +214,7 @@ function ProfilesRoute() {
             : "パスフレーズが誤っているか、対応していないファイル形式です"
         );
       },
-      discardPending: () => {
-        void appState.clearPendingImport();
-      },
+      discardPending: () => appState.clearPendingImport(),
       onBusyChange: setImportBusy,
     },
     importDecrypting
@@ -337,19 +352,17 @@ function ProfilesRoute() {
         onImport={async () => {
           const path = await openFileDialog({ multiple: false, filters: SMX_FILE_FILTERS });
           if (!path || Array.isArray(path)) return;
+          // ファイルの選択を待つ間に別の画面が開かれていたら、置き換えない(書き出し中・書き出し済みの
+          // エクスポート画面ならパスフレーズを、確認待ちのインポート画面なら復号済みの内容を、失うため)。
+          if (dialogRef.current.kind !== "none") return;
           setImportPassphrase("");
           setImportPassphraseError(undefined);
-          // ファイルの選択を待つ間に開かれたエクスポート画面を置き換えると、書き出し中・書き出し済みの
-          // パスフレーズを失うため、置き換えない。
-          setDialog((current) =>
-            current.kind === "export"
-              ? current
-              : {
-                  kind: "importPassphrase",
-                  sourcePath: path,
-                  fileName: path.split(/[\\/]/).pop() ?? path,
-                }
-          );
+          setDialog({
+            kind: "importPassphrase",
+            session: ++importSessionCounter.current,
+            sourcePath: path,
+            fileName: path.split(/[\\/]/).pop() ?? path,
+          });
         }}
         onEnvImport={async () => {
           // 拡張子フィルタは付けない(index.tsxの「ファイルから」と同じ理由: ".env"は

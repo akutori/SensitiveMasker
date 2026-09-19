@@ -264,11 +264,14 @@ async function returnToMainScreen() {
   await (await $("button*=マスク実行")).waitForExist({ timeout: 10000 });
 }
 
+let keeperSequence = 0;
+
 // プロファイルを書き出し(書き出したファイルのパスフレーズを返す)、そのプロファイルを削除する
 // (取り込み直せる状態にするため)。アクティブなプロファイルは削除できないため、別のプロファイルを
 // アクティブにしておく。書き出しの後は、プロファイル管理画面が開いている。
 async function exportAndDeleteProfile(profileName: string, filePath: string): Promise<string> {
-  const keeperName = `${profileName}の保持プロファイル`;
+  // 行の検索は、名前の一部の一致で行うため、書き出すプロファイルの名前を含まない名前にする。
+  const keeperName = `E2E保持用${++keeperSequence}`;
   await createProfileViaIpc(keeperName);
   await setActiveProfileViaIpc(keeperName);
   await createProfileViaIpc(profileName);
@@ -282,6 +285,17 @@ async function exportAndDeleteProfile(profileName: string, filePath: string): Pr
   await dialog.waitForExist({ reverse: true, timeout: 10000 });
   await deleteProfileViaIpc(profileName);
   return passphrase;
+}
+
+// 復号して、内容の確認画面を開くところまで進める(取り込みは実行しない)。インポートのボタンがある画面
+// (プロファイル管理画面・メイン画面)で呼ぶ。
+async function openImportConfirmDialog(passphrase: string) {
+  await (await $("button=インポート")).click();
+  const importDialog = await $('[role="dialog"]');
+  await importDialog.waitForExist({ timeout: 10000 });
+  await (await importDialog.$("input")).setValue(passphrase);
+  await (await importDialog.$("button=OK")).click();
+  await (await $('[role="alertdialog"]')).waitForExist({ timeout: 15000 });
 }
 
 describe("エクスポートモーダル", () => {
@@ -1053,7 +1067,7 @@ describe("エクスポートの実行(ファイルダイアログの差し替え
     await returnToMainScreen();
   });
 
-  it("復号している間は、OKを押せず、入力も変えられず、結果が届くと確認画面へ進む", async () => {
+  it("復号している間は、OKを押せず、入力も変えられず、その理由が示され、結果が届くと確認画面へ進む", async () => {
     await completeInitialSetup();
     const profileName = "E2Eインポート復号中確認";
     const passphrase = await exportAndDeleteProfile(
@@ -1074,11 +1088,26 @@ describe("エクスポートの実行(ファイルダイアログの差し替え
       );
       const input = dialog?.querySelector<HTMLInputElement>("input");
       if (!ok || !input) throw new Error("OKまたは入力欄が見つからない");
+      // 実際のクリックと同じく、押したボタンにフォーカスがある状態から始める(JSのclick()は、フォーカスを移さない)。
+      ok.focus();
       ok.click();
       await new Promise((resolve) => setTimeout(resolve, 0));
-      return { disabled: ok.disabled, busy: ok.getAttribute("aria-busy"), readOnly: input.readOnly };
+      return {
+        disabled: ok.disabled,
+        busy: ok.getAttribute("aria-busy"),
+        readOnly: input.readOnly,
+        // 押したボタンが無効になっても、フォーカスは画面の内側(入力欄)に留まる(Tabで背景へ出られないように)。
+        inputFocused: document.activeElement === input,
+        status: dialog?.querySelector('[role="status"]')?.textContent ?? null,
+      };
     });
-    expect(whileDecrypting).toEqual({ disabled: true, busy: "true", readOnly: true });
+    expect(whileDecrypting).toEqual({
+      disabled: true,
+      busy: "true",
+      readOnly: true,
+      inputFocused: true,
+      status: "復号しています…",
+    });
 
     // 結果が届くと、内容の確認画面へ進む(取り込みは実行せず取り消す)。
     const confirmDialog = await $('[role="alertdialog"]');
@@ -1114,12 +1143,25 @@ describe("エクスポートの実行(ファイルダイアログの差し替え
     });
     await importDialog.waitForExist({ reverse: true, timeout: 10000 });
 
-    // 復号が終わる(この環境では約1.3秒)まで待っても、確認画面は出ない。Rust側に保留された復号済みの
-    // 内容も破棄されている(残っていると、確定を呼ぶだけで取り込まれてしまう)。
-    await browser.pause(4000);
+    // 同じファイルを開き直す。復号が終わるまでは、開き直した画面も、入力できない状態のまま(復号の終了を待てる)。
+    await (await $("button=インポート")).click();
+    const reopened = await $('[role="dialog"]');
+    await reopened.waitForExist({ timeout: 10000 });
+    const reopenedInput = await reopened.$("input");
+    await browser.waitUntil(async () => !(await reopenedInput.getProperty("readOnly")), {
+      timeout: 15000,
+      timeoutMsg: "復号が終わらなかった(入力できる状態へ戻らなかった)",
+    });
+
+    // 結果が届いても、開き直した画面は(別の画面の結果なので)確認画面へ進まず、エラーも出ない。復号済みの内容も、
+    // Rust側に残っていない(残っていると、確定を呼ぶだけで取り込まれてしまう)。
     expect(await $('[role="alertdialog"]').isExisting()).toBe(false);
+    expect(await reopened.$('[role="alert"]').isExisting()).toBe(false);
     expect(await commitPendingImportSucceeds()).toBe(false);
     expect(await listProfileNames()).not.toContain(profileName);
+
+    await (await reopened.$("button=キャンセル")).click();
+    await reopened.waitForExist({ reverse: true, timeout: 10000 });
     await returnToMainScreen();
   });
 
@@ -1153,5 +1195,84 @@ describe("エクスポートの実行(ファイルダイアログの差し替え
     await (await exportDialog.$("button=キャンセル")).click();
     await exportDialog.waitForExist({ reverse: true, timeout: 10000 });
     await returnToMainScreen();
+  });
+
+  it("プロファイル管理画面で確認画面を開いたまま画面を離れると、復号済みの内容(Rust側の保留)は破棄される", async () => {
+    await completeInitialSetup();
+    const profileName = "E2Eインポート確認中離脱確認";
+    const passphrase = await exportAndDeleteProfile(
+      profileName,
+      path.join(exportDir, "leaving.smx")
+    );
+
+    // 開いたまま、履歴で戻る(メイン画面へ移る)。
+    await openImportConfirmDialog(passphrase);
+    await browser.back();
+    await (await $("button*=マスク実行")).waitForExist({ timeout: 10000 });
+    await browser.pause(1000);
+    expect(await commitPendingImportSucceeds()).toBe(false);
+    expect(await listProfileNames()).not.toContain(profileName);
+  });
+
+  it("メイン画面で確認画面を開いたまま画面を離れると、復号済みの内容(Rust側の保留)は破棄される", async () => {
+    await completeInitialSetup();
+    const profileName = "E2Eメイン画面確認中離脱確認";
+    const passphrase = await exportAndDeleteProfile(
+      profileName,
+      path.join(exportDir, "leaving-main.smx")
+    );
+    await returnToMainScreen();
+
+    // 開いたまま、履歴で戻る(プロファイル管理画面へ移る)。
+    await openImportConfirmDialog(passphrase);
+    await browser.back();
+    await $("h1=プロファイル管理").waitForExist({ timeout: 10000 });
+    await browser.pause(1000);
+    expect(await commitPendingImportSucceeds()).toBe(false);
+    expect(await listProfileNames()).not.toContain(profileName);
+    await returnToMainScreen();
+  });
+
+  it("復号している間に画面を離れても、結果が届いた時に、復号済みの内容(Rust側の保留)は破棄される", async () => {
+    await completeInitialSetup();
+    const profileName = "E2Eインポート復号中離脱確認";
+    const passphrase = await exportAndDeleteProfile(
+      profileName,
+      path.join(exportDir, "decrypting-leave.smx")
+    );
+
+    // この環境で、復号にかかる時間を測る(結果が届くのを待つ時間を、固定値に頼らず決めるため)。
+    await (await $("button=インポート")).click();
+    const measuring = await $('[role="dialog"]');
+    await measuring.waitForExist({ timeout: 10000 });
+    await (await measuring.$("input")).setValue(passphrase);
+    const startedAt = Date.now();
+    await (await measuring.$("button=OK")).click();
+    const measured = await $('[role="alertdialog"]');
+    await measured.waitForExist({ timeout: 15000 });
+    const decryptMs = Date.now() - startedAt;
+    await (await measured.$("button=キャンセル")).click();
+    await measured.waitForExist({ reverse: true, timeout: 10000 });
+
+    // OKを押すのと同じJSタスクの中で、履歴を戻す(復号の結果が届くより前に、この画面が破棄される)。
+    await (await $("button=インポート")).click();
+    const importDialog = await $('[role="dialog"]');
+    await importDialog.waitForExist({ timeout: 10000 });
+    await (await importDialog.$("input")).setValue(passphrase);
+    await browser.tauri.execute(() => {
+      const ok = Array.from(document.querySelectorAll<HTMLButtonElement>('[role="dialog"] button')).find(
+        (b) => b.textContent?.trim() === "OK"
+      );
+      if (!ok) throw new Error("OKのボタンが見つからない");
+      ok.click();
+      window.history.back();
+    });
+    await (await $("button*=マスク実行")).waitForExist({ timeout: 10000 });
+
+    // 復号が終わるまで待っても、確認画面は出ず、復号済みの内容も残っていない。
+    await browser.pause(Math.max(3000, decryptMs * 3));
+    expect(await $('[role="alertdialog"]').isExisting()).toBe(false);
+    expect(await commitPendingImportSucceeds()).toBe(false);
+    expect(await listProfileNames()).not.toContain(profileName);
   });
 });
