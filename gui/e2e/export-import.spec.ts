@@ -84,6 +84,28 @@ describe("エクスポートモーダル", () => {
     await (await dialog.$("button=キャンセル")).click();
     await returnToMainScreen();
   });
+
+  it("コピー中に無効になった再生成が、応答後に有効へ戻る(無効のまま固まらない)", async () => {
+    await completeInitialSetup();
+    await createProfileViaIpc("E2Eエクスポートコピー確認");
+
+    const dialog = await openExportDialogFor("E2Eエクスポートコピー確認");
+    const passphraseInput = await dialog.$("input[readonly]");
+    const passphrase = await passphraseInput.getValue();
+
+    await (await dialog.$("button=コピー")).click();
+    await $("div*=パスフレーズをコピーしました").waitForExist({ timeout: 10000 });
+    const regenerateButton = await dialog.$("button=再生成");
+    await regenerateButton.waitForEnabled({ timeout: 10000 });
+    await regenerateButton.click();
+    await browser.waitUntil(async () => (await passphraseInput.getValue()) !== passphrase, {
+      timeout: 10000,
+      timeoutMsg: "再生成してもパスフレーズが変わらなかった",
+    });
+
+    await (await dialog.$("button=キャンセル")).click();
+    await returnToMainScreen();
+  });
 });
 
 describe("エクスポートの実行(ファイルダイアログの差し替え)", () => {

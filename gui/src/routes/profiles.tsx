@@ -106,6 +106,14 @@ function ProfilesRoute() {
   // コピー処理の完了(Rustへの書き込み確認)を待つ間に再生成された場合、後から
   // 解決した古い呼び出しがタイマー・状態を上書きしないようにするための世代カウンタ。
   const copyGeneration = useRef(0);
+  // コピー/クリアのIPC応答待ちの件数。1件以上ある間はコピー・再生成を受け付けない。
+  // 応答待ちの間に他方を押すと世代カウンタが進み、後から解決した側の.then()が世代不一致で
+  // 早期returnして自動クリアの設置が行われなくなるため。件数で数えるのは、30秒タイマー
+  // 発火のクリアが他の操作と重なっても、最後の1件が終わるまで受け付けないままにするため。
+  // ハンドラが再描画を待たずに同期的に判定できるよう、件数はrefを正とし、ボタンの無効化に
+  // 使うstateはその写しとする。
+  const clipboardOperationCount = useRef(0);
+  const [clipboardBusy, setClipboardBusy] = useState(false);
 
   const closeDialog = () => setDialog({ kind: "none" });
 
@@ -114,6 +122,17 @@ function ProfilesRoute() {
       clearTimeout(clipboardClearTimer.current);
       clipboardClearTimer.current = null;
     }
+  };
+
+  // 成功・失敗のどちらでも必ず件数を戻す(戻し忘れると、コピー・再生成が無効のまま
+  // 戻らなくなるため)。
+  const trackClipboardOperation = <T,>(operation: Promise<T>): Promise<T> => {
+    clipboardOperationCount.current += 1;
+    setClipboardBusy(true);
+    return operation.finally(() => {
+      clipboardOperationCount.current = Math.max(0, clipboardOperationCount.current - 1);
+      setClipboardBusy(clipboardOperationCount.current > 0);
+    });
   };
 
   // 「確認できなかった」だけでは「まだ残っている」とは断定できない(他の内容に既に
@@ -132,14 +151,14 @@ function ProfilesRoute() {
   const copyPassphraseWithAutoClear = (value: string) => {
     cancelClipboardClear();
     const generation = ++copyGeneration.current;
-    writeClipboardText(value)
+    trackClipboardOperation(writeClipboardText(value))
       .then(() => {
         if (copyGeneration.current !== generation) return;
         lastCopiedPassphrase.current = value;
         toast.success("パスフレーズをコピーしました");
         clipboardClearTimer.current = setTimeout(() => {
           clipboardClearTimer.current = null;
-          clearClipboardIfMatches(value)
+          trackClipboardOperation(clearClipboardIfMatches(value))
             .then((result) => {
               if (copyGeneration.current !== generation) return;
               if (result.outcome === "skipped_unable_to_verify") {
@@ -166,7 +185,7 @@ function ProfilesRoute() {
     const copied = lastCopiedPassphrase.current;
     if (!copied) return;
     lastCopiedPassphrase.current = null;
-    clearClipboardIfMatches(copied)
+    trackClipboardOperation(clearClipboardIfMatches(copied))
       .then((result) => {
         if (copyGeneration.current !== generation) return;
         if (result.outcome === "skipped_unable_to_verify") warnClipboardNotClearedAutomatically();
@@ -381,8 +400,14 @@ function ProfilesRoute() {
         }}
         target={dialog.kind === "export" ? dialog.target : ""}
         passphrase={passphrase}
-        onCopy={() => copyPassphraseWithAutoClear(passphrase)}
+        clipboardBusy={clipboardBusy}
+        onCopy={() => {
+          // ボタンの無効化が再描画で反映されるより前に届いたクリックも防ぐため、同期的に判定する。
+          if (clipboardOperationCount.current > 0) return;
+          copyPassphraseWithAutoClear(passphrase);
+        }}
         onRegenerate={() => {
+          if (clipboardOperationCount.current > 0) return;
           // 旧パスフレーズが既にコピーされていた場合、タイマーの取り消しだけでは
           // クリップボードに残り続けるため、その場でクリアを試みる。
           clearCopiedPassphraseNow();

@@ -1,5 +1,6 @@
 import { useState } from "react";
 import type { Meta, StoryObj } from "@storybook/react-vite";
+import { expect, screen } from "storybook/test";
 import { Button } from "@/components/ui/button";
 import { ExportModal } from "./export-modal";
 
@@ -42,6 +43,7 @@ function DemoTrigger(props: { target: string; label: string }) {
         onOpenChange={setOpen}
         target={props.target}
         passphrase={passphrase}
+        clipboardBusy={false}
         onCopy={() => {
           navigator.clipboard.writeText(passphrase);
         }}
@@ -58,6 +60,7 @@ export const SingleProfile: Story = {
     onOpenChange: () => {},
     target: "SIP監視用",
     passphrase: INITIAL_PASSPHRASE,
+    clipboardBusy: false,
     onCopy: () => {},
     onRegenerate: () => {},
     onExport: () => {},
@@ -71,6 +74,7 @@ export const AllProfiles: Story = {
     onOpenChange: () => {},
     target: "全プロファイル",
     passphrase: INITIAL_PASSPHRASE,
+    clipboardBusy: false,
     onCopy: () => {},
     onRegenerate: () => {},
     onExport: () => {},
@@ -84,8 +88,32 @@ export const OpenByDefault: Story = {
     onOpenChange: () => {},
     target: "SIP監視用",
     passphrase: INITIAL_PASSPHRASE,
+    clipboardBusy: false,
     onCopy: () => {},
     onRegenerate: () => {},
     onExport: () => {},
+  },
+  play: async () => {
+    await expect(await screen.findByRole("button", { name: "コピー" })).toBeEnabled();
+    await expect(await screen.findByRole("button", { name: "再生成" })).toBeEnabled();
+  },
+};
+
+// コピー/クリアのIPC応答待ちの間、コピー・再生成が無効化されることの確認用。
+export const BusyDisablesButtons: Story = {
+  args: {
+    open: true,
+    onOpenChange: () => {},
+    target: "SIP監視用",
+    passphrase: INITIAL_PASSPHRASE,
+    clipboardBusy: true,
+    onCopy: () => {},
+    onRegenerate: () => {},
+    onExport: () => {},
+  },
+  play: async () => {
+    await expect(await screen.findByRole("button", { name: "コピー" })).toBeDisabled();
+    await expect(await screen.findByRole("button", { name: "再生成" })).toBeDisabled();
+    await expect(await screen.findByRole("button", { name: "エクスポート" })).toBeEnabled();
   },
 };
