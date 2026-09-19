@@ -693,6 +693,106 @@ describe("エクスポートの実行(ファイルダイアログの差し替え
     await returnToMainScreen();
   });
 
+  it("インポートを実行すると、書き出して削除したプロファイルが、同じ名前で復元される", async () => {
+    await completeInitialSetup();
+    const profileName = "E2Eインポート実行確認";
+    // 削除するプロファイル以外をアクティブにしておく(アクティブなプロファイルは削除できない)。
+    const activeProfileName = "E2E取込実行の保持プロファイル";
+    await createProfileViaIpc(activeProfileName);
+    await setActiveProfileViaIpc(activeProfileName);
+    await createProfileViaIpc(profileName);
+    const filePath = path.join(exportDir, "import-commit.smx");
+    await setE2eFileDialogPaths({ save: filePath, open: filePath });
+
+    const dialog = await openExportDialogFor(profileName);
+    const passphrase = await (await dialog.$("input[readonly]")).getValue();
+    await (await dialog.$("button=エクスポート")).click();
+    await (await dialog.$('[role="status"]')).waitForExist({ timeout: 10000 });
+    await (await dialog.$("button=閉じる")).click();
+    await dialog.waitForExist({ reverse: true, timeout: 10000 });
+    await deleteProfileViaIpc(profileName);
+
+    await (await $("button=インポート")).click();
+    const importDialog = await $('[role="dialog"]');
+    await importDialog.waitForExist({ timeout: 10000 });
+    await (await importDialog.$("input")).setValue(passphrase);
+    await (await importDialog.$("button=OK")).click();
+    const confirmDialog = await $('[role="alertdialog"]');
+    await confirmDialog.waitForExist({ timeout: 15000 });
+    await (await confirmDialog.$("button=インポート実行")).click();
+    await confirmDialog.waitForExist({ reverse: true, timeout: 10000 });
+
+    // 取り込みが確定し、削除したプロファイルが一覧に戻る。戻らないときは、確定に失敗したのか、
+    // 確定したのに画面へ反映されなかったのかを見分けられるよう、失敗の通知と、実際に登録されて
+    // いるプロファイルの名前を添える(通知は数秒で消えるため、確定の直後に採取しておく)。
+    const notices = await browser.tauri.execute(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      return Array.from(document.querySelectorAll("[data-sonner-toast]")).map((t) => t.textContent);
+    });
+    try {
+      await $(
+        `//div[contains(@class,"rounded-lg")][.//*[contains(text(),"${profileName}")]]`
+      ).waitForExist({ timeout: 15000 });
+    } catch (error) {
+      const registered = await browser.tauri.execute(async ({ core }) => {
+        const summaries = (await core.invoke("list_profiles")) as Array<{ name: string }>;
+        return summaries.map((s) => s.name);
+      });
+      throw new Error(
+        `インポートを実行しても、プロファイルが一覧に戻らなかった。通知: ${JSON.stringify(notices)}、` +
+          `登録されているプロファイル: ${JSON.stringify(registered)}`,
+        { cause: error }
+      );
+    }
+    await returnToMainScreen();
+  });
+
+  it("再生成した後に書き出したファイルは、再生成後のパスフレーズでだけインポートできる", async () => {
+    await completeInitialSetup();
+    await createProfileViaIpc("E2E再生成往復確認");
+    const filePath = path.join(exportDir, "regenerated.smx");
+    await setE2eFileDialogPaths({ save: filePath, open: filePath });
+
+    await openProfileManagement();
+    await (await $("button=全体エクスポート")).click();
+    const exportDialog = await $('[role="dialog"]');
+    await exportDialog.waitForExist({ timeout: 10000 });
+    const passphraseInput = await exportDialog.$("input[readonly]");
+    const initial = await passphraseInput.getValue();
+    await (await exportDialog.$("button=再生成")).click();
+    await browser.waitUntil(async () => (await passphraseInput.getValue()) !== initial, {
+      timeout: 10000,
+      timeoutMsg: "再生成してもパスフレーズが変わらなかった",
+    });
+    const regenerated = await passphraseInput.getValue();
+    await (await exportDialog.$("button=エクスポート")).click();
+    await (await exportDialog.$('[role="status"]')).waitForExist({ timeout: 10000 });
+    await (await exportDialog.$("button=閉じる")).click();
+    await exportDialog.waitForExist({ reverse: true, timeout: 10000 });
+
+    await (await $("button=インポート")).click();
+    const importDialog = await $('[role="dialog"]');
+    await importDialog.waitForExist({ timeout: 10000 });
+    const field = await importDialog.$("input");
+
+    // 再生成する前のパスフレーズでは、復号に失敗する。
+    await field.setValue(initial);
+    await (await importDialog.$("button=OK")).click();
+    const error = await importDialog.$('[role="alert"]');
+    await error.waitForExist({ timeout: 15000 });
+    expect(await error.getText()).toContain("復号に失敗しました");
+
+    // 再生成した後のパスフレーズなら、内容の確認画面へ進む(取り込みは実行せず取り消す)。
+    await field.setValue(regenerated);
+    await (await importDialog.$("button=OK")).click();
+    const confirmDialog = await $('[role="alertdialog"]');
+    await confirmDialog.waitForExist({ timeout: 15000 });
+    expect(await confirmDialog.getText()).toContain("インポート内容の確認");
+    await (await confirmDialog.$("button=キャンセル")).click();
+    await confirmDialog.waitForExist({ reverse: true, timeout: 10000 });
+    await returnToMainScreen();
+  });
+
   it("書き出し後は、Escapeを押しても閉じず、「閉じる」で閉じる", async () => {
     await completeInitialSetup();
     const profileName = "E2Eエクスポート成功後確認";

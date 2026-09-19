@@ -55,6 +55,12 @@ function MainRoute() {
   // 誤って受理してしまうため、値ではなく「これが最新の呼び出しか」で判定する。
   const maskAndSaveGeneration = useRef(0);
 
+  // 確認画面の「インポート実行」は、確定(commit)を始めた後で、画面を閉じる操作(onOpenChange)も呼ぶ。
+  // その閉じる操作から後始末(clearPendingImport)を続けて発行すると、2つのIPCの実行順が保証されず、
+  // 後始末が先に走ると、確定が「確認待ちのインポートがありません」で失敗する。確定は成否に関わらず
+  // 保留中の内容を消費するため、確定を始めた場合は、後始末を発行しない。
+  const importConfirmStarted = useRef(false);
+
   const closeDialog = () => setDialog({ kind: "none" });
 
   const confirmNewProfileName = async () => {
@@ -301,18 +307,21 @@ function MainRoute() {
         onOpenChange={(open) => {
           if (open) return;
           closeDialog();
-          // commit成功/失敗時はRust側で既に消費済みだが、キャンセル時はここで
-          // 明示的に破棄しない限り復号済みの平文が残り続けるため。
+          if (importConfirmStarted.current) return;
+          // キャンセルなど、確定しない閉じ方では、ここで明示的に破棄しない限り、復号済みの平文が
+          // 残り続ける。
           appState.clearPendingImport();
         }}
         rows={dialog.kind === "importConfirm" ? dialog.rows : []}
         onConfirm={async () => {
+          importConfirmStarted.current = true;
           try {
             await appState.commitImport();
           } catch {
             // 失敗時のトースト表示はappState側のreportAndRethrowが行うため、
             // ここでの追加対応は不要(catchが無いとこのPromise自体がunhandledになる)。
           } finally {
+            importConfirmStarted.current = false;
             closeDialog();
           }
         }}

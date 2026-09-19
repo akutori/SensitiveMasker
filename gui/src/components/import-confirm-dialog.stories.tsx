@@ -1,5 +1,6 @@
 import { useState } from "react";
 import type { Meta, StoryObj } from "@storybook/react-vite";
+import { expect, fn, screen, userEvent } from "storybook/test";
 import { Button } from "@/components/ui/button";
 import type { ImportRuleDto } from "@/lib/profile-ipc";
 import {
@@ -141,5 +142,44 @@ export const OpenByDefault: Story = {
     onOpenChange: () => {},
     onConfirm: () => {},
     rows: MULTIPLE_ROWS,
+  },
+};
+
+// 呼び出された順序(vitestのモックが、呼び出しごとに振る通し番号)。
+function callOrder(spy: unknown): number {
+  return (spy as { mock: { invocationCallOrder: number[] } }).mock.invocationCallOrder[0];
+}
+
+// 「インポート実行」は、確定(onConfirm)を先に呼び、その後で画面を閉じる操作(onOpenChange(false))を
+// 呼ぶ。呼び出し側は、この順序に頼って、確定を始めたことを閉じる操作より前に記録し、確定と、閉じる操作に
+// 伴う後始末を続けて発行しない(順序が保証されず、後始末が先に走ると、確定が失敗するため)。
+export const ConfirmBeforeClosing: Story = {
+  args: {
+    open: true,
+    onOpenChange: fn(),
+    onConfirm: fn(),
+    rows: SINGLE_ROW,
+  },
+  play: async ({ args }) => {
+    await userEvent.click(await screen.findByRole("button", { name: "インポート実行" }));
+    await expect(args.onConfirm).toHaveBeenCalledTimes(1);
+    await expect(args.onOpenChange).toHaveBeenCalledWith(false);
+    await expect(callOrder(args.onConfirm)).toBeLessThan(callOrder(args.onOpenChange));
+  },
+};
+
+// キャンセルは、確定を呼ばずに、画面を閉じる操作だけを呼ぶ(呼び出し側は、これを確定しない閉じ方と
+// みなして、復号済みの内容を破棄する)。
+export const CancelDoesNotConfirm: Story = {
+  args: {
+    open: true,
+    onOpenChange: fn(),
+    onConfirm: fn(),
+    rows: SINGLE_ROW,
+  },
+  play: async ({ args }) => {
+    await userEvent.click(await screen.findByRole("button", { name: "キャンセル" }));
+    await expect(args.onOpenChange).toHaveBeenCalledWith(false);
+    await expect(args.onConfirm).not.toHaveBeenCalled();
   },
 };
