@@ -473,4 +473,37 @@ describe("エクスポートの実行(ファイルダイアログの差し替え
     await reopened.waitForExist({ reverse: true, timeout: 10000 });
     await returnToMainScreen();
   });
+
+  it("貼り付けで前後に空白が混ざったパスフレーズでも、インポートの確認画面へ進める", async () => {
+    await completeInitialSetup();
+    await createProfileViaIpc("E2E空白許容確認");
+    const roundTripPath = path.join(exportDir, "whitespace.smx");
+    await setE2eFileDialogPaths({ save: roundTripPath, open: roundTripPath });
+
+    await openProfileManagement();
+    await (await $("button=全体エクスポート")).click();
+    const exportDialog = await $('[role="dialog"]');
+    await exportDialog.waitForExist({ timeout: 10000 });
+    const passphrase = await (await exportDialog.$("input[readonly]")).getValue();
+    await (await exportDialog.$("button=エクスポート")).click();
+    await (await exportDialog.$('[role="status"]')).waitForExist({ timeout: 10000 });
+    await (await exportDialog.$("button=閉じる")).click();
+    await exportDialog.waitForExist({ reverse: true, timeout: 10000 });
+
+    await (await $("button=インポート")).click();
+    const importDialog = await $('[role="dialog"]');
+    await importDialog.waitForExist({ timeout: 10000 });
+    const input = await importDialog.$("input");
+    const padded = `  ${passphrase}  `;
+    await input.setValue(padded);
+    expect(await input.getValue()).toBe(padded);
+    await (await importDialog.$("button=OK")).click();
+
+    const confirmDialog = await $('[role="alertdialog"]');
+    await confirmDialog.waitForExist({ timeout: 15000 });
+    expect(await confirmDialog.getText()).toContain("インポート内容の確認");
+    await (await confirmDialog.$("button=キャンセル")).click();
+    await confirmDialog.waitForExist({ reverse: true, timeout: 10000 });
+    await returnToMainScreen();
+  });
 });
