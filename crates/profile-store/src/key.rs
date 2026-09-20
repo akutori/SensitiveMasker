@@ -108,8 +108,8 @@ fn create_restricted_file(path: &Path, key: &[u8; KEY_LEN]) -> Result<(), KeyErr
 }
 
 /// 既存のファイルを、現在のユーザーだけがフルコントロールを持つ状態にする。
-/// - /reset: 継承のACLへ戻す。管理者権限のプロセスが作ったファイルは、既定のDACLとして、SYSTEM・
-///   Administratorsの明示のエントリを持ち、それは、/inheritance:rでは消えないため
+/// - /reset: 継承のACLへ戻す。親のフォルダが継承できるエントリを持たないと(管理者権限のプロセスに限らない)、
+///   作られたファイルは、既定のDACLとして、SYSTEMなどの明示のエントリを持ち、それは、/inheritance:rでは消えないため
 /// - /inheritance:r: 継承のエントリ(SYSTEM/Administrators等)を除去する
 /// - /grant:r: 現在のユーザーのみにフルコントロールを与える
 #[cfg(windows)]
@@ -205,8 +205,8 @@ mod tests {
         let key_path = dir.path().join("key.bin");
         std::fs::write(&key_path, b"x").unwrap();
 
-        // 管理者権限のプロセスが作ったファイルは、既定のDACLとして、SYSTEMとAdministratorsの明示の
-        // エントリを持つ(継承のエントリではない)。同じ状態を、SIDで指定して作る
+        // 親のフォルダが継承できるエントリを持たないと、作られたファイルは、既定のDACLとして、SYSTEMなどの
+        // 明示のエントリを持つ(継承のエントリではない)。同じ状態を、SIDで指定して作る
         // (*S-1-5-18はSYSTEM、*S-1-5-32-544はAdministrators)。
         for sid in ["*S-1-5-18:F", "*S-1-5-32-544:F"] {
             let output = Command::new(icacls_path().unwrap()).arg(&key_path).arg("/grant").arg(sid).output().unwrap();
