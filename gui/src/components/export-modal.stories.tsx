@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { CLIPBOARD_CLEAR_DELAY_SECONDS } from "@/lib/clipboard-clear-delay";
 import {
   beginExport,
+  beginWriting,
   completeExport,
   openExportDialog,
   regeneratePassphrase,
@@ -31,7 +32,7 @@ function randomDemoPassphrase() {
   return words.join("-");
 }
 
-// 実際のルートと同じ状態遷移の関数を使い、エクスポート実行を0.2秒後の成功として模擬する。
+// 実際のルートと同じ状態遷移の関数を使い、エクスポート実行(保存先の選択→書き込み)を0.2秒後の成功として模擬する。
 function DemoTrigger(props: { target: string; label: string; openByDefault?: boolean }) {
   const [open, setOpen] = useState(props.openByDefault ?? false);
   const [session, setSession] = useState(() => openExportDialog(1, INITIAL_PASSPHRASE));
@@ -62,6 +63,7 @@ function DemoTrigger(props: { target: string; label: string; openByDefault?: boo
         onExport={() => {
           const { sessionId, passphrase } = session;
           setSession((current) => beginExport(current, sessionId, passphrase));
+          window.setTimeout(() => setSession((current) => beginWriting(current, sessionId)), 100);
           window.setTimeout(() => setSession((current) => completeExport(current, sessionId)), 200);
         }}
       />
@@ -160,15 +162,50 @@ export const BusyDisablesButtons: Story = {
   },
 };
 
-// 書き出し中は、書き出すパスフレーズを変えさせず、失わせないため、全ての操作が無効になり、
-// 閉じる操作(×・Escape・背景を押す)も受け付けない。
-export const Exporting: Story = {
+// 保存先の選択中は、まだ何も書き出していないので、閉じられる(閉じると、書き出しは取り消される)。書き出す
+// パスフレーズを変えさせないため、再生成とエクスポートだけが無効になる。
+export const Choosing: Story = {
   args: {
     open: true,
     onOpenChange: fn(),
     target: "SIP監視用",
     passphrase: INITIAL_PASSPHRASE,
-    status: "exporting",
+    status: "choosing",
+    clipboardBusy: false,
+    onCopy: () => {},
+    onRegenerate: () => {},
+    onExport: () => {},
+  },
+  play: async ({ args }) => {
+    for (const name of ["再生成", "エクスポート"]) {
+      await expect(await screen.findByRole("button", { name })).toBeDisabled();
+    }
+    for (const name of ["パスフレーズを表示", "コピー", "キャンセル"]) {
+      await expect(await screen.findByRole("button", { name })).toBeEnabled();
+    }
+    await expect(screen.getByRole("button", { name: "Close" })).toBeInTheDocument();
+    // 進み具合は、読み上げの領域(aria-live)へ出る。書き出し完了の通知の領域(status)は、空のまま。
+    await expect(screen.getByText(/保存先を選択しています/)).toHaveAttribute("aria-live", "polite");
+    await expect(screen.getByRole("status")).toBeEmptyDOMElement();
+
+    await userEvent.keyboard("{Escape}");
+    await expect(args.onOpenChange).toHaveBeenCalledTimes(1);
+    await expect(args.onOpenChange).toHaveBeenLastCalledWith(false);
+    await clickOverlay();
+    await expect(args.onOpenChange).toHaveBeenCalledTimes(2);
+    await expect(args.onOpenChange).toHaveBeenLastCalledWith(false);
+  },
+};
+
+// 書き込み中は、書き出すパスフレーズを変えさせず、失わせないため、全ての操作が無効になり、
+// 閉じる操作(×・Escape・背景を押す)も受け付けない。
+export const Writing: Story = {
+  args: {
+    open: true,
+    onOpenChange: fn(),
+    target: "SIP監視用",
+    passphrase: INITIAL_PASSPHRASE,
+    status: "writing",
     clipboardBusy: false,
     onCopy: () => {},
     onRegenerate: () => {},
@@ -179,6 +216,7 @@ export const Exporting: Story = {
       await expect(await screen.findByRole("button", { name })).toBeDisabled();
     }
     await expect(screen.queryByRole("button", { name: "Close" })).toBeNull();
+    await expect(screen.getByText("書き込んでいます…")).toHaveAttribute("aria-live", "polite");
 
     await userEvent.keyboard("{Escape}");
     await clickOverlay();

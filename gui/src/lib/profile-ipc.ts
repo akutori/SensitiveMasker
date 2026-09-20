@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { RuleListItem } from "@/components/rule-edit-screen";
+import { waitForE2eExportWriteGate } from "./e2e-export-write-gate";
 import { recordPendingImportIdForE2e } from "./e2e-pending-import";
 import { fromRuleDto, toRuleDto, type RuleProfileDto } from "./masking-ipc";
 
@@ -102,10 +103,12 @@ export async function exportProfileToFile(
   passphrase: string,
   destPath: string
 ): Promise<void> {
+  await waitForE2eExportWriteGate();
   await invoke("export_profile_to_file", { name, passphrase, destPath });
 }
 
 export async function exportAllToFile(passphrase: string, destPath: string): Promise<void> {
+  await waitForE2eExportWriteGate();
   await invoke("export_all_to_file", { passphrase, destPath });
 }
 

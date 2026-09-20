@@ -16,6 +16,7 @@ import { openFileDialog, saveFileDialog } from "@/lib/file-dialog";
 import {
   abortExport,
   beginExport,
+  beginWriting,
   canRegenerate,
   canStartExport,
   completeExport,
@@ -224,6 +225,8 @@ function ProfilesRoute() {
     return () => {
       mounted.current = false;
       importConfirmHandlers.onLeave();
+      // エクスポートの進行状況の正も手放す(保存先を選ぶ間に離れた場合に、その選択の結果で、書き込まないため)。
+      exportSessionRef.current = null;
     };
   }, []);
 
@@ -288,6 +291,11 @@ function ProfilesRoute() {
         transitionExportSession((current) => abortExport(current, sessionId));
         return;
       }
+      // 保存先を選ぶ間は、画面を閉じられる。閉じられていた(画面を閉じた・別の画面へ移った・閉じて開き直した)
+      // 場合は、その画面のパスフレーズを、誰も見ないまま書き出してはならないため、書き込まない。
+      transitionExportSession((current) => beginWriting(current, sessionId));
+      const writingSession = exportSessionRef.current;
+      if (writingSession?.sessionId !== sessionId || writingSession.phase !== "writing") return;
       if (profileId === null) await appState.exportAll(exportedPassphrase, destPath);
       else await appState.exportProfile(profileId, exportedPassphrase, destPath);
       toast.success("エクスポートが完了しました");

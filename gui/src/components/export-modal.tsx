@@ -20,7 +20,9 @@ export interface ExportModalProps {
   target: string;
   passphrase: string;
   // editing: パスフレーズの確認・コピー・再生成・エクスポートができる。
-  // exporting: 書き出し中。書き出すパスフレーズを変えさせず、失わせないため、全ての操作を無効にし、
+  // choosing: 保存先を選んでいる(まだ何も書き出していない)。書き出すパスフレーズを変えさせないため、
+  //   再生成・エクスポートは無効にするが、閉じる操作は受け付ける(閉じると、書き出しは取り消される)。
+  // writing: 書き込み中。書き出すパスフレーズを変えさせず、失わせないため、全ての操作を無効にし、
   //   閉じる操作も受け付けない。
   // exported: 書き出し済み。パスフレーズの表示・コピーと、閉じることだけができる
   //   (再生成できると、書き出したファイルと画面のパスフレーズが食い違うため)。
@@ -48,14 +50,15 @@ export function ExportModal({
   const inputId = useId();
   const passphraseInputRef = useRef<HTMLInputElement>(null);
   const [revealed, setRevealed] = useState(false);
-  const exporting = status === "exporting";
+  const choosing = status === "choosing";
+  const writing = status === "writing";
   const exported = status === "exported";
 
-  // 実行中は、押したボタンが無効になってフォーカスを失い、フォーカストラップが効かなくなる
-  // (Tabで背景の画面へ出られる)ため、フォーカスを入力欄へ移しておく。
+  // 実行中(保存先の選択中・書き込み中)は、押したボタンが無効になってフォーカスを失い、フォーカストラップが
+  // 効かなくなる(Tabで背景の画面へ出られる)ため、フォーカスを入力欄へ移しておく。
   useLayoutEffect(() => {
-    if (exporting) passphraseInputRef.current?.focus();
-  }, [exporting]);
+    if (choosing || writing) passphraseInputRef.current?.focus();
+  }, [choosing, writing]);
 
   // Escapeと背景を押す操作は、操作の意図を確かめずに閉じてしまう。編集中(まだ何も書き出して
   // いない)以外は、パスフレーズを失うため受け付けない。
@@ -80,7 +83,7 @@ export function ExportModal({
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
-        showCloseButton={!exporting}
+        showCloseButton={!writing}
         onEscapeKeyDown={preventImplicitClose}
         onInteractOutside={preventImplicitClose}
       >
@@ -104,20 +107,20 @@ export function ExportModal({
               variant="outline"
               size="icon"
               onClick={() => setRevealed((v) => !v)}
-              disabled={exporting}
+              disabled={writing}
               aria-controls={inputId}
               aria-label={revealed ? "パスフレーズを隠す" : "パスフレーズを表示"}
             >
               {revealed ? <EyeOff /> : <Eye />}
             </Button>
-            <Button variant="outline" onClick={onCopy} disabled={clipboardBusy || exporting}>
+            <Button variant="outline" onClick={onCopy} disabled={clipboardBusy || writing}>
               コピー
             </Button>
             {!exported && (
               <Button
                 variant="outline"
                 onClick={onRegenerate}
-                disabled={clipboardBusy || exporting}
+                disabled={clipboardBusy || choosing || writing}
               >
                 再生成
               </Button>
@@ -141,6 +144,12 @@ export function ExportModal({
               </>
             )}
           </div>
+          {/* 実行の進み具合。領域は、実行の前から置いておく(領域ごと後から現れると、読み上げられないことがあるため)。
+              1行分の高さを常に確保し、文が出入りしても、画面の高さが動かないようにする。 */}
+          <p className="min-h-5 text-sm text-muted-foreground" aria-live="polite">
+            {choosing && "保存先を選択しています…(この画面を閉じると、書き出しは取り消されます)"}
+            {writing && "書き込んでいます…"}
+          </p>
           <p
             className="text-sm text-muted-foreground"
             data-a11y-verified-contrast="dialog-overlay-geometry-false-positive"
@@ -156,11 +165,11 @@ export function ExportModal({
             </DialogClose>
           ) : (
             <>
-              <Button onClick={onExport} disabled={exporting}>
+              <Button onClick={onExport} disabled={choosing || writing}>
                 エクスポート
               </Button>
               <DialogClose asChild>
-                <Button variant="outline" disabled={exporting}>
+                <Button variant="outline" disabled={writing}>
                   キャンセル
                 </Button>
               </DialogClose>

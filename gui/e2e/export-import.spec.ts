@@ -91,6 +91,34 @@ async function settleSaveDialog(outcome: { path: string | null } | { error: stri
   }, outcome);
 }
 
+// エクスポートの書き込みを、releaseExportWriteが呼ばれるまで保留する(保存先が決まってから書き込みが終わるまでの、
+// 書き込み中の画面を確かめるため。書き込みのIPCの応答は、テスト側から保留できない)。
+async function holdExportWrite() {
+  await browser.tauri.execute(() => {
+    const w = window as unknown as { __e2eExportWriteGate?: Promise<void>; __e2eReleaseExportWrite?: () => void };
+    w.__e2eExportWriteGate = new Promise<void>((resolve) => {
+      w.__e2eReleaseExportWrite = resolve;
+    });
+  });
+}
+
+// holdExportWriteで保留した書き込みを、始めさせる。
+async function releaseExportWrite() {
+  await browser.tauri.execute(() => {
+    const w = window as unknown as { __e2eReleaseExportWrite?: () => void };
+    if (!w.__e2eReleaseExportWrite) throw new Error("書き込みが保留されていない(holdExportWriteを先に呼ぶ)");
+    w.__e2eReleaseExportWrite();
+  });
+}
+
+// 画面の中に、指定した文が表示されるまで待つ(実行の進み具合の表示の確認)。
+async function waitForDialogText(dialog: DialogElement, text: string) {
+  await browser.waitUntil(async () => (await dialog.getText()).includes(text), {
+    timeout: 10000,
+    timeoutMsg: `画面に「${text}」が表示されなかった`,
+  });
+}
+
 // holdSaveDialogに加えて、保存ダイアログを開こうとした回数(差し替え値が参照された回数)を数える。
 async function holdSaveDialogCounting() {
   await browser.tauri.execute(() => {
@@ -324,7 +352,13 @@ afterEach(async () => {
         __e2eSaveControl?: { resolve: (path: string | null) => void };
         __e2eOpenControl?: { resolve: (path: string | null) => void };
         __e2ePendingImportIds?: number[];
+        __e2eExportWriteGate?: unknown;
+        __e2eReleaseExportWrite?: () => void;
       };
+      // 保留した書き込みが、テストの失敗で、放されないまま残ると、次のテストの書き込みが、待ち続けてしまう。
+      w.__e2eReleaseExportWrite?.();
+      w.__e2eReleaseExportWrite = undefined;
+      w.__e2eExportWriteGate = undefined;
       w.__e2eSaveControl?.resolve(null);
       w.__e2eOpenControl?.resolve(null);
       // 次のテストが、保留していないのにsettleしたとき、前のテストの参照に当たらず失敗するようにする。
@@ -718,9 +752,66 @@ describe("エクスポートの実行(ファイルダイアログの差し替え
     await returnToMainScreen();
   });
 
-  it("書き出し中は、Escapeを押しても閉じず、フォーカスは画面の内側に留まる", async () => {
+  it("保存先の選択中は、Escapeで閉じられ、閉じた後に選択が決着しても、書き出されない", async () => {
     await completeInitialSetup();
-    const profileName = "E2Eエクスポート実行中確認";
+    const profileName = "E2Eエクスポート選択中確認";
+    await createProfileViaIpc(profileName);
+
+    const dialog = await openExportDialogFor(profileName);
+    const exportButton = await dialog.$("button=エクスポート");
+    await holdSaveDialog();
+    await exportButton.click();
+    await exportButton.waitForEnabled({ reverse: true, timeout: 10000 });
+
+    // 保存先を選んでいる間は、まだ何も書き出していない。書き出すパスフレーズを変えさせないため、再生成・
+    // エクスポートは押せないが、閉じられる(×・キャンセルも押せる)。
+    await waitForDialogText(dialog, "保存先を選択しています");
+    expect(await (await dialog.$("button=再生成")).isEnabled()).toBe(false);
+    expect(await (await dialog.$("button=キャンセル")).isEnabled()).toBe(true);
+    expect(await (await dialog.$("button:has(> span.sr-only)")).isExisting()).toBe(true);
+
+    await browser.keys("Escape");
+    await dialog.waitForExist({ reverse: true, timeout: 10000 });
+
+    // 閉じた後に、保存先の選択が決着しても、閉じた画面のパスフレーズを、誰も見ないまま書き出さない。
+    const target = path.join(exportDir, "closed-while-choosing.smx");
+    await settleSaveDialog({ path: target });
+    await browser.pause(1500);
+    expect(fs.existsSync(target)).toBe(false);
+
+    // 開き直すと、編集中に戻っていて、そのまま書き出せる。
+    const reopened = await openExportDialogFromRow(profileName);
+    expect(await (await reopened.$("button=エクスポート")).isEnabled()).toBe(true);
+    await (await reopened.$("button=キャンセル")).click();
+    await reopened.waitForExist({ reverse: true, timeout: 10000 });
+    await returnToMainScreen();
+  });
+
+  it("保存先の選択中に履歴で戻る操作をすると、画面は移り、その選択が決着しても、書き出されない", async () => {
+    await completeInitialSetup();
+    const profileName = "E2Eエクスポート選択中履歴戻り確認";
+    await createProfileViaIpc(profileName);
+
+    const dialog = await openExportDialogFor(profileName);
+    const exportButton = await dialog.$("button=エクスポート");
+    await holdSaveDialog();
+    await exportButton.click();
+    await exportButton.waitForEnabled({ reverse: true, timeout: 10000 });
+
+    // 保存先を選んでいる間は、まだ何も書き出していないので、履歴の移動を止めない。
+    await browser.back();
+    await dialog.waitForExist({ reverse: true, timeout: 10000 });
+
+    const target = path.join(exportDir, "left-while-choosing.smx");
+    await settleSaveDialog({ path: target });
+    await browser.pause(1500);
+    expect(fs.existsSync(target)).toBe(false);
+    await (await $("button*=マスク実行")).waitForExist({ timeout: 10000 });
+  });
+
+  it("書き込み中は、Escapeを押しても閉じず、フォーカスは画面の内側に留まる", async () => {
+    await completeInitialSetup();
+    const profileName = "E2Eエクスポート書き込み中確認";
     await createProfileViaIpc(profileName);
 
     // 編集中はEscapeで閉じる。以降の「閉じない」の確認が、キーが届いていることを前提にできる。
@@ -731,9 +822,14 @@ describe("エクスポートの実行(ファイルダイアログの差し替え
     const dialog = await openExportDialogFromRow(profileName);
     const passphrase = await (await dialog.$("input[readonly]")).getValue();
     const exportButton = await dialog.$("button=エクスポート");
-    await holdSaveDialog();
+    // 保存先はすぐに決まり、書き込みを始める前で、放されるまで保留される(その間が、書き込み中)。
+    await setE2eFileDialogPaths({ save: path.join(exportDir, "during-export.smx") });
+    await holdExportWrite();
     await exportButton.click();
-    await exportButton.waitForEnabled({ reverse: true, timeout: 10000 });
+    await waitForDialogText(dialog, "書き込んでいます");
+    // 書き込み中は、閉じるボタン(×)も、キャンセルも、押せない。
+    expect(await (await dialog.$("button=キャンセル")).isEnabled()).toBe(false);
+    expect(await (await dialog.$("button:has(> span.sr-only)")).isExisting()).toBe(false);
 
     // 押したボタンが無効になっても、フォーカスは画面の内側にある(外へ落ちると、Tabで背景の画面へ
     // 出られ、書き出し中に背景の操作をして、パスフレーズを失いかねない)。WebDriverのTabはキー
@@ -747,8 +843,8 @@ describe("エクスポートの実行(ファイルダイアログの差し替え
     await browser.pause(500);
     expect(await dialog.isDisplayed()).toBe(true);
 
-    // 保存先が決まると書き出しに成功し、同じパスフレーズが残っている。
-    await settleSaveDialog({ path: path.join(exportDir, "during-export.smx") });
+    // 書き込みが終わると、書き出しに成功し、同じパスフレーズが残っている。
+    await releaseExportWrite();
     await waitForExportNotice(dialog);
     expect(await (await dialog.$("input[readonly]")).getValue()).toBe(passphrase);
 
@@ -842,17 +938,18 @@ describe("エクスポートの実行(ファイルダイアログの差し替え
     await returnToMainScreen();
   });
 
-  it("書き出し中に履歴で戻る操作をしても、エクスポート画面は残り、履歴の位置も変わらない", async () => {
+  it("書き込み中に履歴で戻る操作をしても、エクスポート画面は残り、履歴の位置も変わらない", async () => {
     await completeInitialSetup();
-    const profileName = "E2Eエクスポート実行中履歴戻り確認";
+    const profileName = "E2Eエクスポート書き込み中履歴戻り確認";
     await createProfileViaIpc(profileName);
 
     const dialog = await openExportDialogFor(profileName);
     const passphrase = await (await dialog.$("input[readonly]")).getValue();
     const exportButton = await dialog.$("button=エクスポート");
-    await holdSaveDialog();
+    await setE2eFileDialogPaths({ save: path.join(exportDir, "history-back-exporting.smx") });
+    await holdExportWrite();
     await exportButton.click();
-    await exportButton.waitForEnabled({ reverse: true, timeout: 10000 });
+    await waitForDialogText(dialog, "書き込んでいます");
 
     const urlBefore = await currentUrl();
     await browser.back();
@@ -861,7 +958,7 @@ describe("エクスポートの実行(ファイルダイアログの差し替え
     expect(await (await dialog.$("input[readonly]")).getValue()).toBe(passphrase);
     expect(await currentUrl()).toBe(urlBefore);
 
-    await settleSaveDialog({ path: path.join(exportDir, "history-back-exporting.smx") });
+    await releaseExportWrite();
     await waitForExportNotice(dialog);
     await (await dialog.$("button=閉じる")).click();
     await dialog.waitForExist({ reverse: true, timeout: 10000 });
