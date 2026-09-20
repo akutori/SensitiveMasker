@@ -5,6 +5,7 @@ use std::collections::HashSet;
 
 use masking_core::RuleProfile;
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroize;
 
 pub const CURRENT_FORMAT_VERSION: u32 = 1;
 
@@ -15,6 +16,13 @@ pub struct ExportedProfile {
     pub tags: Vec<String>,
     #[serde(flatten)]
     pub profile: RuleProfile,
+}
+
+impl Zeroize for ExportedProfile {
+    fn zeroize(&mut self) {
+        self.profile.zeroize();
+        self.tags.zeroize();
+    }
 }
 
 // kindタグによるserdeの内部タグ付きenumにより、復号後のJSONの中身だけで

@@ -13,7 +13,8 @@
 ## 技術スタック
 
 - Rust(edition 2024)、Cargo workspace(各crateは`edition.workspace = true`でルートの`[workspace.package]`を継承)
-- **masking-core**: 副作用のない純粋ロジック。`serde`(モデル定義)、`regex`(マッチング)、`thiserror`(エラー型)
+- **masking-core**: 副作用のない純粋ロジック。`serde`(モデル定義)、`regex`(マッチング)、`thiserror`(エラー型)、
+  `zeroize`(ルールの内容を、メモリ上で消去できるようにする。`Rule`・`RuleProfile`に`Zeroize`を実装する)
 - **profile-store**: SQLite永続化+暗号化+鍵管理+export/import。`rusqlite`(bundled)、
   `chacha20poly1305`+`poly1305`(zeroize feature有効化、プロファイル本体の暗号化)、
   `secrecy`/`zeroize`(鍵・平文の保持と消去)、`age`(エクスポート/インポートのパスフレーズ再暗号化)、

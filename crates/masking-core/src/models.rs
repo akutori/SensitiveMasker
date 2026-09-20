@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use zeroize::Zeroize;
 
 /// 正規表現1件あたりのコンパイル後サイズ上限。regexクレートの既定(10MiB)より厳しくし、
 /// 大量のルールを持つプロファイルでのコンパイルコスト積み上げを抑える。
@@ -100,6 +101,19 @@ pub struct Rule {
     prefix: Option<String>,
     enabled: bool,
     description: Option<String>,
+}
+
+/// ルールの文字列(名前・パターン・固定値・接頭辞・説明)を、メモリ上で消去する。パターンや固定値には、マスク対象の
+/// 実際の値(環境変数の値など)が入りうるため、保留していた内容を捨てるときに使う。消去した後のルールは、名前が空で、
+/// 検証を通らない状態なので、使わずに捨てる。
+impl Zeroize for Rule {
+    fn zeroize(&mut self) {
+        self.name.zeroize();
+        self.pattern.zeroize();
+        self.fixed_value.zeroize();
+        self.prefix.zeroize();
+        self.description.zeroize();
+    }
 }
 
 impl Rule {
@@ -232,6 +246,16 @@ pub struct RuleProfile {
     rules: Vec<Rule>,
 }
 
+/// プロファイルの文字列(名前・説明)と、全てのルールの内容を、メモリ上で消去する。消去した後のプロファイルは、
+/// 名前が空で、検証を通らない状態なので、使わずに捨てる。
+impl Zeroize for RuleProfile {
+    fn zeroize(&mut self) {
+        self.profile_name.zeroize();
+        self.description.zeroize();
+        self.rules.zeroize();
+    }
+}
+
 impl RuleProfile {
     pub fn new(
         profile_name: impl Into<String>,
@@ -290,6 +314,64 @@ impl From<RuleProfile> for RuleProfileDto {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn zeroize_clears_every_text_field_of_a_fixed_rule() {
+        let mut rule = Rule::new(
+            "secret_rule_name",
+            PatternType::Literal,
+            "secret-literal-value",
+            Mode::Fixed,
+            Some("secret-fixed-value".to_string()),
+            None,
+            true,
+            Some("secret description".to_string()),
+        )
+        .unwrap();
+
+        rule.zeroize();
+
+        assert_eq!(rule.name(), "");
+        assert_eq!(rule.pattern(), "");
+        assert_eq!(rule.fixed_value(), None);
+        assert_eq!(rule.description(), None);
+    }
+
+    #[test]
+    fn zeroize_clears_the_prefix_of_a_sequential_rule() {
+        let mut rule = Rule::new(
+            "secret_rule_name",
+            PatternType::Literal,
+            "secret-literal-value",
+            Mode::Sequential,
+            None,
+            Some("__SECRET_PREFIX_".to_string()),
+            true,
+            None,
+        )
+        .unwrap();
+
+        rule.zeroize();
+
+        assert_eq!(rule.prefix(), None);
+        assert_eq!(rule.pattern(), "");
+    }
+
+    #[test]
+    fn zeroize_clears_a_profile_and_every_rule_in_it() {
+        let mut profile = RuleProfile::new(
+            "secret-profile-name",
+            Some("secret description".to_string()),
+            vec![valid_fixed_rule().unwrap(), valid_sequential_rule().unwrap()],
+        )
+        .unwrap();
+
+        profile.zeroize();
+
+        assert_eq!(profile.profile_name(), "");
+        assert_eq!(profile.description(), None);
+        assert!(profile.rules().is_empty());
+    }
 
     fn valid_fixed_rule() -> Result<Rule, RuleError> {
         Rule::new(

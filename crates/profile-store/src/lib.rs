@@ -15,7 +15,7 @@ use bulk::ExportedProfile;
 use masking_core::RuleProfile;
 use rusqlite::Connection;
 use secrecy::SecretBox;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 pub use bulk::ExportPayload;
 pub use paths::{normalize_and_reject_special_forms, AppPaths, PathError};
@@ -91,11 +91,51 @@ pub struct AllImportEntry {
     pub renamed: bool,
 }
 
+impl Zeroize for AllImportEntry {
+    fn zeroize(&mut self) {
+        self.original_name.zeroize();
+        self.resolved_name.zeroize();
+    }
+}
+
 /// `preview_import`の結果。DBはまだ変更されていない。`commit_import`にそのまま渡す。
 #[derive(Debug, Clone)]
 pub enum ImportPreview {
     Single { name: String, exported: ExportedProfile },
     All { active_profile_name: Option<String>, entries: Vec<AllImportEntry>, exported: Vec<ExportedProfile> },
+}
+
+#[cfg(test)]
+thread_local! {
+    // ImportPreviewの内容を消去した回数(テスト用。捨てる・確定する、どちらの経路でも消去されることを確かめる)。
+    static IMPORT_PREVIEW_WIPES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// 保留していた復号済みの内容(ルールのパターン・固定値など、マスク対象の実際の値を含みうる)を、メモリ上で消去する。
+impl Zeroize for ImportPreview {
+    fn zeroize(&mut self) {
+        #[cfg(test)]
+        IMPORT_PREVIEW_WIPES.with(|wipes| wipes.set(wipes.get() + 1));
+        match self {
+            ImportPreview::Single { name, exported } => {
+                name.zeroize();
+                exported.zeroize();
+            }
+            ImportPreview::All { active_profile_name, entries, exported } => {
+                active_profile_name.zeroize();
+                entries.zeroize();
+                exported.zeroize();
+            }
+        }
+    }
+}
+
+/// 確定・破棄・保持数の上限による廃棄など、どの経路で捨てても、内容が消去されるようにする。
+/// (Dropを持つため、フィールドをムーブして取り出す書き方はできない。借用で使う。)
+impl Drop for ImportPreview {
+    fn drop(&mut self) {
+        self.zeroize();
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -298,20 +338,21 @@ impl ProfileStore {
     /// `preview_import`の結果を実際に書き込む。全体の場合は1トランザクションにまとめる
     /// (途中の失敗で一部プロファイルだけが作成された状態を残さないため)。
     pub fn commit_import(&mut self, preview: ImportPreview) -> Result<ImportOutcome, ProfileStoreError> {
-        match preview {
+        // previewは、借用で使う。関数を抜けるとき(成功・失敗のどちらでも)に、dropで内容が消去される。
+        match &preview {
             ImportPreview::Single { name, exported } => {
                 let encrypted_json =
                     Zeroizing::new(serde_json::to_vec(&exported.profile).expect("RuleProfileのシリアライズは失敗しない"));
                 let encrypted = crypto::encrypt(&self.key, &encrypted_json, name.as_bytes());
 
                 let tx = self.conn.transaction()?;
-                insert_profile_row(&tx, &name, &encrypted, exported.is_favorite, &exported.tags)?;
+                insert_profile_row(&tx, name, &encrypted, exported.is_favorite, &exported.tags)?;
                 let activated = read_active_profile_name(&tx)?.is_none();
                 if activated {
-                    upsert_active_profile_name(&tx, &name)?;
+                    upsert_active_profile_name(&tx, name)?;
                 }
                 tx.commit()?;
-                Ok(ImportOutcome::Single { name, activated })
+                Ok(ImportOutcome::Single { name: name.clone(), activated })
             }
             ImportPreview::All { active_profile_name, entries, exported } => {
                 // 暗号化はself.keyの借用で完結させ、トランザクション(self.connの可変借用)開始前に
@@ -360,7 +401,7 @@ impl ProfileStore {
                 // (衝突でリネームされていれば解決後の名前に読み替えて)採用する。
                 let mut activated_profile_name = None;
                 if read_active_profile_name(&tx)?.is_none() {
-                    if let Some(original) = &active_profile_name {
+                    if let Some(original) = active_profile_name {
                         if let Some(entry) = entries.iter().find(|e| &e.original_name == original) {
                             upsert_active_profile_name(&tx, &entry.resolved_name)?;
                             activated_profile_name = Some(entry.resolved_name.clone());
@@ -369,7 +410,7 @@ impl ProfileStore {
                 }
 
                 tx.commit()?;
-                Ok(ImportOutcome::All { entries, activated_profile_name })
+                Ok(ImportOutcome::All { entries: entries.clone(), activated_profile_name })
             }
         }
     }
@@ -1163,6 +1204,93 @@ mod tests {
         store.create_profile(&sample_profile("work")).unwrap();
 
         assert!(store.has_active_profile().unwrap(), "最初の作成でアクティブになるはず");
+    }
+
+    // 復号済みの内容(保留の対象)を持つImportPreviewを、実際のエクスポートから作る。
+    fn single_import_preview(profile_name: &str) -> (tempfile::TempDir, ProfileStore, ImportPreview) {
+        let (_dir_a, paths_a) = temp_paths();
+        init_at(&paths_a).unwrap();
+        let mut store_a = ProfileStore::open_at(&paths_a).unwrap();
+        store_a.create_profile(&sample_profile(profile_name)).unwrap();
+        store_a.conn.execute("INSERT INTO tags (name) VALUES ('secret-tag')", []).unwrap();
+        store_a
+            .conn
+            .execute(
+                "INSERT INTO profile_tags (profile_id, tag_id)
+                 SELECT (SELECT id FROM profiles WHERE name = ?1), (SELECT id FROM tags WHERE name = 'secret-tag')",
+                [profile_name],
+            )
+            .unwrap();
+        let exported = store_a.export_profile(profile_name, passphrase("pw")).unwrap();
+
+        let (dir_b, paths_b) = temp_paths();
+        init_at(&paths_b).unwrap();
+        let store_b = ProfileStore::open_at(&paths_b).unwrap();
+        let preview = store_b.preview_import(&exported, passphrase("pw")).unwrap();
+        (dir_b, store_b, preview)
+    }
+
+    fn import_preview_wipes() -> usize {
+        IMPORT_PREVIEW_WIPES.with(|wipes| wipes.get())
+    }
+
+    #[test]
+    fn zeroizing_a_single_import_preview_clears_its_contents() {
+        let (_dir, _store, mut preview) = single_import_preview("work");
+        let ImportPreview::Single { exported, .. } = &preview else { panic!("Singleを期待") };
+        assert_eq!(exported.tags, vec!["secret-tag".to_string()], "消去の前は、タグを持っているはず");
+
+        preview.zeroize();
+
+        let ImportPreview::Single { name, exported } = &preview else { panic!("Singleを期待") };
+        assert_eq!(name, "");
+        assert_eq!(exported.profile.profile_name(), "");
+        assert!(exported.profile.rules().is_empty());
+        assert!(exported.tags.is_empty());
+    }
+
+    #[test]
+    fn zeroizing_an_all_import_preview_clears_its_contents() {
+        let (_dir_a, paths_a) = temp_paths();
+        init_at(&paths_a).unwrap();
+        let mut store_a = ProfileStore::open_at(&paths_a).unwrap();
+        store_a.create_profile(&sample_profile("work")).unwrap();
+        store_a.create_profile(&sample_profile("home")).unwrap();
+        let exported = store_a.export_all(passphrase("pw")).unwrap();
+
+        let (_dir_b, paths_b) = temp_paths();
+        init_at(&paths_b).unwrap();
+        let store_b = ProfileStore::open_at(&paths_b).unwrap();
+        let mut preview = store_b.preview_import(&exported, passphrase("pw")).unwrap();
+        assert!(matches!(&preview, ImportPreview::All { entries, .. } if entries.len() == 2));
+
+        preview.zeroize();
+
+        let ImportPreview::All { active_profile_name, entries, exported } = &preview else { panic!("Allを期待") };
+        assert_eq!(active_profile_name, &None);
+        assert!(entries.is_empty());
+        assert!(exported.is_empty());
+    }
+
+    #[test]
+    fn dropping_an_import_preview_erases_its_contents() {
+        let (_dir, _store, preview) = single_import_preview("work");
+        let before = import_preview_wipes();
+
+        drop(preview);
+
+        assert_eq!(import_preview_wipes(), before + 1, "dropするときに、内容が消去されるはず");
+    }
+
+    #[test]
+    fn committing_an_import_erases_the_preview_it_consumed() {
+        let (_dir, mut store, preview) = single_import_preview("work");
+        let before = import_preview_wipes();
+
+        let outcome = store.commit_import(preview).unwrap();
+
+        assert_eq!(outcome, ImportOutcome::Single { name: "work".to_string(), activated: true });
+        assert_eq!(import_preview_wipes(), before + 1, "確定した後にも、保留していた内容が消去されるはず");
     }
 
     #[test]
