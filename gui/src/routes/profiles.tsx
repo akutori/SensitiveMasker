@@ -14,6 +14,7 @@ import { useAppState, SMX_FILE_FILTERS, toImportPreviewRows } from "@/lib/app-st
 import { isExportImportError } from "@/lib/profile-ipc";
 import { openFileDialog, saveFileDialog } from "@/lib/file-dialog";
 import { actionOnHiddenToTray } from "@/lib/hidden-to-tray";
+import { suppressContextMenu } from "@/lib/suppress-context-menu";
 import { useOnHiddenToTray } from "@/lib/use-on-hidden-to-tray";
 import {
   abortExport,
@@ -259,13 +260,23 @@ function ProfilesRoute() {
     }
   });
 
+  // 書き出し中・書き出し済みの間だけtrue(パスフレーズを失わせてはならない局面)。
+  const passphraseAtRisk = dialog.kind === "export" && isPassphraseAtRisk(dialog.session.phase);
+
   // 書き出し中・書き出し済みの画面は、履歴の移動(マウスの戻るボタンなど)でこの画面ごと消えると、
   // パスフレーズを失うため、移動を止める(Escapeや背景の操作を受け付けないのと同じ理由)。
   useBlocker({
     shouldBlockFn: blockAlways,
-    disabled: !(dialog.kind === "export" && isPassphraseAtRisk(dialog.session.phase)),
+    disabled: !passphraseAtRisk,
     enableBeforeUnload: false,
   });
+
+  // 同じ理由で、右クリックのメニュー(メニューキー・Shift+F10を含む)も出さない。WebView2の既定のメニューは有効で、
+  // ページを操作する項目を含みうるため。
+  useEffect(() => {
+    if (!passphraseAtRisk) return;
+    return suppressContextMenu(document);
+  }, [passphraseAtRisk]);
 
   // エクスポートを開く。パスフレーズはここで生成し、進行状況の正(exportSessionRef)にも置く。
   const openExportSession = (target: string, profileId: string | null) => {

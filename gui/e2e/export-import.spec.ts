@@ -497,6 +497,17 @@ async function showMainWindowAgain() {
   );
 }
 
+// 右クリックのメニュー(contextmenuの既定の動作)が止められているか。実際のメニューは、ネイティブで、WebDriverから見えない
+// ため、キャンセルできるcontextmenuイベントを、ダイアログ(無ければ画面全体)へ送り、既定の動作が止められたかを見る。
+async function contextMenuIsSuppressed(): Promise<boolean> {
+  return browser.tauri.execute(() => {
+    const target = document.querySelector('[role="dialog"]') ?? document.body;
+    const event = new MouseEvent("contextmenu", { bubbles: true, cancelable: true });
+    target.dispatchEvent(event);
+    return event.defaultPrevented;
+  });
+}
+
 // 読み込んだファイルに、UTF-8として読めないバイト列があったときの警告(トースト)。
 const INVALID_BYTES_WARNING_TEXT = "不正なバイト列があったため";
 
@@ -2129,6 +2140,35 @@ describe("エクスポートの実行(ファイルダイアログの差し替え
     await showMainWindowAgain();
     await (await dialog.$("button=閉じる")).click();
     await dialog.waitForExist({ reverse: true, timeout: 10000 });
+    await returnToMainScreen();
+  });
+
+  // 書き出し中・書き出し済みの画面は、右クリックのメニューから、画面ごと消えるような操作をされると、パスフレーズを失う。
+  it("書き込み中と書き出し済みの間は、右クリックのメニューを出さず、編集中・保存先の選択中と、閉じた後は、出す", async () => {
+    await completeInitialSetup();
+    const profileName = "E2E右クリック抑止確認";
+    await createProfileViaIpc(profileName);
+    const dialog = await openExportDialogFor(profileName);
+
+    expect(await contextMenuIsSuppressed()).toBe(false);
+
+    await holdSaveDialog();
+    await (await dialog.$("button=エクスポート")).click();
+    await waitForDialogText(dialog, "保存先を選択しています");
+    expect(await contextMenuIsSuppressed()).toBe(false);
+
+    await holdExportWrite();
+    await settleSaveDialog({ path: path.join(exportDir, "context-menu.smx") });
+    await waitForDialogText(dialog, "書き込んでいます");
+    expect(await contextMenuIsSuppressed()).toBe(true);
+
+    await releaseExportWrite();
+    await waitForExportNotice(dialog);
+    expect(await contextMenuIsSuppressed()).toBe(true);
+
+    await (await dialog.$("button=閉じる")).click();
+    await dialog.waitForExist({ reverse: true, timeout: 10000 });
+    expect(await contextMenuIsSuppressed()).toBe(false);
     await returnToMainScreen();
   });
 
