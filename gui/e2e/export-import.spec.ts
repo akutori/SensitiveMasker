@@ -1689,7 +1689,7 @@ describe("エクスポートの実行(ファイルダイアログの差し替え
   // Rust側の保留は、メインウィンドウのページの読み込みが始まったときに、全て破棄される(ページを読み込み直すと、
   // 保留の識別子を持つ画面が無くなるため)。ページ内の画面遷移(履歴による切り替え)は、ページの読み込みを起こさず、
   // 破棄されない。
-  it("ページ内の画面遷移では、復号済みの内容(Rust側の保留)は破棄されない", async () => {
+  it("ページ内の画面遷移では、ページの読み込みに伴う保留の破棄は起きない(所有する画面が居ない保留は、残る)", async () => {
     await completeInitialSetup();
     const profileName = "E2E画面遷移保留確認";
     const smxPath = path.join(exportDir, "route-keeps-pending.smx");
@@ -1748,20 +1748,35 @@ describe("エクスポートの実行(ファイルダイアログの差し替え
     const passphrase = await exportAndDeleteProfile(profileName, smxPath);
     await returnToMainScreen();
 
-    // 前後に空白のあるパスフレーズは、入力どおりで復号に失敗してから再試行するため、復号が約2倍かかる
-    // (ページの読み込みが始まるより前に、復号が終わらないようにする)。
-    const decryptMs = await measureDecryptMs(smxPath, passphrase);
-    await startPreviewImportViaIpc(smxPath, ` ${passphrase} `);
-    await browser.refresh();
-    await completeInitialSetup();
-    // 読み込み直す前に始めた復号が、終わるまで待つ。
-    await browser.pause(Math.max(3000, decryptMs * 4));
+    // 前後に空白のあるパスフレーズは、入力どおりで復号に失敗してから再試行するため、復号が約2倍かかる。この復号が
+    // 成功することと、かかる時間を、先に測る(下の、読み込み直しを要求する時点で、復号が終わっていないことの確認に使う)。
+    const paddedPassphrase = ` ${passphrase} `;
+    const decryptMs = await measureDecryptMs(smxPath, paddedPassphrase);
+    // 次に払い出される識別子を知る(払い出して、破棄する)。
+    const idBefore = await previewPendingImportViaIpc(smxPath, passphrase);
+    await clearPendingImportDirectly(idBefore);
 
-    // 復号の結果が、保留として残っていれば、その直前の識別子(次に払い出される識別子の1つ前)で確定できてしまう。
-    // 残っていなければ(結果を捨てていれば)、失敗する。次の識別子が1以上でないと、この確認は何も確かめない。
+    const startedAt = Date.now();
+    await startPreviewImportViaIpc(smxPath, paddedPassphrase);
+    await browser.refresh();
+    const reloadRequestedMs = Date.now() - startedAt;
+    await completeInitialSetup();
+    // 前提: 読み込み直しの要求は、復号が終わるよりずっと前に出ている(復号が終わった後に読み込みが始まると、結果は、
+    // ページの世代の保護とは無関係に、読み込みの開始で消えるため、この確認は何も確かめない)。
+    withHint(
+      `復号(${Math.round(decryptMs)}ms)が終わる前に、読み込み直しを要求できなかった(${reloadRequestedMs}ms)`,
+      () => expect(reloadRequestedMs).toBeLessThan(decryptMs / 2)
+    );
+    // 読み込み直す前に始めた復号が、終わるまで待つ。
+    await browser.pause(Math.max(3000, decryptMs * 2));
+
+    // 復号の結果を捨てていれば、その復号は識別子を払い出さないので、次に払い出される識別子は idBefore + 1 になる。
+    // 結果を保留していれば(読み込みの開始の前後どちらでも)、その復号が識別子 idBefore + 1 を払い出し、次の識別子は
+    // idBefore + 2 になる。
     const nextId = await previewPendingImportViaIpc(smxPath, passphrase);
-    expect(nextId).toBeGreaterThanOrEqual(1);
-    expect(await commitPendingImportError(nextId - 1)).toBe(NO_PENDING_IMPORT_MESSAGE);
+    withHint(`次に払い出された識別子は ${nextId}(復号中の結果を捨てていれば ${idBefore + 1})`, () =>
+      expect(nextId).toBe(idBefore + 1)
+    );
     expect(await listProfileNames()).not.toContain(profileName);
     await clearPendingImportDirectly(nextId);
   });
