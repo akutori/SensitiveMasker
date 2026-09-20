@@ -101,29 +101,35 @@ fn icacls_path_from_system_root(system_root: &str) -> std::path::PathBuf {
 }
 
 /// Windowsはicacls(既存ファイル向け)を使うため、書き込み→権限制限の間に短い窓が生じる。
-/// icacls /inheritance:r で継承エントリ(SYSTEM/Administrators等)を除去し、/grant:r で
-/// 現在のユーザーのみにフルコントロールを与える(実機で動作確認済み)。
 #[cfg(windows)]
 fn create_restricted_file(path: &Path, key: &[u8; KEY_LEN]) -> Result<(), KeyError> {
-    use std::process::Command;
-
     fs::write(path, key)?;
+    restrict_to_current_user(path)
+}
+
+/// 既存のファイルを、現在のユーザーだけがフルコントロールを持つ状態にする。
+/// - /reset: 継承のACLへ戻す。管理者権限のプロセスが作ったファイルは、既定のDACLとして、SYSTEM・
+///   Administratorsの明示のエントリを持ち、それは、/inheritance:rでは消えないため
+/// - /inheritance:r: 継承のエントリ(SYSTEM/Administrators等)を除去する
+/// - /grant:r: 現在のユーザーのみにフルコントロールを与える
+#[cfg(windows)]
+fn restrict_to_current_user(path: &Path) -> Result<(), KeyError> {
+    use std::process::Command;
 
     let username = std::env::var("USERNAME")
         .map_err(|_| KeyError::Permission("USERNAME環境変数を取得できません".to_string()))?;
+    let icacls = icacls_path()?;
+    let grant = format!("{username}:F");
 
-    let output = Command::new(icacls_path()?)
-        .arg(path)
-        .arg("/inheritance:r")
-        .arg("/grant:r")
-        .arg(format!("{username}:F"))
-        .output()?;
-
-    if !output.status.success() {
-        return Err(KeyError::Permission(format!(
-            "icacls failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        )));
+    for args in [&["/reset"][..], &["/inheritance:r"][..], &["/grant:r", grant.as_str()][..]] {
+        let output = Command::new(&icacls).arg(path).args(args).output()?;
+        if !output.status.success() {
+            return Err(KeyError::Permission(format!(
+                "icacls {} failed: {}",
+                args.join(" "),
+                String::from_utf8_lossy(&output.stderr)
+            )));
+        }
     }
     Ok(())
 }
@@ -189,6 +195,32 @@ mod tests {
         assert!(stdout.contains(&username), "現在のユーザーへの許可が無い: {stdout}");
         assert!(!stdout.contains("SYSTEM"), "SYSTEMへの継承が残っている: {stdout}");
         assert!(!stdout.contains("Administrators"), "Administratorsへの継承が残っている: {stdout}");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn restricting_a_file_also_removes_explicit_entries_for_system_and_administrators() {
+        use std::process::Command;
+        let dir = tempfile::tempdir().unwrap();
+        let key_path = dir.path().join("key.bin");
+        std::fs::write(&key_path, b"x").unwrap();
+
+        // 管理者権限のプロセスが作ったファイルは、既定のDACLとして、SYSTEMとAdministratorsの明示の
+        // エントリを持つ(継承のエントリではない)。同じ状態を、SIDで指定して作る
+        // (*S-1-5-18はSYSTEM、*S-1-5-32-544はAdministrators)。
+        for sid in ["*S-1-5-18:F", "*S-1-5-32-544:F"] {
+            let output = Command::new(icacls_path().unwrap()).arg(&key_path).arg("/grant").arg(sid).output().unwrap();
+            assert!(output.status.success(), "明示のエントリを足せなかった: {}", String::from_utf8_lossy(&output.stderr));
+        }
+
+        restrict_to_current_user(&key_path).unwrap();
+
+        let output = Command::new(icacls_path().unwrap()).arg(&key_path).output().unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let username = std::env::var("USERNAME").unwrap();
+        assert!(stdout.contains(&username), "現在のユーザーへの許可が無い: {stdout}");
+        assert!(!stdout.contains("SYSTEM"), "SYSTEMの明示のエントリが残っている: {stdout}");
+        assert!(!stdout.contains("Administrators"), "Administratorsの明示のエントリが残っている: {stdout}");
     }
 
     #[test]
