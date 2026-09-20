@@ -8,7 +8,9 @@
     "skipLibCheck": true,
     "module": "ESNext",
     "moduleResolution": "bundler",
-    "allowSyntheticDefaultImports": true
+    "allowSyntheticDefaultImports": true,
+    /* e2e・wdio.conf.tsが使う、グローバルの型(describe・it・$・browser・expect)。typesを指定しないと、@types/*は自動では読み込まれない */
+    "types": ["node", "@wdio/globals/types", "expect-webdriverio", "@wdio/mocha-framework", "@wdio/tauri-service"]
   },
   "include": ["vite.config.ts", "wdio.conf.ts", "e2e/**/*.ts", "scripts/**/*.ts"]
 }

@@ -25,18 +25,21 @@ const dataDir = process.env.SENSITIVEMASKER_DATA_DIR ?? fs.mkdtempSync(path.join
 // そちらにも伝播する)。
 process.env.SENSITIVEMASKER_DATA_DIR = dataDir;
 
+// wdioの型は、@wdio/tauri-serviceが読む"tauri:options"を、機能(capabilities)の型に含まない。
+type TauriCapability = WebdriverIO.Capabilities & { "tauri:options": { application: string } };
+
+const tauriCapability: TauriCapability = {
+  browserName: "tauri",
+  "tauri:options": {
+    application: path.resolve(__dirname, "../target/debug/gui.exe"),
+  },
+};
+
 export const config: WebdriverIO.Config = {
   runner: "local",
   specs: ["./e2e/**/*.spec.ts"],
   maxInstances: 1,
-  capabilities: [
-    {
-      browserName: "tauri",
-      "tauri:options": {
-        application: path.resolve(__dirname, "../target/debug/gui.exe"),
-      },
-    },
-  ],
+  capabilities: [tauriCapability],
   services: [
     [
       "@wdio/tauri-service",

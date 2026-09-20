@@ -81,7 +81,7 @@ export default defineConfig(() => ({
           headless: true,
           provider: playwright({}),
           instances: [{
-            browser: 'chromium'
+            browser: 'chromium' as const
           }],
           // ダイアログ下部のボタンの行は、幅640px未満で縦に積まれる。その幅を前提にするstoryがあるため、
           // ビューポートを明示する(既定値に頼らない)。

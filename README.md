@@ -127,8 +127,8 @@ cargo build -p masker-mcp --release
 cargo build --workspace
 cargo test --workspace
 
-# フロントエンドの型チェック
-cd gui && bunx tsc --noEmit
+# フロントエンドの型検査(src・E2E・scripts・vite.config.ts・wdio.conf.ts。`bun run build`のtscは、srcだけを検査する)
+cd gui && bun run typecheck
 
 # フロントエンドのテスト(純関数の単体テストとStorybookのplayテスト。それぞれ単独でも実行できる)
 # playテストはPlaywrightのChromiumを使う。未導入なら`bunx playwright install chromium`が必要

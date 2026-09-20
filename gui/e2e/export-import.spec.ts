@@ -284,12 +284,15 @@ async function focusIsInsideDialog(): Promise<boolean> {
 // 同じ領域に通知が入る(領域ごと後から現れると、スクリーンリーダーに読み上げられないことがある)。
 const EXPORT_NOTICE_TEXT = "二度と表示できません";
 
-async function exportNoticeIsEmpty(dialog: WebdriverIO.Element): Promise<boolean> {
+// `await $(...)`の結果の型(wdioの型は、awaitした結果もChainablePromiseElementとして扱う)。
+type DialogElement = Awaited<ReturnType<typeof $>>;
+
+async function exportNoticeIsEmpty(dialog: DialogElement): Promise<boolean> {
   const notice = await dialog.$('[role="status"]');
   return (await notice.isExisting()) && (await notice.getProperty("textContent")) === "";
 }
 
-async function waitForExportNotice(dialog: WebdriverIO.Element) {
+async function waitForExportNotice(dialog: DialogElement) {
   const notice = await dialog.$('[role="status"]');
   await browser.waitUntil(async () => (await notice.getText()).includes(EXPORT_NOTICE_TEXT), {
     timeout: 10000,
