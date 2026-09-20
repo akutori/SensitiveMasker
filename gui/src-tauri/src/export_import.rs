@@ -158,7 +158,8 @@ impl PendingImportState {
 /// ページを読み込み直す(初回の読み込み・再読み込み)と、その画面のJavaScriptの状態が失われ、保留の識別子を
 /// 持つ画面が無くなる。確認画面を開いたまま再読み込みされた場合などに、確定も破棄もされなくなった保留は、
 /// そのままでは、復号済みの平文(ルールのパターン・固定値)としてRust側に残り続けるため。ページ内の画面遷移
-/// (履歴による切り替え)は、ページの読み込みを起こさないので、対象にならない。
+/// (履歴による切り替え)は、ページの読み込みを起こさないので、対象にならない(WebView2で、E2Eにより確認した。
+/// macOS・Linuxのウェブビューでの挙動は、確認していない)。
 ///
 /// 読み込みの完了(Finished)では、何もしない。on_page_loadはBuilder全体に登録され、全てのウェブビューへ
 /// 適用されるため、メインウィンドウ以外の読み込みでも、何もしない(メインウィンドウの確認画面の保留を、
@@ -316,8 +317,9 @@ fn preview_import_impl(
     preview_import_with_hook(state, pending, source_path, passphrase, || {})
 }
 
-/// preview_import_implの本体。after_decryptは、復号が終わった直後(結果を保留へ入れる前)に呼ぶ。復号している
-/// 最中にページが読み込み直される場合を、テストで再現するための差し込み口で、実際の呼び出しでは、何もしない。
+/// preview_import_implの本体。before_decryptは、ページの世代を控えた後、復号を始める直前に呼ぶ。復号している
+/// 最中にページが読み込み直される場合(世代を控えた後、結果を保留へ入れる前に、世代が進む場合)を、テストで
+/// 再現するための差し込み口で、実際の呼び出しでは、何もしない。
 ///
 /// 復号を始める前のページの世代を控え、結果を保留へ入れるときに、同じ世代であることを確かめる。復号している
 /// 最中にページが読み込み直されていれば、その結果を受け取る画面がもう無いため、保留せずに失敗する
@@ -327,7 +329,7 @@ fn preview_import_with_hook(
     pending: &PendingImportState,
     source_path: &str,
     passphrase: SecretString,
-    after_decrypt: impl FnOnce(),
+    before_decrypt: impl FnOnce(),
 ) -> Result<PreviewImportResultDto, ExportImportError> {
     let generation = pending.generation();
     let source_path = validate_import_source_path(source_path).map_err(ExportImportError::InvalidInput)?;
@@ -339,8 +341,8 @@ fn preview_import_with_hook(
     let data = std::fs::read(&source_path).map_err(|_| ExportImportError::Failed(GENERIC_IO_ERROR.to_string()))?;
     // パスフレーズ検証(scrypt、数百ms〜数秒)はストアのロックを握らずに行う。ロック内で
     // 実行すると、他のプロファイル/タグ系コマンドがこの間ずっとブロックされてしまう。
+    before_decrypt();
     let payload = decrypt_import_payload(&data, passphrase).map_err(|e| ExportImportError::Failed(e.to_string()))?;
-    after_decrypt();
     let preview =
         with_store(state, |store| store.resolve_import_preview(payload)).map_err(ExportImportError::Failed)?;
     let has_active = with_store(state, |store| store.has_active_profile()).map_err(ExportImportError::Failed)?;
@@ -447,8 +449,8 @@ pub async fn commit_pending_import<R: tauri::Runtime>(
 ///
 /// Some(id)なら、その識別子の保留だけを破棄する(他の保留は消さない)。画面からは、この形で呼ばれる:
 /// 確認画面の取り消し、画面を離れるとき(その画面が所有する保留)、閉じられた画面(離れた画面)へ
-/// 遅れて届いた復号結果の保留。Noneなら、全ての保留を破棄する。画面は使わず、E2Eの後片付けが、
-/// 全消去のために使う。
+/// 遅れて届いた復号結果の保留、復号の結果が届いたときに、確認されないまま残っていた前の保留(上書きする
+/// 前に)。Noneなら、全ての保留を破棄する。画面は使わず、E2Eの後片付けが、全消去のために使う。
 ///
 /// 保留が無い場合も含め常に成功する(呼び出し側が、「無かったこと」をエラーとして扱わなくてよいように、
 /// 副作用の無い操作として設計する)。
@@ -1166,8 +1168,10 @@ mod tests {
         assert!(pending.insert_if_generation(generation, sample_import_preview("元プロファイル")).is_some());
     }
 
-    // 復号が終わった直後(結果を保留へ入れる前)にページが読み込み直されると、preview_importは、結果を保留せずに
-    // 失敗する(応答を受け取る画面がもう無いため、復号済みの内容が、Rust側に残らない)。
+    // 世代を控えた後、復号を始める直前にページが読み込み直されると(復号している最中の再読み込みと同じく、
+    // 世代を控えた後に、結果を保留へ入れる前に世代が進む)、preview_importは、結果を保留せずに失敗する
+    // (応答を受け取る画面がもう無いため、復号済みの内容が、Rust側に残らない)。世代を控える位置が、差し込み口
+    // より後(復号の後を含む)にずれると、この読み込みを検出できなくなり、このテストが落ちる。
     #[test]
     fn preview_import_fails_and_keeps_nothing_when_the_page_is_reloaded_while_decrypting() {
         let file = export_profile_smx("元プロファイル");

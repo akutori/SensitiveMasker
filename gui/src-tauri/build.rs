@@ -65,8 +65,9 @@ fn main() {
 /// リソースは、バイナリ(bins)にだけ付き、ライブラリ(gui_lib)の単体テストの実行ファイルには付かない。
 /// 両方から埋め込むと、バイナリでマニフェストが重複する(リンカーのCVT1100)ため、デバッグビルドでは、
 /// tauri-buildの側を止めて、リンカーの側に一本化する。
-/// リリースビルドは、tauri-buildの既定のまま(配布物のマニフェストの埋め込み方は変えない)。そのため、
-/// Windowsでは、リリースプロファイルでのcargo testで、tauri::testを使うテストは起動しない。
+/// リリースビルドは、tauri-buildの既定のまま。そのため、Windowsのリリースプロファイルでは、ライブラリ
+/// (gui_lib)の単体テストの実行ファイルにマニフェストが付かず、その実行ファイル全体が(tauri::testを使わない
+/// テストも)起動しない。
 fn embeds_manifest_by_linker() -> bool {
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     let target_env = std::env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
@@ -74,7 +75,9 @@ fn embeds_manifest_by_linker() -> bool {
     target_os == "windows" && target_env == "msvc" && profile == "debug"
 }
 
-/// comctl32 v6への依存だけを宣言する、アプリケーションマニフェスト(tauri-buildの既定のマニフェストと同じ内容)。
+/// comctl32 v6への依存だけを宣言する、アプリケーションマニフェスト。tauri-buildの既定のマニフェスト
+/// (tauri-buildのwindows-app-manifest.xml)と同じ内容で、リリースの配布物と、デバッグ・テストの実行ファイルの
+/// マニフェストを揃える。tauri-buildを更新したときは、その内容と揃っているかを確かめる。
 const COMCTL32_V6_MANIFEST: &str = r#"<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
   <dependency>
     <dependentAssembly>
