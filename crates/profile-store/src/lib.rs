@@ -10,7 +10,7 @@ mod key;
 mod paths;
 
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use bulk::ExportedProfile;
 use masking_core::RuleProfile;
@@ -640,12 +640,14 @@ impl ProfileStore {
     /// 正規表現を実際にコンパイルする(`Rule::new`経由)ため、一覧表示のたびに全件で
     /// 行うと、悪意あるルールを含むプロファイルを一度取り込んだ場合に起動・一覧更新の
     /// たびコンパイルコストが再発してしまう。ルール件数だけが必要な場合は
-    /// `serde_json::Value`として構造的に数えるだけに留め、regexには一切触れない。
+    /// 構造的に数えるだけに留め、regexには一切触れない。ルールの中身(パターン・固定値など)は、読み飛ばし、どこにも
+    /// 複製しない(`serde_json::Value`へ読むと、平文の全体の複製が、消去されずに残る)。
     fn decrypt_rule_counts(&self, ciphertext: &[u8], nonce: &[u8], name: &str) -> Result<RuleCounts, ProfileStoreError> {
         let plaintext = Zeroizing::new(crypto::decrypt(&self.key, ciphertext, nonce, name.as_bytes())?);
-        let value: serde_json::Value =
+        let shape: StoredProfileShape =
             serde_json::from_slice(&plaintext).map_err(|e| ProfileStoreError::CorruptProfileData(e.to_string()))?;
-        Ok(RuleCounts { total: rule_count_of(&value), enabled: enabled_rule_count_of(&value) })
+        let rules = shape.rules.unwrap_or_default();
+        Ok(RuleCounts { total: rules.len(), enabled: rules.iter().filter(|rule| rule.enabled).count() })
     }
 
     /// 現在アクティブなプロファイルが設定されているか(値そのものは不要な場面向けの
@@ -712,11 +714,6 @@ fn payload_from_plaintext(json: Zeroizing<Vec<u8>>, passphrase_trimmed: bool) ->
     Ok(DecryptedPayload { payload, passphrase_trimmed })
 }
 
-/// 鍵ファイルを書き出す(所有ユーザーだけの権限にする。制限できない保管先では、書き込みは成功として、その旨を返す)。
-pub fn write_key_file(path: &Path, contents: &SecretString) -> Result<FileProtection, ProfileStoreError> {
-    Ok(key::write_owner_only_file(path, contents.expose_secret().as_bytes())?)
-}
-
 /// `decrypt_import_payload`の結果。`passphrase_trimmed`は、入力のままでは復号できず、前後の空白・不可視文字を
 /// 除いたパスフレーズで復号できたこと(貼り付けで混ざった文字を、利用者へ知らせるための情報)。
 pub struct DecryptedPayload {
@@ -759,39 +756,21 @@ const MAX_TOTAL_RULES_PER_IMPORT: usize = 2000;
 /// `ExportPayload`への型付きデシリアライズ(各ルールの正規表現を実際にコンパイルする
 /// `Rule::new`経由)を行う前に、プロファイル数・ルール数を、構造的に(regexへは一切触れずに)検査する。
 /// 巨大な数のルールを仕込んだ悪意あるファイルによるコンパイルコストの積み上げを、型付き
-/// デシリアライズ自体が走る前に防ぐため。JSON自体が不正な形の場合はここでは何も拒否せず、後続の
-/// 型付きデシリアライズが持つ`CorruptProfileData`に判断を委ねる。
+/// デシリアライズ自体が走る前に防ぐため。
 ///
-/// ルールの中身(パターン・固定値など)は、`IgnoredAny`で読み飛ばし、どこにも複製しない(`serde_json::Value`へ
-/// 読むと、平文の全体の複製が、消去されずに残る)。
+/// 数える読み取り(`bulk::count_rules_per_profile`)は、型付きの読み取りと同じ形だけを受け付け、読み取れない形は、エラーにする
+/// (検査を飛ばさない: 飛ばすと、検査が読めない形のまま、型付きの読み取りだけが通る入力で、上限を、すり抜けられる)。
+/// ルールの中身(パターン・固定値など)は、読み飛ばし、どこにも複製しない(`serde_json::Value`へ読むと、平文の全体の複製が、
+/// 消去されずに残る)。
 fn check_import_size_limits(json: &[u8]) -> Result<(), ProfileStoreError> {
-    let Ok(probe) = serde_json::from_slice::<SizeProbe>(json) else {
-        return Ok(());
-    };
+    let rule_counts =
+        bulk::count_rules_per_profile(json).map_err(|e| ProfileStoreError::CorruptProfileData(e.to_string()))?;
 
-    // 単一/全体の判別は、実際のExportPayloadデシリアライズと同じ"kind"タグを基準にする
-    // ("profiles"キーの有無等の周辺的な手がかりで代用すると、実際のデシリアライズが
-    // 無視する余分なキーを足すだけで判定をすり抜けられる)。
-    let rule_counts: Vec<usize> = match probe.kind.as_deref() {
-        Some("all") => {
-            let Some(profiles) = probe.profiles else {
-                return Ok(());
-            };
-            if profiles.len() > MAX_PROFILES_PER_IMPORT {
-                return Err(ProfileStoreError::ImportTooLarge(format!(
-                    "プロファイル数が上限({MAX_PROFILES_PER_IMPORT}件)を超えています"
-                )));
-            }
-            profiles.iter().map(ProfileProbe::rule_count).collect()
-        }
-        Some("single") => match probe.profile {
-            Some(profile) => vec![profile.rule_count()],
-            None => return Ok(()),
-        },
-        // 未知のkindは、この後の型付きデシリアライズが持つCorruptProfileData等の
-        // 適切なエラーに判断を委ねる(ここでは何も拒否しない)。
-        _ => return Ok(()),
-    };
+    if rule_counts.len() > MAX_PROFILES_PER_IMPORT {
+        return Err(ProfileStoreError::ImportTooLarge(format!(
+            "プロファイル数が上限({MAX_PROFILES_PER_IMPORT}件)を超えています"
+        )));
+    }
 
     if let Some(&max) = rule_counts.iter().max() {
         if max > MAX_RULES_PER_PROFILE {
@@ -809,25 +788,6 @@ fn check_import_size_limits(json: &[u8]) -> Result<(), ProfileStoreError> {
     }
 
     Ok(())
-}
-
-// 規模の検査(check_import_size_limits)が読む、必要な部分だけ(種別・プロファイル・ルールの数)。
-#[derive(serde::Deserialize)]
-struct SizeProbe {
-    kind: Option<String>,
-    profiles: Option<Vec<ProfileProbe>>,
-    profile: Option<ProfileProbe>,
-}
-
-#[derive(serde::Deserialize)]
-struct ProfileProbe {
-    rules: Option<Vec<serde::de::IgnoredAny>>,
-}
-
-impl ProfileProbe {
-    fn rule_count(&self) -> usize {
-        self.rules.as_ref().map_or(0, Vec::len)
-    }
 }
 
 // 値をJSONへ直列化した結果を、消去する型で返す。serde_json::to_vecは、小さなバッファから伸長しながら書くため、伸長のたびに、
@@ -860,16 +820,21 @@ struct RuleCounts {
     enabled: usize,
 }
 
-fn rule_count_of(profile: &serde_json::Value) -> usize {
-    profile.get("rules").and_then(serde_json::Value::as_array).map_or(0, Vec::len)
+// 保存済みのプロファイルから、ルールの数と、有効かどうかだけを読む(パターンなどの他の欄は、読み飛ばす)。
+#[derive(serde::Deserialize)]
+struct StoredProfileShape {
+    rules: Option<Vec<StoredRuleShape>>,
 }
 
-// RuleDtoの"enabled"は#[serde(default = "default_enabled")]でtrueが既定のため、
-// フィールド自体が無い場合もtrue(有効)として数える。
-fn enabled_rule_count_of(profile: &serde_json::Value) -> usize {
-    profile.get("rules").and_then(serde_json::Value::as_array).map_or(0, |rules| {
-        rules.iter().filter(|r| r.get("enabled").and_then(serde_json::Value::as_bool).unwrap_or(true)).count()
-    })
+// "enabled"は、ルールの読み取りが、無い場合を有効(true)として扱うのと同じく、無い場合も有効として数える。
+#[derive(serde::Deserialize)]
+struct StoredRuleShape {
+    #[serde(default = "stored_rule_enabled_by_default")]
+    enabled: bool,
+}
+
+fn stored_rule_enabled_by_default() -> bool {
+    true
 }
 
 /// タグ名自体はget-or-createで解決するため衝突しないが、1プロファイルの`tags`内で
@@ -1311,6 +1276,20 @@ mod tests {
         assert_eq!(summary.enabled_rule_count, 0, "無効ルールは有効数に数えないはず");
     }
 
+    // 一覧の集計が読む形: ルールの数と、有効かどうかだけ(他の欄は、読み飛ばす)。無い"enabled"は、有効として数える。
+    #[test]
+    fn the_stored_profile_shape_counts_rules_and_treats_a_missing_enabled_as_enabled() {
+        let json = r#"{"profile_name":"p","description":null,"rules":[{"name":"a","pattern":"x"},{"enabled":false},{"enabled":true,"pattern":"y"}]}"#;
+
+        let shape: StoredProfileShape = serde_json::from_str(json).unwrap();
+
+        let rules = shape.rules.unwrap();
+        assert_eq!(rules.len(), 3);
+        assert_eq!(rules.iter().filter(|rule| rule.enabled).count(), 2);
+        let no_rules: StoredProfileShape = serde_json::from_str(r#"{"profile_name":"p"}"#).unwrap();
+        assert!(no_rules.rules.is_none());
+    }
+
     #[test]
     fn has_active_profile_reflects_whether_one_is_set() {
         let (_dir, paths) = temp_paths();
@@ -1653,7 +1632,9 @@ mod tests {
     }
 
     // 固定の暗号文。目印を含むプロファイル(名前work・リテラルのルール1件・タグ1件)を、エクスポートしたもの。
-    // 鍵ファイルの改行は|で表す。パスフレーズ方式は、パスフレーズ"correct-horse"で、ワークファクタを4に下げてある。
+    // 鍵ファイルの改行は|で表す。鍵ファイルの鍵(AGE-SECRET-KEY-1…)は、この暗号文のためだけに生成した使い捨てで、他では使わない
+    // (実在の値ではないが、鍵の形式のため、秘密の検出ツールが、反応しうる)。パスフレーズ方式は、パスフレーズ"correct-horse"で、
+    // ワークファクタを4に下げてある。
     mod leak_vectors {
         pub const PLAIN_MARKER: &str = "leak-scan-plain-6c1e93";
         pub const ESCAPED_MARKER: &str = "leak-\"scan\\-escaped-9e1f27";
@@ -1817,6 +1798,28 @@ mod tests {
         });
 
         assert_eq!(leaks, 0, "保存の経路の、消去されない複製が、どの回にも残っている");
+    }
+
+    // プロファイル一覧のルール数の集計は、復号した平文を、JSONの木へ読まず、ルールの中身(パターン・固定値)を読み飛ばす。
+    #[test]
+    fn listing_profiles_leaves_no_unwiped_copy_of_the_rules() {
+        let _guard = lock_leak_scan();
+        const MARKER: &str = "leak-scan-list-4b7d19";
+
+        let leaks = leaks_in_every_attempt(|| {
+            let (_dir, mut store) = empty_store();
+            let mut source = profile_carrying(MARKER, "work");
+            store.create_profile(&source).unwrap();
+            source.zeroize();
+            let scan = wipe_check::MarkerScan::start(MARKER);
+            let listed = store.list_profiles().unwrap();
+            let leaks = scan.finish();
+            assert_eq!(listed.len(), 1);
+            assert_eq!((listed[0].rule_count, listed[0].enabled_rule_count), (1, 1));
+            leaks
+        });
+
+        assert_eq!(leaks, 0, "一覧の集計の、消去されない複製が、どの回にも残っている");
     }
 
     // エクスポートは、ageの暗号化(age::encrypt)が、平文の1チャンク(最大64KiB)を、消去しないVecで持つ(age 0.12.1の
@@ -2004,18 +2007,23 @@ mod tests {
         assert!(result.is_err());
     }
 
+    // 2つのファイルを書き、書いたファイルから読み戻した鍵で、書いたファイルを復号できる(所有ユーザーだけの権限で書く)。
     #[test]
-    fn write_key_file_writes_the_key_file_contents_only_the_owner_can_read() {
+    fn a_key_file_export_written_to_disk_decrypts_with_the_key_file_read_back() {
         let (_dir, mut store) = empty_store();
         store.create_profile(&sample_profile("work")).unwrap();
         let exported = store.export_profile_with_key_file("work").unwrap();
         let folder = tempfile::tempdir().unwrap();
-        let path = folder.path().join("export.smxkey");
+        let data = folder.path().join("export.smx");
+        let key = folder.path().join("export.smxkey");
 
-        let protection = write_key_file(&path, &exported.key_file_contents).unwrap();
+        let protection = write_key_file_export(&data, &exported.ciphertext, &key, &exported.key_file_contents).unwrap();
 
         assert_eq!(protection, FileProtection::OwnerOnly);
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), exported.key_file_contents.expose_secret());
+        assert_eq!(std::fs::read_to_string(&key).unwrap(), exported.key_file_contents.expose_secret());
+        let key_read_back = SecretString::from(std::fs::read_to_string(&key).unwrap());
+        let decrypted = decrypt_import_payload_with_key_file(&std::fs::read(&data).unwrap(), &key_read_back).unwrap();
+        assert!(matches!(decrypted.payload, ExportPayload::Single { .. }));
     }
 
     #[test]
@@ -2437,6 +2445,108 @@ mod tests {
         let err = check_import_size_limits(&json)
             .expect_err("kind:singleでは\"profiles\"デコイに惑わされず\"profile\"側を見るはず");
         assert!(matches!(err, ProfileStoreError::ImportTooLarge(_)));
+    }
+
+    // ---- 規模の検査と、型付きの読み取りが、同じ形だけを受け付けること ----
+    //
+    // 型付きの読み取りは、余分なキーを無視する。検査が、余分なキーの型の違いなどで、読み取りに失敗して、検査を飛ばすと、
+    // 検査を通らない大きさのペイロードが、型付きの読み取りだけを通ってしまう(ルールの数だけ、正規表現をコンパイルする)。
+
+    fn valid_rules_json(count: usize) -> String {
+        (0..count)
+            .map(|i| {
+                format!(r#"{{"name":"r{i}","pattern_type":"literal","pattern":"p{i}","mode":"fixed","fixed_value":"X"}}"#)
+            })
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+
+    fn single_payload_json(extra_top_level: &str, profile: &str) -> String {
+        format!(r#"{{"kind":"single","format_version":1,{extra_top_level}"profile":{profile}}}"#)
+    }
+
+    fn all_payload_json(extra_top_level: &str, profiles: &str) -> String {
+        format!(r#"{{"kind":"all","format_version":1,"active_profile_name":null,{extra_top_level}"profiles":[{profiles}]}}"#)
+    }
+
+    fn read_plaintext(json: String) -> Result<DecryptedPayload, ProfileStoreError> {
+        payload_from_plaintext(Zeroizing::new(json.into_bytes()), false)
+    }
+
+    #[test]
+    fn a_single_payload_with_an_extra_key_of_another_type_cannot_skip_the_rule_limit() {
+        let profile = format!(
+            r#"{{"is_favorite":false,"profile_name":"p","rules":[{}]}}"#,
+            valid_rules_json(MAX_RULES_PER_PROFILE + 1)
+        );
+        // 実際に使われない、"profiles"(全体用のキー)を、配列でない値にする。
+        for extra in [r#""profiles":5,"#, r#""profiles":"x","#, r#""profiles":{},"#, r#""profiles":null,"#] {
+            let err = read_plaintext(single_payload_json(extra, &profile))
+                .err()
+                .unwrap_or_else(|| panic!("{extra}: ルール数が上限を超えているのに、受け付けられた"));
+            assert!(matches!(err, ProfileStoreError::ImportTooLarge(_)), "{extra}: {err:?}");
+        }
+    }
+
+    #[test]
+    fn an_all_payload_with_an_extra_key_of_another_type_cannot_skip_the_profile_limit() {
+        let profiles = (0..=MAX_PROFILES_PER_IMPORT)
+            .map(|i| format!(r#"{{"is_favorite":false,"profile_name":"p{i}","rules":[]}}"#))
+            .collect::<Vec<_>>()
+            .join(",");
+        // 実際に使われない、"profile"(単一用のキー)を、マップでない値にする。
+        for extra in [r#""profile":5,"#, r#""profile":[],"#, r#""profile":"x","#] {
+            let err = read_plaintext(all_payload_json(extra, &profiles))
+                .err()
+                .unwrap_or_else(|| panic!("{extra}: プロファイル数が上限を超えているのに、受け付けられた"));
+            assert!(matches!(err, ProfileStoreError::ImportTooLarge(_)), "{extra}: {err:?}");
+        }
+    }
+
+    // 検査は、読み取りと同じ形(マップ)だけを受け付ける: 欄の順に並べた配列の形は、どちらも、拒否する。
+    #[test]
+    fn a_profile_written_as_an_array_is_rejected_instead_of_skipping_the_rule_limit() {
+        let as_array = format!(
+            r#"[false,[],"p",null,[{}]]"#,
+            valid_rules_json(MAX_RULES_PER_PROFILE + 1)
+        );
+
+        let err = read_plaintext(single_payload_json("", &as_array)).err().expect("配列の形は、拒否されるはず");
+
+        assert!(matches!(err, ProfileStoreError::CorruptProfileData(_)), "{err:?}");
+    }
+
+    // 検査を通らない形は、拒否する(飛ばさない)。
+    #[test]
+    fn the_size_check_rejects_what_it_cannot_read_instead_of_skipping_itself() {
+        for (label, json) in [
+            ("JSONではない", "not json".to_string()),
+            ("kindが未知", r#"{"kind":"weird"}"#.to_string()),
+            ("kindが無い", r#"{"profile":{"rules":[]}}"#.to_string()),
+            ("rulesが配列でない", single_payload_json("", r#"{"rules":5}"#)),
+            ("profilesの要素がマップでない", all_payload_json("", "5")),
+            ("profileが配列", single_payload_json("", r#"[false,[],"p",null,[]]"#)),
+        ] {
+            let err = check_import_size_limits(json.as_bytes()).expect_err(label);
+            assert!(matches!(err, ProfileStoreError::CorruptProfileData(_)), "{label}: {err:?}");
+        }
+    }
+
+    // 余分なキーは、これまでどおり無視する(検査が、読み取りより厳しくなって、正規のペイロードを拒否しない)。
+    #[test]
+    fn extra_keys_of_any_type_do_not_make_a_valid_payload_fail() {
+        let profile = format!(r#"{{"is_favorite":false,"profile_name":"p","surprise":[1,{{"a":2}}],"rules":[{}]}}"#, valid_rules_json(3));
+        let single = read_plaintext(single_payload_json(r#""profiles":5,"extra":{"a":[1,2]},"#, &profile)).unwrap();
+        let ExportPayload::Single { profile, .. } = &single.payload else { panic!("単一のはず") };
+        assert_eq!(profile.profile.rules().len(), 3);
+
+        let all = read_plaintext(all_payload_json(
+            r#""profile":5,"#,
+            r#"{"is_favorite":false,"profile_name":"p","rules":[]}"#,
+        ))
+        .unwrap();
+        let ExportPayload::All { profiles, .. } = &all.payload else { panic!("全体のはず") };
+        assert_eq!(profiles.len(), 1);
     }
 
     #[test]

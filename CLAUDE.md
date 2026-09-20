@@ -23,7 +23,7 @@
 - **masker-mcp**: `rmcp`(公式Rust SDK, stdioトランスポート)、`tokio`、`rustix`(Unixのタイムアウト時に、
   プロセスグループへのSIGKILLをシステムコールで直接送る。外部の`kill`コマンドは使わない)
 - **wipe-check**(テスト専用。masking-core・profile-storeのdev-dependencyのみ): メモリを消去してから解放したかを、
-  解放の直前の中身で確かめる(`GlobalAlloc`のラッパー)。目印の文字列を含んだまま解放された実体も、数える
+  解放の直前の中身で確かめる(`GlobalAlloc`のラッパー。確保した領域は、全て0で埋める)。目印の文字列を含んだまま解放された実体も、数える
 - **gui**: Tauri v2。フロントエンドはReact 19 + TypeScript + Vite + TanStack Router + Tailwind CSS v4 +
   shadcn/ui(Radix)、パッケージマネージャーは常にbun。Tauriプラグイン: `dialog`(ファイル選択)、
   `clipboard-manager`+`arboard`(クリップボード)、`notification`(トレイのエラー通知)、

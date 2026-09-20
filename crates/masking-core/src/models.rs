@@ -117,7 +117,29 @@ impl Zeroize for Rule {
     }
 }
 
+// Rule::newが拒否する理由(ルールの名前は、エラーへ移すため、ここには持たない)。
+enum Rejection {
+    InvalidName { reason: String },
+    MissingFixedValue,
+    MissingPrefix,
+    InvalidRegex { source: regex::Error },
+}
+
+impl Rejection {
+    fn into_error(self, name: String) -> RuleError {
+        match self {
+            Rejection::InvalidName { reason } => RuleError::InvalidName { name, reason },
+            Rejection::MissingFixedValue => RuleError::MissingFixedValue { name },
+            Rejection::MissingPrefix => RuleError::MissingPrefix { name },
+            Rejection::InvalidRegex { source } => RuleError::InvalidRegex { name, source },
+        }
+    }
+}
+
 impl Rule {
+    /// 拒否したときは、受け取った内容(パターン・固定値・接頭辞・説明)を、消去してから捨てる。パターンや固定値には、マスク対象の
+    /// 実際の値が入りうるが、呼び出し側は、値を渡しており、自分では消去できないため。拒否の理由(エラー)には、利用者へ示すため、
+    /// ルールの名前と、正規表現として不正なパターン(regexのエラーの文章)が含まれ、それは消去されない。
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         name: impl Into<String>,
@@ -130,24 +152,35 @@ impl Rule {
         description: Option<String>,
     ) -> Result<Self, RuleError> {
         let name = name.into();
-        let pattern = pattern.into();
+        let mut pattern = pattern.into();
+        let mut fixed_value = fixed_value;
+        let mut prefix = prefix;
+        let mut description = description;
 
-        if let Err(reason) = validate_display_name(&name) {
-            return Err(RuleError::InvalidName { name, reason });
-        }
-        if mode == Mode::Fixed && fixed_value.as_deref().unwrap_or("").is_empty() {
-            return Err(RuleError::MissingFixedValue { name });
-        }
-        if mode == Mode::Sequential && prefix.as_deref().unwrap_or("").is_empty() {
-            return Err(RuleError::MissingPrefix { name });
-        }
-        if pattern_type == PatternType::Regex {
+        let rejection = if let Err(reason) = validate_display_name(&name) {
+            Some(Rejection::InvalidName { reason })
+        } else if mode == Mode::Fixed && fixed_value.as_deref().unwrap_or("").is_empty() {
+            Some(Rejection::MissingFixedValue)
+        } else if mode == Mode::Sequential && prefix.as_deref().unwrap_or("").is_empty() {
+            Some(Rejection::MissingPrefix)
+        } else if pattern_type == PatternType::Regex {
             // 既定のsize_limit(10MiB)のままだと、大量のルールを持つプロファイルを
             // インポート/作成された場合にコンパイルコストが積み上がりうる。
             // 実用上のマスクルール(電話番号・IP等)は数KB程度で収まるため実害は無い。
-            if let Err(source) = regex::RegexBuilder::new(&pattern).size_limit(REGEX_SIZE_LIMIT_BYTES).build() {
-                return Err(RuleError::InvalidRegex { name, source });
-            }
+            regex::RegexBuilder::new(&pattern)
+                .size_limit(REGEX_SIZE_LIMIT_BYTES)
+                .build()
+                .err()
+                .map(|source| Rejection::InvalidRegex { source })
+        } else {
+            None
+        };
+        if let Some(rejection) = rejection {
+            pattern.zeroize();
+            fixed_value.zeroize();
+            prefix.zeroize();
+            description.zeroize();
+            return Err(rejection.into_error(name));
         }
 
         Ok(Self {
@@ -743,6 +776,84 @@ mod tests {
         let result = RuleProfile::new("profile-name", description, rules);
 
         assert!(matches!(result, Err(RuleProfileError::DuplicateRuleName { .. })));
+        watch.assert_all_wiped_when_freed();
+    }
+
+    // ルールの検証で拒否したときも、受け取った内容(パターン・固定値・接頭辞・説明)を、消去してから捨てる(呼び出し側は、値を
+    // moveしているため、自分では消去できない)。名前は、拒否の理由(エラー)へ移して、利用者へ示すため、消去しない。
+    fn tracked_text(watch: &mut wipe_check::Watch, text: &str) -> String {
+        let owned = text.to_string();
+        watch.track(&owned);
+        owned
+    }
+
+    #[test]
+    fn a_rule_rejected_for_its_name_wipes_the_texts_it_was_given() {
+        let mut watch = wipe_check::Watch::new();
+        let pattern = tracked_text(&mut watch, "pattern-text");
+        let fixed_value = tracked_text(&mut watch, "fixed-text");
+        let prefix = tracked_text(&mut watch, "prefix-text");
+        let description = tracked_text(&mut watch, "description-text");
+
+        let result = Rule::new(
+            "a".repeat(MAX_DISPLAY_NAME_LENGTH + 1),
+            PatternType::Literal,
+            pattern,
+            Mode::Fixed,
+            Some(fixed_value),
+            Some(prefix),
+            true,
+            Some(description),
+        );
+
+        assert!(matches!(result, Err(RuleError::InvalidName { .. })));
+        assert_eq!(watch.tracked_count(), 4);
+        watch.assert_all_wiped_when_freed();
+    }
+
+    #[test]
+    fn a_rule_rejected_for_a_missing_fixed_value_wipes_the_texts_it_was_given() {
+        let mut watch = wipe_check::Watch::new();
+        let pattern = tracked_text(&mut watch, "pattern-text");
+        let prefix = tracked_text(&mut watch, "prefix-text");
+        let description = tracked_text(&mut watch, "description-text");
+
+        let result = Rule::new("r", PatternType::Literal, pattern, Mode::Fixed, None, Some(prefix), true, Some(description));
+
+        assert!(matches!(result, Err(RuleError::MissingFixedValue { .. })));
+        assert_eq!(watch.tracked_count(), 3);
+        watch.assert_all_wiped_when_freed();
+    }
+
+    #[test]
+    fn a_rule_rejected_for_a_missing_prefix_wipes_the_texts_it_was_given() {
+        let mut watch = wipe_check::Watch::new();
+        let pattern = tracked_text(&mut watch, "pattern-text");
+        let fixed_value = tracked_text(&mut watch, "fixed-text");
+        let description = tracked_text(&mut watch, "description-text");
+
+        let result =
+            Rule::new("r", PatternType::Literal, pattern, Mode::Sequential, Some(fixed_value), None, true, Some(description));
+
+        assert!(matches!(result, Err(RuleError::MissingPrefix { .. })));
+        assert_eq!(watch.tracked_count(), 3);
+        watch.assert_all_wiped_when_freed();
+    }
+
+    // 正規表現として不正なパターンは、拒否の理由(regexのエラーの文章)に含まれ、利用者へ示される。受け取った文字列そのものは、消去する。
+    #[test]
+    fn a_rule_rejected_for_an_invalid_regex_wipes_the_texts_it_was_given() {
+        let mut watch = wipe_check::Watch::new();
+        let pattern = tracked_text(&mut watch, "(unclosed");
+        let fixed_value = tracked_text(&mut watch, "fixed-text");
+        let prefix = tracked_text(&mut watch, "prefix-text");
+        let description = tracked_text(&mut watch, "description-text");
+
+        let result =
+            Rule::new("r", PatternType::Regex, pattern, Mode::Fixed, Some(fixed_value), Some(prefix), true, Some(description));
+
+        assert!(matches!(result, Err(RuleError::InvalidRegex { .. })));
+        assert_eq!(watch.tracked_count(), 4);
         watch.assert_all_wiped_when_freed();
     }
 

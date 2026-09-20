@@ -2,8 +2,12 @@
 //! 全体インポート時の名前衝突解決ロジック。
 
 use std::collections::HashSet;
+use std::fmt;
+use std::marker::PhantomData;
 
 use masking_core::{Rule, RuleProfile, RuleProfileError};
+use serde::de::value::MapAccessDeserializer;
+use serde::de::{Deserializer, IgnoredAny, MapAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroize;
 
@@ -48,26 +52,94 @@ impl ExportPayload {
     /// 複製して読み直すため、エスケープが要る文字(`"`・`\`・制御文字)を含む値の、消去されない複製が残る。ここでは、種別だけを
     /// 先に読み(他の値は、読み飛ばす)、その種別に対応する型へ、そのまま読む(内部のバッファを使わない)。
     pub fn from_json_slice(json: &[u8]) -> Result<Self, serde_json::Error> {
-        #[derive(Deserialize)]
-        struct KindProbe {
-            kind: String,
-        }
-
-        match serde_json::from_slice::<KindProbe>(json)?.kind.as_str() {
+        match read_kind(json)?.as_str() {
             "single" => {
-                let read: SinglePayloadRead = serde_json::from_slice(json)?;
+                let read = serde_json::from_slice::<MapOnly<SinglePayloadRead>>(json)?.0;
                 Ok(ExportPayload::Single { format_version: read.format_version, profile: read.profile.0 })
             }
             "all" => {
-                let read: AllPayloadRead = serde_json::from_slice(json)?;
+                let read = serde_json::from_slice::<MapOnly<AllPayloadRead>>(json)?.0;
                 Ok(ExportPayload::All {
                     format_version: read.format_version,
                     active_profile_name: read.active_profile_name,
                     profiles: read.profiles.into_iter().map(|checked| checked.0).collect(),
                 })
             }
-            other => Err(<serde_json::Error as serde::de::Error>::unknown_variant(other, &["single", "all"])),
+            other => Err(unknown_kind(other)),
         }
+    }
+}
+
+fn read_kind(json: &[u8]) -> Result<String, serde_json::Error> {
+    #[derive(Deserialize)]
+    struct KindProbe {
+        kind: String,
+    }
+
+    Ok(serde_json::from_slice::<MapOnly<KindProbe>>(json)?.0.kind)
+}
+
+fn unknown_kind(kind: &str) -> serde_json::Error {
+    <serde_json::Error as serde::de::Error>::unknown_variant(kind, &["single", "all"])
+}
+
+/// プロファイルごとのルールの数を数える(規模の検査用。単一は1件、全体はプロファイルの数だけ)。ルールの中身は、`IgnoredAny`で
+/// 読み飛ばし、どこにも複製しない(正規表現のコンパイルも、しない)。
+///
+/// `from_json_slice`と同じ種別・同じキー・同じ形(マップだけ)を読み、読み取れない形は、エラーにする(検査を飛ばさない)。
+/// 検査と、型付きの読み取りとで、受け付ける形が食い違うと、検査だけを通らない(または、検査だけを飛ばせる)入力ができるため、
+/// 検査は、読み取りが使う欄(単一は`profile`、全体は`profiles`。どちらも`rules`)だけを、同じ形で読む。
+pub(crate) fn count_rules_per_profile(json: &[u8]) -> Result<Vec<usize>, serde_json::Error> {
+    #[derive(Deserialize)]
+    struct SingleShape {
+        profile: Option<MapOnly<ProfileShape>>,
+    }
+
+    #[derive(Deserialize)]
+    struct AllShape {
+        profiles: Option<Vec<MapOnly<ProfileShape>>>,
+    }
+
+    #[derive(Deserialize)]
+    struct ProfileShape {
+        rules: Option<Vec<IgnoredAny>>,
+    }
+
+    let rule_count = |profile: &MapOnly<ProfileShape>| profile.0.rules.as_ref().map_or(0, Vec::len);
+    match read_kind(json)?.as_str() {
+        "single" => {
+            let shape = serde_json::from_slice::<MapOnly<SingleShape>>(json)?.0;
+            Ok(shape.profile.iter().map(rule_count).collect())
+        }
+        "all" => {
+            let shape = serde_json::from_slice::<MapOnly<AllShape>>(json)?.0;
+            Ok(shape.profiles.iter().flatten().map(rule_count).collect())
+        }
+        other => Err(unknown_kind(other)),
+    }
+}
+
+// 対象を、マップ(JSONのオブジェクト)としてだけ読む。`derive(Deserialize)`の構造体は、欄の順に並べた配列からも読めるため、
+// 従来の読み取り(flattenを使う型。マップだけ)と同じく、配列の形を受け付けないようにする。
+struct MapOnly<T>(T);
+
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for MapOnly<T> {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct MapOnlyVisitor<T>(PhantomData<T>);
+
+        impl<'de, T: Deserialize<'de>> Visitor<'de> for MapOnlyVisitor<T> {
+            type Value = MapOnly<T>;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("a map")
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<Self::Value, A::Error> {
+                T::deserialize(MapAccessDeserializer::new(map)).map(MapOnly)
+            }
+        }
+
+        deserializer.deserialize_map(MapOnlyVisitor(PhantomData))
     }
 }
 
@@ -85,10 +157,15 @@ struct AllPayloadRead {
     profiles: Vec<ExportedProfileChecked>,
 }
 
-// プロファイルの検証(RuleProfile::new。名前・ルール名の重複)を、読み取りの途中で必ず通すための橋渡し。
-#[derive(Deserialize)]
-#[serde(try_from = "ExportedProfileRead")]
+// プロファイルの検証(RuleProfile::new。名前・ルール名の重複)を、読み取りの途中で必ず通すための橋渡し(マップだけを読む)。
 struct ExportedProfileChecked(ExportedProfile);
+
+impl<'de> Deserialize<'de> for ExportedProfileChecked {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let read = MapOnly::<ExportedProfileRead>::deserialize(deserializer)?.0;
+        Self::try_from(read).map_err(serde::de::Error::custom)
+    }
+}
 
 #[derive(Deserialize)]
 struct ExportedProfileRead {
@@ -220,6 +297,67 @@ mod tests {
 
         assert!(duplicate_err.to_string().contains("重複"), "{duplicate_err}");
         assert!(name_err.to_string().contains("プロファイル名"), "{name_err}");
+    }
+
+    // 従来の読み取り(flattenを使う型)は、マップだけを受け付けた。欄の順に並べた配列の形は、今も、受け付けない。
+    #[test]
+    fn a_payload_or_profile_written_as_an_array_is_rejected() {
+        let cases: [(&str, &str); 4] = [
+            ("プロファイルが配列", r#"{"kind":"single","format_version":1,"profile":[false,[],"p",null,[]]}"#),
+            ("全体の要素が配列", r#"{"kind":"all","format_version":1,"profiles":[[false,[],"p",null,[]]]}"#),
+            ("全体が配列", r#"["single",1,{"is_favorite":false,"profile_name":"p"}]"#),
+            ("rulesがマップ", r#"{"kind":"single","format_version":1,"profile":{"is_favorite":false,"profile_name":"p","rules":{}}}"#),
+        ];
+        for (label, json) in cases {
+            let err = ExportPayload::from_json_slice(json.as_bytes()).expect_err(label);
+            assert!(err.to_string().contains("invalid type"), "{label}: {err}");
+        }
+    }
+
+    // ---- count_rules_per_profile(規模の検査が数える形。from_json_sliceと同じ形だけを受け付ける) ----
+
+    #[test]
+    fn rules_are_counted_per_profile_for_both_kinds() {
+        let single = r#"{"kind":"single","profile":{"rules":[{},{},{}]}}"#;
+        let all = r#"{"kind":"all","profiles":[{"rules":[{}]},{"rules":[]},{"profile_name":"no rules"},{"rules":[{},{}]}]}"#;
+
+        assert_eq!(count_rules_per_profile(single.as_bytes()).unwrap(), vec![3]);
+        assert_eq!(count_rules_per_profile(all.as_bytes()).unwrap(), vec![1, 0, 0, 2]);
+    }
+
+    // 種別に関係しないキーは、型が何であっても、数えない・失敗させない(検査を飛ばす経路にさせない)。
+    #[test]
+    fn keys_that_the_kind_does_not_read_are_ignored_whatever_their_type() {
+        let single = r#"{"kind":"single","profiles":5,"profile":{"rules":[{},{}],"surprise":[1]},"extra":{"a":[1]}}"#;
+        let all = r#"{"kind":"all","profile":"x","profiles":[{"rules":[{}]}]}"#;
+
+        assert_eq!(count_rules_per_profile(single.as_bytes()).unwrap(), vec![2]);
+        assert_eq!(count_rules_per_profile(all.as_bytes()).unwrap(), vec![1]);
+    }
+
+    #[test]
+    fn a_missing_profile_counts_nothing_and_the_typed_read_reports_it() {
+        assert!(count_rules_per_profile(br#"{"kind":"single"}"#).unwrap().is_empty());
+        assert!(count_rules_per_profile(br#"{"kind":"all"}"#).unwrap().is_empty());
+        assert!(ExportPayload::from_json_slice(br#"{"kind":"single","format_version":1}"#).is_err());
+        assert!(ExportPayload::from_json_slice(br#"{"kind":"all","format_version":1}"#).is_err());
+    }
+
+    #[test]
+    fn a_shape_that_the_typed_read_would_not_accept_is_not_counted_either() {
+        let cases: [(&str, &str); 7] = [
+            ("プロファイルが配列", r#"{"kind":"single","profile":[false,[],"p",null,[{}]]}"#),
+            // 配列の形を、欄の順に読むと、最初の要素が、rulesとして読めてしまう形。
+            ("プロファイルが、rulesだけの配列", r#"{"kind":"single","profile":[[{}]]}"#),
+            ("プロファイルが数値", r#"{"kind":"single","profile":5}"#),
+            ("rulesが数値", r#"{"kind":"single","profile":{"rules":5}}"#),
+            ("profilesの要素が配列", r#"{"kind":"all","profiles":[[false]]}"#),
+            ("kindが未知", r#"{"kind":"weird"}"#),
+            ("JSONではない", "not json"),
+        ];
+        for (label, json) in cases {
+            assert!(count_rules_per_profile(json.as_bytes()).is_err(), "{label}: 数えられてしまった");
+        }
     }
 
     #[test]
