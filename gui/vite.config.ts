@@ -1,5 +1,5 @@
 /// <reference types="vitest/config" />
-import { defineConfig } from "vite";
+import { defineConfig, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
 import { tanstackRouter } from "@tanstack/router-plugin/vite";
 import tailwindcss from "@tailwindcss/vite";
@@ -13,9 +13,34 @@ const dirname = typeof __dirname !== 'undefined' ? __dirname : path.dirname(file
 // More info at: https://storybook.js.org/docs/next/writing-tests/integrations/vitest-addon
 const host = process.env.TAURI_DEV_HOST;
 
+// monaco-editorは、DOMPurifyの写し(esm/vs/base/browser/dompurify/dompurify.js。npmのdompurifyのESMビルドと
+// 同じ内容)を同梱していて、その版はMonaco自身が更新されるまで変わらない。同梱の版はXSS系の脆弱性
+// (GHSA-55q2-fjhq-7xh7など)の対象なので、配布物には、同じ形で使える、npmのdompurifyを代わりに入れる
+// (package.jsonのoverridesで、修正済みの版に固定している)。配布物に入った版は、scripts/check-dist.tsが確かめる。
+function useNpmDompurifyInMonaco(): Plugin {
+  return {
+    name: "use-npm-dompurify-in-monaco",
+    enforce: "pre",
+    resolveId: {
+      // 全てのimportについてプラグインを呼ばないよう、対象の指定だけに絞る。
+      filter: { id: /^\.\/dompurify\/dompurify\.js$/ },
+      async handler(source, importer, options) {
+        if (!importer) return null;
+        if (!importer.replaceAll("\\", "/").includes("/node_modules/monaco-editor/esm/vs/base/browser/")) return null;
+        return this.resolve("dompurify", importer, { ...options, skipSelf: true });
+      },
+    },
+  };
+}
+
 // https://vite.dev/config/
 export default defineConfig(() => ({
-  plugins: [tanstackRouter({ target: "react", autoCodeSplitting: true }), react(), tailwindcss()],
+  plugins: [
+    useNpmDompurifyInMonaco(),
+    tanstackRouter({ target: "react", autoCodeSplitting: true }),
+    react(),
+    tailwindcss(),
+  ],
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "./src")

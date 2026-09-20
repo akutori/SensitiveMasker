@@ -87,6 +87,8 @@ SensitiveMasker/
 - WebView2の自動補完(Suggestions)は、入力欄の`autocomplete="off"`を守らない場合があるため、
   `tauri.conf.json`の`generalAutofillEnabled: false`で無効にする(入力欄の候補を残さない。パスワード・
   クレジットカードの自動補完は対象外。macOS/Linuxでは無視される)
+- `monaco-editor`が同梱するDOMPurifyの写しは、脆弱性の対象の版のため、`gui/vite.config.ts`のプラグインで、npmの`dompurify`
+  (`gui/package.json`の`overrides`で、修正済みの版に固定)へ差し替える。配布物に入った版は`bun run check:dist`が確かめる
 - 外部実行ファイル(`icacls`/`taskkill`)はPATH解決に頼らず`%SystemRoot%`から絶対パスを組み立てて呼ぶ
 
 ## 開発手法
@@ -114,7 +116,7 @@ SensitiveMasker/
     既定のまま(そのため、Windowsのリリースプロファイルでは、ライブラリ`gui_lib`の単体テストの実行ファイル全体が
     起動しない)
   - リリース(`.github/workflows/release.yml`)は、`verify.yml`(型検査・単体テスト・storyのplayテスト・
-    `cargo test --workspace --locked`・配布用フロントエンドへのE2E専用コード混入確認`bun run check:dist`)に通った場合に限り公開する
+    `cargo test --workspace --locked`・配布用フロントエンドの検査`bun run check:dist`(E2E専用コードの混入と、DOMPurifyがnpm版であること))に通った場合に限り公開する
 - ロジックを伴う実装(機能追加・修正・リファクタリング)では`adversarial-verification` Skillの
   「実装計画 → 実装 → 敵対的検証 → 修正」ループに従う
 

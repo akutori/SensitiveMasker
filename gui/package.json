@@ -69,5 +69,8 @@
   },
   "trustedDependencies": [
     "edgedriver"
-  ]
+  ],
+  "overrides": {
+    "dompurify": "^3.4.15"
+  }
 }
