@@ -857,6 +857,20 @@ mod tests {
         watch.assert_all_wiped_when_freed();
     }
 
+    // 拒否したとき、ルールの名前は、消去せず、エラーへ移す(拒否の理由の文章として、利用者へ示す)。
+    #[test]
+    fn a_rejected_rule_keeps_its_name_in_the_error() {
+        let fixed_missing = Rule::new("name-one", PatternType::Literal, "p", Mode::Fixed, None, None, true, None).unwrap_err();
+        let prefix_missing = Rule::new("name-two", PatternType::Literal, "p", Mode::Sequential, None, None, true, None).unwrap_err();
+        let bad_regex = Rule::new("name-three", PatternType::Regex, "(", Mode::Fixed, Some("v".to_string()), None, true, None).unwrap_err();
+        let bad_name = Rule::new("a".repeat(MAX_DISPLAY_NAME_LENGTH + 1), PatternType::Literal, "p", Mode::Fixed, Some("v".to_string()), None, true, None).unwrap_err();
+
+        assert!(fixed_missing.to_string().contains("name-one"), "{fixed_missing}");
+        assert!(prefix_missing.to_string().contains("name-two"), "{prefix_missing}");
+        assert!(bad_regex.to_string().contains("name-three"), "{bad_regex}");
+        assert!(matches!(&bad_name, RuleError::InvalidName { name, .. } if name.len() == MAX_DISPLAY_NAME_LENGTH + 1), "{bad_name}");
+    }
+
     #[test]
     fn profile_name_exceeding_the_length_limit_is_rejected() {
         let too_long = "a".repeat(MAX_DISPLAY_NAME_LENGTH + 1);

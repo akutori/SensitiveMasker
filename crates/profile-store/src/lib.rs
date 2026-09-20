@@ -74,6 +74,10 @@ pub enum ProfileStoreError {
     InvalidTagName(String),
     #[error("プロファイル名が不正です: {0}")]
     InvalidProfileName(String),
+    // 鍵ファイル方式の書き出しの置き換えに失敗し、その後、前のファイルを元の名前へ戻すこともできなかった。文章は、前のファイルを
+    // 退避した場所(利用者が、前のエクスポートを復号するために要る)を含み、そのまま利用者へ示す。
+    #[error("{0}")]
+    PreviousFilesNotRestored(String),
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
@@ -2532,7 +2536,7 @@ mod tests {
         }
     }
 
-    // 余分なキーは、これまでどおり無視する(検査が、読み取りより厳しくなって、正規のペイロードを拒否しない)。
+    // 余分なキーは、無視する(検査が、読み取りより厳しくなって、正規のペイロードを拒否しない)。
     #[test]
     fn extra_keys_of_any_type_do_not_make_a_valid_payload_fail() {
         let profile = format!(r#"{{"is_favorite":false,"profile_name":"p","surprise":[1,{{"a":2}}],"rules":[{}]}}"#, valid_rules_json(3));
@@ -2547,6 +2551,159 @@ mod tests {
         .unwrap();
         let ExportPayload::All { profiles, .. } = &all.payload else { panic!("全体のはず") };
         assert_eq!(profiles.len(), 1);
+    }
+
+    // ---- 上限の境界と意味: ちょうどの数は受け付け、1つ超えると拒否する。上限は、プロファイルごと・全体で、別々に効く ----
+
+    fn empty_rules_json(count: usize) -> String {
+        vec!["{}"; count].join(",")
+    }
+
+    fn all_json_with_rule_counts(rule_counts: &[usize]) -> Vec<u8> {
+        let profiles = rule_counts
+            .iter()
+            .map(|count| format!(r#"{{"profile_name":"p","rules":[{}]}}"#, empty_rules_json(*count)))
+            .collect::<Vec<_>>()
+            .join(",");
+        format!(r#"{{"kind":"all","profiles":[{profiles}]}}"#).into_bytes()
+    }
+
+    #[test]
+    fn the_size_limits_accept_exactly_the_limit() {
+        let single = format!(r#"{{"kind":"single","profile":{{"rules":[{}]}}}}"#, empty_rules_json(MAX_RULES_PER_PROFILE));
+        check_import_size_limits(single.as_bytes()).expect("1プロファイルのルール数の上限ちょうどは、受け付けるはず");
+
+        check_import_size_limits(&all_json_with_rule_counts(&vec![0; MAX_PROFILES_PER_IMPORT]))
+            .expect("プロファイル数の上限ちょうどは、受け付けるはず");
+
+        let per_profile = MAX_RULES_PER_PROFILE;
+        let profiles_at_the_total_cap = MAX_TOTAL_RULES_PER_IMPORT / per_profile;
+        check_import_size_limits(&all_json_with_rule_counts(&vec![per_profile; profiles_at_the_total_cap]))
+            .expect("全体のルール数の上限ちょうどは、受け付けるはず");
+    }
+
+    #[test]
+    fn the_size_limits_reject_one_over_each_limit() {
+        let single_over =
+            format!(r#"{{"kind":"single","profile":{{"rules":[{}]}}}}"#, empty_rules_json(MAX_RULES_PER_PROFILE + 1));
+        let too_many_profiles = all_json_with_rule_counts(&vec![0; MAX_PROFILES_PER_IMPORT + 1]);
+        let mut over_the_total = vec![MAX_RULES_PER_PROFILE; MAX_TOTAL_RULES_PER_IMPORT / MAX_RULES_PER_PROFILE];
+        over_the_total.push(1);
+
+        for (label, json) in [
+            ("1プロファイルのルール数", single_over.into_bytes()),
+            ("プロファイル数", too_many_profiles),
+            ("全体のルール数", all_json_with_rule_counts(&over_the_total)),
+        ] {
+            let err = check_import_size_limits(&json).expect_err(label);
+            assert!(matches!(err, ProfileStoreError::ImportTooLarge(_)), "{label}: {err:?}");
+        }
+    }
+
+    // 1つのプロファイルだけが、1プロファイルあたりの上限を超えていれば、他のプロファイルが小さくても、拒否する
+    // (プロファイルごとの最大で判断する。合計だけで判断すると、全体の上限以下に収まって、すり抜ける)。
+    #[test]
+    fn one_profile_over_the_per_profile_limit_is_rejected_even_when_the_others_are_small() {
+        let err = check_import_size_limits(&all_json_with_rule_counts(&[1, MAX_RULES_PER_PROFILE + 1]))
+            .expect_err("1つのプロファイルが、上限を超えているのに、受け付けられた");
+
+        assert!(matches!(err, ProfileStoreError::ImportTooLarge(_)), "{err:?}");
+    }
+
+    // 規模の検査は、型付きの読み取り(ルールごとに、検証する)より前に行う: 型付きの読み取りが拒否する(読み取れない)ルールが
+    // 上限を超えて並んでいても、読み取りの失敗ではなく、規模の超過として拒否する(読み取りへ進むと、正規表現のコンパイルへ進む)。
+    #[test]
+    fn the_size_check_runs_before_the_type_checked_read() {
+        let json =
+            format!(r#"{{"kind":"single","format_version":1,"profile":{{"is_favorite":false,"profile_name":"p","rules":[{}]}}}}"#, empty_rules_json(MAX_RULES_PER_PROFILE + 1));
+
+        let err = read_plaintext(json).err().expect("上限を超えているのに、受け付けられた");
+
+        assert!(matches!(err, ProfileStoreError::ImportTooLarge(_)), "型付きの読み取りが、先に走った: {err:?}");
+    }
+
+    // ---- 読み取りの途中で、後の欄が不正で失敗しても、先に読めた値の、消去されない複製が、残らない ----
+
+    fn json_of(parts: &[&str]) -> zeroize::Zeroizing<String> {
+        // 目印を含む一時の文字列を、消去せずに解放しない(その領域が、窓の中の確保に再利用され、断片が、目印として数えられるため)。
+        // 1つの、消去する型の文字列へ、順に書き足す。
+        let mut json = zeroize::Zeroizing::new(String::with_capacity(4096));
+        for part in parts {
+            json.push_str(part);
+        }
+        json
+    }
+
+    fn assert_no_unwiped_copy_when_reading_fails(marker: &'static str, json: &zeroize::Zeroizing<String>, label: &str) {
+        let leaks = leaks_in_every_attempt(|| {
+            let scan = wipe_check::MarkerScan::start(marker);
+            let result = bulk::ExportPayload::from_json_slice(json.as_bytes());
+            assert!(result.is_err(), "{label}: 読み取れてしまった");
+            drop(result);
+            scan.finish()
+        });
+        assert_eq!(leaks, 0, "{label}: 読み取りの途中で失敗したとき、先に読めた値の、消去されない複製が、どの回にも残っている");
+    }
+
+    #[test]
+    fn a_read_that_fails_at_a_later_rule_leaves_no_unwiped_copy_of_the_earlier_rules() {
+        let _guard = lock_leak_scan();
+        const MARKER: &str = "leak-scan-partial-rules-3e5a71";
+        let json = json_of(&[
+            r#"{"kind":"single","format_version":1,"profile":{"is_favorite":false,"profile_name":"p","rules":["#,
+            r#"{"name":"a","pattern_type":"literal","pattern":"pattern-"#,
+            MARKER,
+            r#"","mode":"fixed","fixed_value":"value-"#,
+            MARKER,
+            r#""},"#,
+            // 2つ目は、正規表現として不正で、拒否される。
+            r#"{"name":"b","pattern_type":"regex","pattern":"(","mode":"fixed","fixed_value":"value-"#,
+            MARKER,
+            r#""}]}}"#,
+        ]);
+
+        assert_no_unwiped_copy_when_reading_fails(MARKER, &json, "後のルールが不正");
+    }
+
+    #[test]
+    fn a_read_that_fails_at_a_later_field_leaves_no_unwiped_copy_of_the_earlier_fields() {
+        let _guard = lock_leak_scan();
+        const NAME_MARKER: &str = "leak-scan-partial-name-6b12c4";
+        const RULE_MARKER: &str = "leak-scan-partial-full-9d08e3";
+        // 名前・説明・タグを読んだ後に、rulesが不正な型で失敗する。
+        let rules_wrong_type = json_of(&[
+            r#"{"kind":"single","format_version":1,"profile":{"is_favorite":false,"tags":["tag-"#,
+            NAME_MARKER,
+            r#""],"profile_name":"name-"#,
+            NAME_MARKER,
+            r#"","description":"description-"#,
+            NAME_MARKER,
+            r#"","rules":5}}"#,
+        ]);
+        // 名前・説明・タグ・ルールを全て読んだ後に、is_favoriteが不正な型で失敗する。
+        let favorite_wrong_type = json_of(&[
+            r#"{"kind":"single","format_version":1,"profile":{"tags":["tag-"#,
+            RULE_MARKER,
+            r#""],"profile_name":"name-"#,
+            RULE_MARKER,
+            r#"","description":"description-"#,
+            RULE_MARKER,
+            r#"","rules":[{"name":"a","pattern_type":"literal","pattern":"pattern-"#,
+            RULE_MARKER,
+            r#"","mode":"fixed","fixed_value":"value-"#,
+            RULE_MARKER,
+            r#""}],"is_favorite":5}}"#,
+        ]);
+        // 全体の、active_profile_nameを読んだ後に、profilesが不正な型で失敗する。
+        let all_profiles_wrong_type = json_of(&[
+            r#"{"kind":"all","format_version":1,"active_profile_name":"active-"#,
+            NAME_MARKER,
+            r#"","profiles":5}"#,
+        ]);
+
+        assert_no_unwiped_copy_when_reading_fails(NAME_MARKER, &rules_wrong_type, "rulesが不正な型");
+        assert_no_unwiped_copy_when_reading_fails(RULE_MARKER, &favorite_wrong_type, "is_favoriteが不正な型");
+        assert_no_unwiped_copy_when_reading_fails(NAME_MARKER, &all_profiles_wrong_type, "profilesが不正な型");
     }
 
     #[test]

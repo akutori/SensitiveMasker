@@ -126,13 +126,15 @@ fn rolled_back(
     let not_restored: Vec<String> = backups
         .iter()
         .filter(|(dest, backup)| rename(backup, dest).is_err())
-        .map(|(dest, backup)| format!("{} の元のファイルは {} にあります", dest.display(), backup.display()))
+        .map(|(dest, backup)| format!("{} の前のファイルは、{} にあります", dest.display(), backup.display()))
         .collect();
     if not_restored.is_empty() {
         KeyError::from(cause).into()
     } else {
-        let message = format!("{cause}(元のファイルを戻せませんでした: {})", not_restored.join("、"));
-        KeyError::from(std::io::Error::other(message)).into()
+        ProfileStoreError::PreviousFilesNotRestored(format!(
+            "エクスポートに失敗し({cause})、前のファイルを、元の名前へ戻せませんでした。{}",
+            not_restored.join("、")
+        ))
     }
 }
 
@@ -368,6 +370,7 @@ mod tests {
         let error =
             write_key_file_export_with(&data, b"ciphertext", &key, &key_contents(), failing_on(&[4, 5])).unwrap_err();
 
+        assert!(matches!(error, ProfileStoreError::PreviousFilesNotRestored(_)), "{error:?}");
         let message = error.to_string();
         let leftovers: Vec<String> =
             file_names(dir.path()).into_iter().filter(|name| name.starts_with(".export.smxkey.")).collect();
@@ -433,5 +436,20 @@ mod tests {
 
         assert!(result.is_err(), "既に有る名前へ、書いてしまった");
         assert_eq!(fs::read(&planted).unwrap(), b"planted", "リンクの先の、他のファイルへ、秘密を書いた");
+    }
+
+    // エクスポートしたファイルの一時のファイルも、既に有る名前(他のプロセスが置いたリンクを含む)へは、書かない。
+    #[test]
+    fn the_export_files_temporary_file_never_writes_through_an_existing_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let planted = dir.path().join("planted.txt");
+        fs::write(&planted, b"planted").unwrap();
+        let temp = dir.path().join(".export.smx.planted.tmp");
+        fs::hard_link(&planted, &temp).unwrap();
+
+        let result = write_new_file_synced(&temp, b"ciphertext");
+
+        assert!(result.is_err(), "既に有る名前へ、書いてしまった");
+        assert_eq!(fs::read(&planted).unwrap(), b"planted", "リンクの先の、他のファイルへ、書いた");
     }
 }

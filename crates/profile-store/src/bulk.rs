@@ -7,7 +7,7 @@ use std::marker::PhantomData;
 
 use masking_core::{Rule, RuleProfile, RuleProfileError};
 use serde::de::value::MapAccessDeserializer;
-use serde::de::{Deserializer, IgnoredAny, MapAccess, Visitor};
+use serde::de::{Deserializer, IgnoredAny, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroize;
 
@@ -51,7 +51,9 @@ impl ExportPayload {
     /// 復号した平文のJSONを読み取る。`Deserialize`の派生(内部タグ付きenum・flatten)は、serdeが、値を一度、内部のバッファへ
     /// 複製して読み直すため、エスケープが要る文字(`"`・`\`・制御文字)を含む値の、消去されない複製が残る。ここでは、種別だけを
     /// 先に読み(他の値は、読み飛ばす)、その種別に対応する型へ、そのまま読む(内部のバッファを使わない)。
-    pub fn from_json_slice(json: &[u8]) -> Result<Self, serde_json::Error> {
+    /// ルールごとに、正規表現をコンパイルするため、規模の検査(`check_import_size_limits`)を通した後に呼ぶ(crateの外へは、
+    /// 公開しない)。
+    pub(crate) fn from_json_slice(json: &[u8]) -> Result<Self, serde_json::Error> {
         match read_kind(json)?.as_str() {
             "single" => {
                 let read = serde_json::from_slice::<MapOnly<SinglePayloadRead>>(json)?.0;
@@ -61,7 +63,7 @@ impl ExportPayload {
                 let read = serde_json::from_slice::<MapOnly<AllPayloadRead>>(json)?.0;
                 Ok(ExportPayload::All {
                     format_version: read.format_version,
-                    active_profile_name: read.active_profile_name,
+                    active_profile_name: read.active_profile_name.map(WipedString::into_inner),
                     profiles: read.profiles.into_iter().map(|checked| checked.0).collect(),
                 })
             }
@@ -120,7 +122,7 @@ pub(crate) fn count_rules_per_profile(json: &[u8]) -> Result<Vec<usize>, serde_j
 }
 
 // 対象を、マップ(JSONのオブジェクト)としてだけ読む。`derive(Deserialize)`の構造体は、欄の順に並べた配列からも読めるため、
-// 従来の読み取り(flattenを使う型。マップだけ)と同じく、配列の形を受け付けないようにする。
+// 配列の形を受け付けないようにする(規模の検査と、型付きの読み取りが、同じ形だけを受け付けるようにするため)。
 struct MapOnly<T>(T);
 
 impl<'de, T: Deserialize<'de>> Deserialize<'de> for MapOnly<T> {
@@ -153,8 +155,70 @@ struct SinglePayloadRead {
 #[derive(Deserialize)]
 struct AllPayloadRead {
     format_version: u32,
-    active_profile_name: Option<String>,
+    active_profile_name: Option<WipedString>,
     profiles: Vec<ExportedProfileChecked>,
+}
+
+// 読み取りの途中で、後の欄が不正で失敗したとき、先に読めた値(名前・説明・タグ・ルール)が、消去されずに捨てられないよう、
+// 読んだ値は、drop時に消去する型で受ける(読み取りを終えた後は、中身を取り出して使う。取り出すと、消去する対象が空になる)。
+struct WipedString(String);
+
+impl WipedString {
+    fn into_inner(mut self) -> String {
+        std::mem::take(&mut self.0)
+    }
+}
+
+impl Drop for WipedString {
+    fn drop(&mut self) {
+        self.0.zeroize();
+    }
+}
+
+impl<'de> Deserialize<'de> for WipedString {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        String::deserialize(deserializer).map(WipedString)
+    }
+}
+
+#[derive(Default)]
+struct WipedRules(Vec<Rule>);
+
+impl WipedRules {
+    fn into_inner(mut self) -> Vec<Rule> {
+        std::mem::take(&mut self.0)
+    }
+}
+
+impl Drop for WipedRules {
+    fn drop(&mut self) {
+        self.0.zeroize();
+    }
+}
+
+impl<'de> Deserialize<'de> for WipedRules {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct RulesVisitor;
+
+        impl<'de> Visitor<'de> for RulesVisitor {
+            type Value = WipedRules;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("a sequence of rules")
+            }
+
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+                // 途中の要素の読み取りが失敗したとき、先に読めたルールは、WipedRulesのdropが消去する。
+                let mut rules = WipedRules::default();
+                while let Some(rule) = seq.next_element::<Rule>()? {
+                    rules.0.push(rule);
+                }
+                Ok(rules)
+            }
+        }
+
+        deserializer.deserialize_seq(RulesVisitor)
+    }
 }
 
 // プロファイルの検証(RuleProfile::new。名前・ルール名の重複)を、読み取りの途中で必ず通すための橋渡し(マップだけを読む)。
@@ -171,11 +235,11 @@ impl<'de> Deserialize<'de> for ExportedProfileChecked {
 struct ExportedProfileRead {
     is_favorite: bool,
     #[serde(default)]
-    tags: Vec<String>,
-    profile_name: String,
-    description: Option<String>,
+    tags: Vec<WipedString>,
+    profile_name: WipedString,
+    description: Option<WipedString>,
     #[serde(default)]
-    rules: Vec<Rule>,
+    rules: WipedRules,
 }
 
 impl TryFrom<ExportedProfileRead> for ExportedProfileChecked {
@@ -183,8 +247,9 @@ impl TryFrom<ExportedProfileRead> for ExportedProfileChecked {
 
     // 拒否したとき、名前・説明・ルールは、RuleProfile::newが消去する。タグは、ここで消去する。
     fn try_from(read: ExportedProfileRead) -> Result<Self, Self::Error> {
-        let ExportedProfileRead { is_favorite, mut tags, profile_name, description, rules } = read;
-        match RuleProfile::new(profile_name, description, rules) {
+        let ExportedProfileRead { is_favorite, tags, profile_name, description, rules } = read;
+        let mut tags: Vec<String> = tags.into_iter().map(WipedString::into_inner).collect();
+        match RuleProfile::new(profile_name.into_inner(), description.map(WipedString::into_inner), rules.into_inner()) {
             Ok(profile) => Ok(Self(ExportedProfile { is_favorite, tags, profile })),
             Err(error) => {
                 tags.zeroize();
@@ -251,7 +316,7 @@ mod tests {
         assert_eq!(serde_json::to_string(&payload).unwrap(), ALL_JSON);
     }
 
-    // 従来どおり: 余分なキーは無視し、省略できる欄(tags・description・rules)は省略できる。
+    // 余分なキーは無視し、省略できる欄(tags・description・rules)は省略できる。
     #[test]
     fn unknown_keys_are_ignored_and_optional_fields_may_be_omitted() {
         let json = r#"{"kind":"single","format_version":1,"extra":{"a":[1,2]},"profile":{"is_favorite":false,"profile_name":"p","surprise":"x"}}"#;
@@ -299,7 +364,7 @@ mod tests {
         assert!(name_err.to_string().contains("プロファイル名"), "{name_err}");
     }
 
-    // 従来の読み取り(flattenを使う型)は、マップだけを受け付けた。欄の順に並べた配列の形は、今も、受け付けない。
+    // マップだけを受け付ける。欄の順に並べた配列の形は、受け付けない。
     #[test]
     fn a_payload_or_profile_written_as_an_array_is_rejected() {
         let cases: [(&str, &str); 4] = [
@@ -345,10 +410,11 @@ mod tests {
 
     #[test]
     fn a_shape_that_the_typed_read_would_not_accept_is_not_counted_either() {
-        let cases: [(&str, &str); 7] = [
+        let cases: [(&str, &str); 8] = [
             ("プロファイルが配列", r#"{"kind":"single","profile":[false,[],"p",null,[{}]]}"#),
             // 配列の形を、欄の順に読むと、最初の要素が、rulesとして読めてしまう形。
             ("プロファイルが、rulesだけの配列", r#"{"kind":"single","profile":[[{}]]}"#),
+            ("全体の要素が、rulesだけの配列", r#"{"kind":"all","profiles":[[[{}]]]}"#),
             ("プロファイルが数値", r#"{"kind":"single","profile":5}"#),
             ("rulesが数値", r#"{"kind":"single","profile":{"rules":5}}"#),
             ("profilesの要素が配列", r#"{"kind":"all","profiles":[[false]]}"#),

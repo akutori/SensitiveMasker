@@ -459,8 +459,13 @@ fn export_with_key_file_using(
     let key_dest_path =
         validate_key_file_dest_path(key_dest_path, app_paths).map_err(ExportImportError::InvalidInput)?;
     let exported = with_store(state, export).map_err(ExportImportError::Failed)?;
-    let protection = write(&dest_path, &exported.ciphertext, &key_dest_path, &exported.key_file_contents)
-        .map_err(|_| ExportImportError::Failed(GENERIC_IO_ERROR.to_string()))?;
+    let protection = write(&dest_path, &exported.ciphertext, &key_dest_path, &exported.key_file_contents).map_err(
+        |error| match error {
+            // 前のファイルを戻せなかったときは、退避した場所を、利用者へ示す(前のエクスポートを復号するために要る)。
+            ProfileStoreError::PreviousFilesNotRestored(message) => ExportImportError::Failed(message),
+            _ => ExportImportError::Failed(GENERIC_IO_ERROR.to_string()),
+        },
+    )?;
     Ok(ExportWithKeyFileResultDto { key_file_restricted: protection == FileProtection::OwnerOnly })
 }
 
@@ -2091,6 +2096,46 @@ mod tests {
         .expect("制限できなくても、書き込みは成功するはず");
 
         assert!(!result.key_file_restricted, "権限を制限できなかったのに、制限できたと報告した");
+    }
+
+    // 置き換えに失敗し、前のファイルも元の名前へ戻せなかったときは、退避した場所を、画面へ返す(汎用の文言にしない)。それ以外の
+    // 書き込みの失敗は、汎用の文言で返す。
+    #[test]
+    fn a_key_file_export_names_where_the_previous_file_was_kept_when_it_could_not_be_restored() {
+        let source_dir = tempfile::tempdir().unwrap();
+        let state = ProfileStoreState::with_store_for_test(init_store_with_one_profile(source_dir.path(), "元プロファイル"));
+        let out = tempfile::tempdir().unwrap();
+        let smx = out.path().join("export.smx");
+        let key = out.path().join("export.smxkey");
+        let export = |store: &mut profile_store::ProfileStore| store.export_profile_with_key_file("元プロファイル");
+
+        let not_restored = export_with_key_file_using(
+            &state,
+            Ok(AppPaths::at(source_dir.path())),
+            smx.to_str().unwrap(),
+            key.to_str().unwrap(),
+            export,
+            |_, _, _, _| Err(ProfileStoreError::PreviousFilesNotRestored("前のファイルは、別の場所にあります".to_string())),
+        )
+        .expect_err("失敗するはず");
+        let other_failure = export_with_key_file_using(
+            &state,
+            Ok(AppPaths::at(source_dir.path())),
+            smx.to_str().unwrap(),
+            key.to_str().unwrap(),
+            export,
+            |_, _, _, _| Err(ProfileStoreError::NotInitialized),
+        )
+        .expect_err("失敗するはず");
+
+        assert!(
+            matches!(&not_restored, ExportImportError::Failed(message) if message == "前のファイルは、別の場所にあります"),
+            "{not_restored:?}"
+        );
+        assert!(
+            matches!(&other_failure, ExportImportError::Failed(message) if message == GENERIC_IO_ERROR),
+            "{other_failure:?}"
+        );
     }
 
     // 鍵ファイルの大きさの上限(4096バイト)は、ちょうどの大きさまで受け付け、1バイトでも超えると拒否する。

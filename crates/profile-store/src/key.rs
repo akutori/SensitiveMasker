@@ -89,10 +89,10 @@ fn write_new_owner_only_file_with(
     contents: &[u8],
     restrict: impl FnOnce(&Path) -> Result<(), KeyError>,
 ) -> Result<FileProtection, KeyError> {
-    create_new_empty_file(path)?;
+    let mut file = create_new_empty_file(path)?;
     let restricted = restrict(path).is_ok();
-    // 制限した後に、開き直して書く(制限に使う外部のプロセス[icacls]が、開いたままのハンドルと競合しないようにするため)。
-    let mut file = fs::OpenOptions::new().write(true).truncate(true).open(path)?;
+    // 作ったときのハンドルで書く。パスで開き直すと、権限を制限している間に、そのパスを、他のファイルへのリンクへ差し替えられ、
+    // 秘密が、そのファイルへ書かれうる。
     file.write_all(contents)?;
     // クラッシュの後に、片方のファイルだけが残らないよう、書いた内容を、保管先へ確定させてから返す。
     file.sync_all()?;
@@ -100,13 +100,12 @@ fn write_new_owner_only_file_with(
 }
 
 // 空のファイルを、新しく作る(既に有れば、失敗する)。Unixでは、作成時のモードを、所有ユーザーだけにする。
-fn create_new_empty_file(path: &Path) -> Result<(), KeyError> {
+fn create_new_empty_file(path: &Path) -> Result<fs::File, KeyError> {
     let mut options = fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    options.open(path)?;
-    Ok(())
+    Ok(options.open(path)?)
 }
 
 // 作成時のモードは、umaskで狭まることはあっても、広がらないが、権限を持たない保管先(quietを付けてマウントしたvfatなど)では、
@@ -346,6 +345,25 @@ mod tests {
 
         assert_eq!(std::fs::read(&path).unwrap(), b"new");
         assert_eq!(protection, FileProtection::OwnerOnly);
+    }
+
+    // 権限を制限している間に、そのパスが、他のファイルへのリンクへ差し替えられても、秘密は、そのファイルへ書かれない
+    // (作ったときのハンドルで書く。パスで開き直すと、差し替えた先へ書かれる)。
+    #[test]
+    fn the_secret_is_written_through_the_handle_that_created_the_file_not_through_the_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let planted = dir.path().join("planted.txt");
+        std::fs::write(&planted, b"planted").unwrap();
+        let path = dir.path().join("secret.smxkey");
+
+        let _ = write_new_owner_only_file_with(&path, b"SECRET-KEY", |p| {
+            // 制限している間に、パスを、他のファイルへのハードリンクへ差し替える(差し替えられない環境では、何も起きない)。
+            let _ = std::fs::remove_file(p);
+            let _ = std::fs::hard_link(&planted, p);
+            Ok(())
+        });
+
+        assert_eq!(std::fs::read(&planted).unwrap(), b"planted", "差し替えた先の、他のファイルへ、秘密を書いた");
     }
 
     // 既に有る名前には、書かない(そこが、他のプロセスが置いた、他のファイルへのリンクでも、そのファイルへ、秘密を書かない)。

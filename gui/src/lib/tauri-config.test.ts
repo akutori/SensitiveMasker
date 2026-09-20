@@ -34,6 +34,13 @@ describe("配布用の設定に、E2E専用の口が入っていない", () => {
     expect(capability.permissions).not.toContain("core:window:allow-show");
   });
 
+  // 許可する権限の種類は、core:default・ダイアログ2つ・アプリ自身のコマンド(allow-…)だけに限る。ウィンドウ・ウェブビューの操作や、
+  // プラグインの権限を足すと、画面(JavaScript)が、その操作を行えるため、足すときは、このテストを、意図して更新する。
+  it("許可する権限の種類を、core:default・ダイアログ・アプリ自身のコマンドだけに限る", () => {
+    const allowed = /^(core:default|dialog:allow-(open|save)|allow-[a-z0-9-]+)$/;
+    expect(capability.permissions.filter((permission) => !allowed.test(permission))).toEqual([]);
+  });
+
   it("E2E用のプラグイン(wdio)の権限を、配布用のcapabilitiesへ足さない", () => {
     expect(capability.permissions.filter((permission) => permission.startsWith("wdio"))).toEqual([]);
   });
