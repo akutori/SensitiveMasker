@@ -172,7 +172,8 @@ describe.each([0, 7])("createImportPassphraseHandlers(届いた結果の識別�
       secondResult.resolve(SECOND_PREVIEW);
       await second;
 
-      // 前の保留の破棄が先で、その後に、新しい識別子を記録して、確認画面へ進む。
+      // 前の保留の破棄を発行し、新しい識別子を記録して、確認画面へ進む(確認画面へ進む時点で、新しい識別子が、既に
+      // 所有として記録されている)。
       expect(calls).toEqual([
         "busy:true",
         `discardPending:${pendingId}`,
