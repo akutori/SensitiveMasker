@@ -31,7 +31,7 @@ const exported = (sessionId = 1): ExportDialogState => ({
 });
 
 describe("openExportDialog", () => {
-  it("編集中から始まり、渡された識別子とパスフレーズを持つ", () => {
+  it("編集中から始まり、渡された開いた回の番号とパスフレーズを持つ", () => {
     expect(openExportDialog(3, PASSPHRASE)).toEqual(editing(3));
   });
 });
@@ -55,11 +55,11 @@ describe("regeneratePassphrase", () => {
 });
 
 describe("beginExport", () => {
-  it("編集中で、識別子とパスフレーズが一致すれば、実行中になる", () => {
+  it("編集中で、開いた回の番号とパスフレーズが一致すれば、実行中になる", () => {
     expect(beginExport(editing(2), 2, PASSPHRASE)).toEqual(exporting(2));
   });
 
-  it("識別子が異なれば変わらない(別の画面の状態を実行中にしない)", () => {
+  it("開いた回の番号が異なれば変わらない(別の画面の状態を実行中にしない)", () => {
     expect(beginExport(editing(2), 1, PASSPHRASE)).toEqual(editing(2));
   });
 
@@ -77,11 +77,11 @@ describe("beginExport", () => {
 });
 
 describe("completeExport", () => {
-  it("実行中で識別子が一致すれば、成功後になる(パスフレーズは保たれる)", () => {
+  it("実行中で開いた回の番号が一致すれば、成功後になる(パスフレーズは保たれる)", () => {
     expect(completeExport(exporting(2), 2)).toEqual(exported(2));
   });
 
-  it("識別子が異なれば変わらない(閉じて開き直した後に届いた、古い実行の完了通知)", () => {
+  it("開いた回の番号が異なれば変わらない(閉じて開き直した後に届いた、古い実行の完了通知)", () => {
     expect(completeExport(exporting(2), 1)).toEqual(exporting(2));
   });
 
@@ -92,11 +92,11 @@ describe("completeExport", () => {
 });
 
 describe("abortExport", () => {
-  it("実行中で識別子が一致すれば、編集中へ戻る(保存先の選択の取り消し・失敗)", () => {
+  it("実行中で開いた回の番号が一致すれば、編集中へ戻る(保存先の選択の取り消し・失敗)", () => {
     expect(abortExport(exporting(2), 2)).toEqual(editing(2));
   });
 
-  it("識別子が異なれば変わらない", () => {
+  it("開いた回の番号が異なれば変わらない", () => {
     expect(abortExport(exporting(2), 1)).toEqual(exporting(2));
   });
 
