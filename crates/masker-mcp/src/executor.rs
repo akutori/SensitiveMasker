@@ -166,7 +166,7 @@ fn kill_group_or_direct_child(
 }
 
 /// 標準エラー出力へ1行書く。書けなくても(読み手のいないパイプなど)、失敗もpanicもしない。
-/// 呼び出し元は、タイムアウトの後始末で、ここで止まって、続きの処理を妨げてはならないため
+/// 呼び出し元は、タイムアウト・出力上限超過の後始末で、ここで止まって、続きの処理を妨げてはならないため
 /// (`eprintln!`は、書き込みに失敗するとpanicする)。
 #[cfg(unix)]
 fn log_to_stderr(message: std::fmt::Arguments<'_>) {
@@ -615,7 +615,7 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn group_kill_outcome_reports_every_other_failure() {
+    fn group_kill_outcome_reports_other_failures() {
         for errno in [rustix::io::Errno::PERM, rustix::io::Errno::INVAL] {
             let error = group_kill_outcome(Err(errno)).expect_err("ESRCH以外の失敗は、失敗として返すはず");
             assert_eq!(error.raw_os_error(), Some(errno.raw_os_error()), "errno={errno:?}");
