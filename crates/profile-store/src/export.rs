@@ -45,11 +45,13 @@ pub struct DecryptedImport {
     pub passphrase_trimmed: bool,
 }
 
+/// 復号した内容だけを返す(空白を除いて再試行したかは返さない)。テストが、復号の可否だけを確かめるために使う。
+#[cfg(test)]
 pub fn decrypt_import(ciphertext: &[u8], passphrase: SecretString) -> Result<Vec<u8>, ExportError> {
     decrypt_with_whitespace_fallback(ciphertext, passphrase, MAX_WORK_FACTOR_LOG_N)
 }
 
-/// `decrypt_import`と同じ復号で、空白を除いて再試行して成功したかも返す。
+/// パスフレーズで復号する。入力のままでは復号できず、空白を除いて再試行して成功したかも返す。
 pub fn decrypt_import_reporting_trim(
     ciphertext: &[u8],
     passphrase: SecretString,
@@ -73,11 +75,8 @@ fn retry_candidate(typed: &str) -> Option<&str> {
     (!candidate.is_empty() && candidate.len() != typed.len()).then_some(candidate)
 }
 
-// 貼り付けやTTY入力で前後に空白・不可視文字が混ざっていても復号できるよう、入力のまま
-// 復号に失敗したときだけ、それらを除いたパスフレーズで1回だけ再試行する。入力のまま成功する
-// 場合はそのまま復号する(前後に空白を含むパスフレーズで作ったファイルも復号できる。
-// 空白を「足す」方向は試さない)。ワークファクタ超過はパスフレーズの正誤と無関係なので、
-// 再試行しない。
+// 復号した内容だけを返す形(テスト用)。
+#[cfg(test)]
 fn decrypt_with_whitespace_fallback(
     ciphertext: &[u8],
     passphrase: SecretString,
@@ -86,7 +85,11 @@ fn decrypt_with_whitespace_fallback(
     decrypt_with_whitespace_fallback_reporting(ciphertext, passphrase, max_log_n).map(|(plaintext, _)| plaintext)
 }
 
-// `decrypt_with_whitespace_fallback`の本体。復号した内容と、空白を除いて再試行して成功したか(true)を返す。
+// 貼り付けやTTY入力で前後に空白・不可視文字が混ざっていても復号できるよう、入力のまま
+// 復号に失敗したときだけ、それらを除いたパスフレーズで1回だけ再試行する。入力のまま成功する
+// 場合はそのまま復号する(前後に空白を含むパスフレーズで作ったファイルも復号できる。
+// 空白を「足す」方向は試さない)。ワークファクタ超過はパスフレーズの正誤と無関係なので、
+// 再試行しない。復号した内容と、空白を除いて再試行して成功したか(true)を返す。
 fn decrypt_with_whitespace_fallback_reporting(
     ciphertext: &[u8],
     passphrase: SecretString,
