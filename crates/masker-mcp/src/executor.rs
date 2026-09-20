@@ -121,7 +121,14 @@ fn kill_process_group(pgid: u32) -> std::io::Result<()> {
             format!("プロセスグループID {pgid} は、シグナルの宛先にできません"),
         ));
     };
-    match rustix::process::kill_process_group(pid, rustix::process::Signal::KILL) {
+    group_kill_outcome(rustix::process::kill_process_group(pid, rustix::process::Signal::KILL))
+}
+
+/// グループへのkillの結果を、呼び出し側へ返す結果に変換する。グループが既に無い(ESRCH)場合は、
+/// 終了させる対象が無いだけなので、成功として扱う。それ以外の失敗(権限が無い等)は、失敗として返す。
+#[cfg(unix)]
+fn group_kill_outcome(result: rustix::io::Result<()>) -> std::io::Result<()> {
+    match result {
         Ok(()) | Err(rustix::io::Errno::SRCH) => Ok(()),
         Err(errno) => Err(errno.into()),
     }
@@ -140,7 +147,7 @@ fn signalable_process_group(pgid: u32) -> Option<rustix::process::Pid> {
 /// `kill_group`(`child`が率いるプロセスグループ全体を終了させる操作)が失敗した場合に、
 /// 直接の子だけでも終了させる。呼び出し側が続けて`child.wait()`するときに、対象コマンドが
 /// 自然に終わるまで無期限にブロックしないようにするため。失敗は、標準エラー出力へ残す
-/// (MCPの標準出力は、プロトコルのメッセージ専用)。
+/// (MCPの標準出力は、プロトコルのメッセージ専用)。記録より先に、直接の子を終了させる。
 #[cfg(unix)]
 fn kill_group_or_direct_child(
     child: &mut std::process::Child,
@@ -149,12 +156,22 @@ fn kill_group_or_direct_child(
     let Err(group_error) = kill_group(child.id()) else {
         return;
     };
-    eprintln!(
+    let direct_result = child.kill();
+    log_to_stderr(format_args!(
         "masker-mcp: プロセスグループの強制終了に失敗したため、直接の子プロセスだけを終了します: {group_error}"
-    );
-    if let Err(error) = child.kill() {
-        eprintln!("masker-mcp: 直接の子プロセスの強制終了にも失敗しました: {error}");
+    ));
+    if let Err(error) = direct_result {
+        log_to_stderr(format_args!("masker-mcp: 直接の子プロセスの強制終了にも失敗しました: {error}"));
     }
+}
+
+/// 標準エラー出力へ1行書く。書けなくても(読み手のいないパイプなど)、失敗もpanicもしない。
+/// 呼び出し元は、タイムアウトの後始末で、ここで止まって、続きの処理を妨げてはならないため
+/// (`eprintln!`は、書き込みに失敗するとpanicする)。
+#[cfg(unix)]
+fn log_to_stderr(message: std::fmt::Arguments<'_>) {
+    use std::io::Write;
+    let _ = writeln!(std::io::stderr(), "{message}");
 }
 
 #[cfg(windows)]
@@ -584,6 +601,24 @@ mod tests {
         for pgid in [2, 12345, i32::MAX as u32] {
             let pid = signalable_process_group(pgid).unwrap_or_else(|| panic!("pgid={pgid}が断られた"));
             assert_eq!(pid.as_raw_nonzero().get() as u32, pgid);
+        }
+    }
+
+    // システムコールの結果の変換だけを、実際にシグナルを送らずに確かめる。既に無いグループ(ESRCH)は成功、
+    // それ以外の失敗は、失敗(呼び出し側が、直接の子だけでも終了させる起点になる)。
+    #[test]
+    #[cfg(unix)]
+    fn group_kill_outcome_treats_success_and_a_missing_group_as_success() {
+        group_kill_outcome(Ok(())).expect("成功は成功のまま");
+        group_kill_outcome(Err(rustix::io::Errno::SRCH)).expect("既に無いグループは、成功として扱うはず");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn group_kill_outcome_reports_every_other_failure() {
+        for errno in [rustix::io::Errno::PERM, rustix::io::Errno::INVAL] {
+            let error = group_kill_outcome(Err(errno)).expect_err("ESRCH以外の失敗は、失敗として返すはず");
+            assert_eq!(error.raw_os_error(), Some(errno.raw_os_error()), "errno={errno:?}");
         }
     }
 
