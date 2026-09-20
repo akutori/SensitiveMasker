@@ -2,6 +2,7 @@ use std::sync::Mutex;
 
 use tauri::{AppHandle, Runtime};
 use tauri_plugin_clipboard_manager::ClipboardExt;
+use zeroize::Zeroizing;
 
 const CLIPBOARD_ERROR: &str = "クリップボードを操作できませんでした";
 
@@ -25,8 +26,10 @@ pub enum ClipboardClearOutcome {
 /// 保持することで、この2つの呼び出しがOSクリップボードへの読み書きの間で競合しない
 /// ようにする(片方が古いタイマー由来でも、新しい方の書き込みを後から消してしまう
 /// ことがなくなる)。ここではawaitを挟まないためstd::sync::Mutexで足りる。
+///
+/// 保持する値はパスフレーズのため、dropのときにメモリを消去する型(`Zeroizing`)で持つ。
 #[derive(Default)]
-pub struct ClipboardState(Mutex<Option<String>>);
+pub struct ClipboardState(Mutex<Option<Zeroizing<String>>>);
 
 /// 現在のクリップボードの内容(取得できなかった場合はNone)と、コピー時点の値を
 /// 比較し、クリアしてよいかを判定する(純粋関数。OSのクリップボードに触れずに
@@ -49,14 +52,16 @@ fn write_clipboard_text_impl<R: Runtime>(
     state: &ClipboardState,
     text: String,
 ) -> Result<(), String> {
+    // IPCで受け取った文字列は、そのまま、追跡している値として持つ(複製を作らない)。
+    let text = Zeroizing::new(text);
     let mut pending = state.0.lock().unwrap_or_else(|e| e.into_inner());
     // 書き込み試行前にpendingへ反映する。Windows版のarboard呼び出しはテキスト書き込み後に
     // 履歴/クラウド除外フォーマットの設定を行う2段階の処理で、後段だけ失敗してもErrが
     // 返るため、成功後に反映する書き方だとテキストは実際にクリップボードへ残っているのに
     // pendingが空のままになり得る。decide_outcomeは実際のクリップボード内容と比較してから
     // 判定するため、書き込みが完全に失敗した場合にpendingだけ残っても誤ってクリアされない。
-    *pending = Some(text.clone());
-    write_to_os_clipboard(app, &text)
+    let stored = pending.insert(text);
+    write_to_os_clipboard(app, stored.as_str())
 }
 
 /// Windowsでは書き込みと同時にSetExtWindows(exclude_from_history/exclude_from_cloud)で
@@ -98,12 +103,13 @@ fn clear_clipboard_if_matches_impl<R: Runtime>(
     expected: &str,
 ) -> Result<ClipboardClearOutcome, String> {
     let mut pending = state.0.lock().unwrap_or_else(|e| e.into_inner());
-    let current = app.clipboard().read_text().ok();
-    let outcome = decide_outcome(current.as_deref(), expected);
+    // 読み取った内容は、パスフレーズそのものでありうるため、比較の後に消去する。
+    let current = app.clipboard().read_text().ok().map(Zeroizing::new);
+    let outcome = decide_outcome(current.as_ref().map(|text| text.as_str()), expected);
     if outcome == ClipboardClearOutcome::Cleared {
         app.clipboard().write_text("").map_err(|_| CLIPBOARD_ERROR.to_string())?;
     }
-    if should_forget_pending(outcome, pending.as_deref(), expected) {
+    if should_forget_pending(outcome, pending.as_ref().map(|text| text.as_str()), expected) {
         *pending = None;
     }
     Ok(outcome)
@@ -160,7 +166,8 @@ pub async fn clear_clipboard_if_matches(
     state: tauri::State<'_, ClipboardState>,
     expected: String,
 ) -> Result<ClipboardClearOutcome, String> {
-    clear_clipboard_if_matches_impl(&app, &state, &expected)
+    let expected = Zeroizing::new(expected);
+    clear_clipboard_if_matches_impl(&app, &state, expected.as_str())
 }
 
 /// トレイメニューの「終了」からの終了直前に呼ぶ。JS側のsetTimeoutはプロセス終了と
@@ -171,13 +178,23 @@ pub async fn clear_clipboard_if_matches(
 pub fn clear_pending_on_exit<R: Runtime>(app: &AppHandle<R>, state: &ClipboardState) {
     let pending = state.0.lock().unwrap_or_else(|e| e.into_inner()).clone();
     if let Some(expected) = pending {
-        let _ = clear_clipboard_if_matches_impl(app, state, &expected);
+        let _ = clear_clipboard_if_matches_impl(app, state, expected.as_str());
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pending_secret_is_held_in_a_type_that_is_erased_on_drop() {
+        // 追跡している値は、dropのときに消去する型で持つ(Stringなどへ替えると、この関数がコンパイルできなくなる)。
+        fn pending_of(state: &ClipboardState) -> &Mutex<Option<Zeroizing<String>>> {
+            &state.0
+        }
+        let state = ClipboardState::default();
+        assert!(pending_of(&state).lock().unwrap().is_none());
+    }
 
     #[test]
     fn decide_outcome_clears_when_current_content_still_matches() {

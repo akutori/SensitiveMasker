@@ -38,6 +38,9 @@ tauri-plugin-clipboard-manager = "2"
 # クリップボード履歴・クラウド同期からの除外を行うために直接依存する。
 # tauri-plugin-clipboard-manager 2.3.3が解決するバージョンと合わせ、重複を避ける。
 arboard = "3.6.1"
+# クリップボードのパスフレーズ(追跡している値・IPCで受け取った引数・読み取った内容)を、dropのときに消去するため。
+# profile-store経由で、既にビルドに含まれている。
+zeroize = "1"
 # トレイメニューの「クリップボードをマスク」失敗時にOS通知を出すための公式プラグイン。
 tauri-plugin-notification = "2"
 # トレイメニューの「自動起動」チェックボックス項目用の公式プラグイン。
