@@ -69,8 +69,9 @@ pub enum RuleError {
     },
 }
 
-// deserialize時もRule::newを必ず経由させ、二重チェックを呼び出し側に持たせないための橋渡し用DTO。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+// deserialize時もRule::newを必ず経由させ、二重チェックを呼び出し側に持たせないための橋渡し用DTO(読み取り専用。
+// 直列化は、下のRuleViewで、借用のまま行う)。
+#[derive(Debug, Deserialize)]
 struct RuleDto {
     name: String,
     pattern_type: PatternType,
@@ -90,8 +91,8 @@ fn default_enabled() -> bool {
     true
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(try_from = "RuleDto", into = "RuleDto")]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(try_from = "RuleDto")]
 pub struct Rule {
     name: String,
     pattern_type: PatternType,
@@ -204,18 +205,34 @@ impl TryFrom<RuleDto> for Rule {
     }
 }
 
-impl From<Rule> for RuleDto {
-    fn from(rule: Rule) -> Self {
-        RuleDto {
-            name: rule.name,
-            pattern_type: rule.pattern_type,
-            pattern: rule.pattern,
-            mode: rule.mode,
-            fixed_value: rule.fixed_value,
-            prefix: rule.prefix,
-            enabled: rule.enabled,
-            description: rule.description,
+// 直列化用の、借用のビュー。serde(into)は、直列化のたびに、全体を複製する(パターン・固定値などの平文が、消去されない複製として
+// 残る)ため、使わない。キーの名前・順序は、RuleDtoと同じにする(保存済みのデータ・エクスポートしたファイルとの互換のため。
+// 形は、テストで固定している)。
+#[derive(Serialize)]
+struct RuleView<'a> {
+    name: &'a str,
+    pattern_type: &'a PatternType,
+    pattern: &'a str,
+    mode: &'a Mode,
+    fixed_value: Option<&'a str>,
+    prefix: Option<&'a str>,
+    enabled: bool,
+    description: Option<&'a str>,
+}
+
+impl Serialize for Rule {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        RuleView {
+            name: &self.name,
+            pattern_type: &self.pattern_type,
+            pattern: &self.pattern,
+            mode: &self.mode,
+            fixed_value: self.fixed_value.as_deref(),
+            prefix: self.prefix.as_deref(),
+            enabled: self.enabled,
+            description: self.description.as_deref(),
         }
+        .serialize(serializer)
     }
 }
 
@@ -229,8 +246,9 @@ pub enum RuleProfileError {
     InvalidProfileName { reason: String },
 }
 
-// RuleProfile::newの検証(ルール名の重複拒否)をdeserialize経由でも必ず通すための橋渡し用DTO。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+// RuleProfile::newの検証(ルール名の重複拒否)をdeserialize経由でも必ず通すための橋渡し用DTO(読み取り専用。
+// 直列化は、下のRuleProfileViewで、借用のまま行う)。
+#[derive(Debug, Deserialize)]
 struct RuleProfileDto {
     profile_name: String,
     description: Option<String>,
@@ -238,8 +256,8 @@ struct RuleProfileDto {
     rules: Vec<Rule>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(try_from = "RuleProfileDto", into = "RuleProfileDto")]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(try_from = "RuleProfileDto")]
 pub struct RuleProfile {
     profile_name: String,
     description: Option<String>,
@@ -257,29 +275,33 @@ impl Zeroize for RuleProfile {
 }
 
 impl RuleProfile {
+    /// 拒否したとき(名前が不正・ルール名が重複)は、受け取った内容を、消去してから捨てる。ルールのパターン・固定値などに、
+    /// マスク対象の実際の値が入りうるが、呼び出し側は、値を渡しており、自分では消去できないため。
     pub fn new(
         profile_name: impl Into<String>,
         description: Option<String>,
         rules: Vec<Rule>,
     ) -> Result<Self, RuleProfileError> {
-        let profile_name = profile_name.into();
-        if let Err(reason) = validate_display_name(&profile_name) {
-            return Err(RuleProfileError::InvalidProfileName { reason });
-        }
+        let mut profile_name = profile_name.into();
+        let mut description = description;
+        let mut rules = rules;
 
-        let mut seen_names = std::collections::HashSet::new();
-        for rule in &rules {
-            if !seen_names.insert(rule.name()) {
-                return Err(RuleProfileError::DuplicateRuleName {
-                    name: rule.name().to_string(),
-                });
-            }
+        let rejection = if let Err(reason) = validate_display_name(&profile_name) {
+            Some(RuleProfileError::InvalidProfileName { reason })
+        } else {
+            let mut seen_names = std::collections::HashSet::new();
+            rules
+                .iter()
+                .find(|rule| !seen_names.insert(rule.name()))
+                .map(|rule| RuleProfileError::DuplicateRuleName { name: rule.name().to_string() })
+        };
+        if let Some(error) = rejection {
+            profile_name.zeroize();
+            description.zeroize();
+            rules.zeroize();
+            return Err(error);
         }
-        Ok(Self {
-            profile_name: profile_name.into(),
-            description,
-            rules,
-        })
+        Ok(Self { profile_name, description, rules })
     }
 
     pub fn profile_name(&self) -> &str {
@@ -301,13 +323,22 @@ impl TryFrom<RuleProfileDto> for RuleProfile {
     }
 }
 
-impl From<RuleProfile> for RuleProfileDto {
-    fn from(profile: RuleProfile) -> Self {
-        RuleProfileDto {
-            profile_name: profile.profile_name,
-            description: profile.description,
-            rules: profile.rules,
+// 直列化用の、借用のビュー(理由と、キーの名前・順序は、RuleViewと同じ)。
+#[derive(Serialize)]
+struct RuleProfileView<'a> {
+    profile_name: &'a str,
+    description: Option<&'a str>,
+    rules: &'a [Rule],
+}
+
+impl Serialize for RuleProfile {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        RuleProfileView {
+            profile_name: &self.profile_name,
+            description: self.description.as_deref(),
+            rules: &self.rules,
         }
+        .serialize(serializer)
     }
 }
 
@@ -627,6 +658,92 @@ mod tests {
         }"#;
         let result: Result<RuleProfile, _> = serde_json::from_str(json);
         assert!(result.is_err(), "ルール名の重複はdeserializeでも拒否されるべき");
+    }
+
+    // 直列化した結果の形(キーの名前・順序・null・エスケープ)。保存済みのデータ・エクスポートしたファイルとの互換のため、
+    // 変えてはならない(直列化の実装を替えても、同じ文字列になること)。
+    fn golden_fixed_rule() -> Rule {
+        Rule::new(
+            "電話番号",
+            PatternType::Literal,
+            "0120XXXXXX",
+            Mode::Fixed,
+            Some("<TEL>".to_string()),
+            None,
+            true,
+            Some("説明 \"引用\"".to_string()),
+        )
+        .unwrap()
+    }
+
+    fn golden_sequential_rule() -> Rule {
+        Rule::new("ip", PatternType::Regex, r"\d+\.\d+", Mode::Sequential, None, Some("IP_".to_string()), false, None)
+            .unwrap()
+    }
+
+    const GOLDEN_FIXED_RULE_JSON: &str = r#"{"name":"電話番号","pattern_type":"literal","pattern":"0120XXXXXX","mode":"fixed","fixed_value":"<TEL>","prefix":null,"enabled":true,"description":"説明 \"引用\""}"#;
+    const GOLDEN_SEQUENTIAL_RULE_JSON: &str = r#"{"name":"ip","pattern_type":"regex","pattern":"\\d+\\.\\d+","mode":"sequential","fixed_value":null,"prefix":"IP_","enabled":false,"description":null}"#;
+
+    #[test]
+    fn a_rule_serializes_to_the_stable_json_shape_and_reads_back() {
+        let fixed = golden_fixed_rule();
+        let sequential = golden_sequential_rule();
+
+        assert_eq!(serde_json::to_string(&fixed).unwrap(), GOLDEN_FIXED_RULE_JSON);
+        assert_eq!(serde_json::to_string(&sequential).unwrap(), GOLDEN_SEQUENTIAL_RULE_JSON);
+        assert_eq!(serde_json::from_str::<Rule>(GOLDEN_FIXED_RULE_JSON).unwrap(), fixed);
+        assert_eq!(serde_json::from_str::<Rule>(GOLDEN_SEQUENTIAL_RULE_JSON).unwrap(), sequential);
+    }
+
+    #[test]
+    fn a_profile_serializes_to_the_stable_json_shape_and_reads_back() {
+        let profile =
+            RuleProfile::new("プロファイル", Some("説明".to_string()), vec![golden_fixed_rule(), golden_sequential_rule()])
+                .unwrap();
+        let without_description = RuleProfile::new("p", None, vec![]).unwrap();
+        let expected = format!(
+            r#"{{"profile_name":"プロファイル","description":"説明","rules":[{GOLDEN_FIXED_RULE_JSON},{GOLDEN_SEQUENTIAL_RULE_JSON}]}}"#
+        );
+
+        assert_eq!(serde_json::to_string(&profile).unwrap(), expected);
+        assert_eq!(serde_json::from_str::<RuleProfile>(&expected).unwrap(), profile);
+        assert_eq!(
+            serde_json::to_string(&without_description).unwrap(),
+            r#"{"profile_name":"p","description":null,"rules":[]}"#
+        );
+    }
+
+    // 名前・ルール名が不正で拒否したときも、受け取った内容(ルールのパターン・固定値・説明)を、消去してから捨てる
+    // (呼び出し側は、値をmoveしているため、自分では消去できない)。
+    #[test]
+    fn a_profile_rejected_for_its_name_wipes_the_rules_and_description_it_was_given() {
+        let rules = vec![rule_with_every_text_field()];
+        let description = Some("profile-description".to_string());
+        let mut watch = wipe_check::Watch::new();
+        track_rule_texts(&mut watch, &rules[0]);
+        watch.track_opt(description.as_deref());
+        assert_eq!(watch.tracked_count(), 6, "追跡する文字列を、取りこぼしている");
+
+        let result = RuleProfile::new("a".repeat(MAX_DISPLAY_NAME_LENGTH + 1), description, rules);
+
+        assert!(matches!(result, Err(RuleProfileError::InvalidProfileName { .. })));
+        watch.assert_all_wiped_when_freed();
+    }
+
+    #[test]
+    fn a_profile_rejected_for_a_duplicate_rule_name_wipes_the_rules_and_description_it_was_given() {
+        let rules = vec![rule_with_every_text_field(), rule_with_every_text_field()];
+        let description = Some("profile-description".to_string());
+        let mut watch = wipe_check::Watch::new();
+        track_rule_texts(&mut watch, &rules[0]);
+        track_rule_texts(&mut watch, &rules[1]);
+        watch.track_opt(description.as_deref());
+        assert_eq!(watch.tracked_count(), 11, "追跡する文字列を、取りこぼしている");
+
+        let result = RuleProfile::new("profile-name", description, rules);
+
+        assert!(matches!(result, Err(RuleProfileError::DuplicateRuleName { .. })));
+        watch.assert_all_wiped_when_freed();
     }
 
     #[test]

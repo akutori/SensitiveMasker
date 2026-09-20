@@ -1,5 +1,22 @@
 import { describe, expect, it } from "vitest";
-import { hasKeyFileExtension, keyFileNameOf, pickKeyFileFromDroppedPaths } from "./key-file";
+import { hasKeyFileExtension, keyFileExportBaseName, keyFileNameOf, pickKeyFileFromDroppedPaths } from "./key-file";
+
+describe("keyFileExportBaseName", () => {
+  // 月は0始まりのため、8は9月。
+  const at = new Date(2026, 8, 20, 21, 5, 9);
+
+  it("プロファイル1件のエクスポートは、日時(年月日-時分秒。ゼロ埋め)を含む名前になる", () => {
+    expect(keyFileExportBaseName(false, at)).toBe("sensitivemasker_export_20260920-210509");
+  });
+
+  it("全プロファイルのエクスポートは、別の名前になる", () => {
+    expect(keyFileExportBaseName(true, at)).toBe("sensitivemasker_all_20260920-210509");
+  });
+
+  it("日時が違えば、名前も違う(前のエクスポートを、置き換えにくい)", () => {
+    expect(keyFileExportBaseName(false, new Date(2026, 8, 20, 21, 5, 10))).not.toBe(keyFileExportBaseName(false, at));
+  });
+});
 
 describe("keyFileNameOf", () => {
   it("WindowsとUnixの区切りの、最後の要素を返す", () => {

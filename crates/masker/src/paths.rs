@@ -17,6 +17,8 @@ pub(crate) fn validate_output_file(raw: &Path, app_paths: &AppPaths) -> Result<P
     if let Some(parent) = path.parent() {
         app_paths.reject_if_dir_is_inside_data_dir(parent)?;
     }
+    // 親のフォルダが外でも、ハードリンク等で、鍵・DBの実体を指すパスは、拒否する。
+    app_paths.reject_if_file_is_app_data(&path)?;
     Ok(path)
 }
 
@@ -38,6 +40,20 @@ mod tests {
         let sneaky = data_dir.path().join("profiles.db");
 
         let err = validate_output_file(&sneaky, &app_paths).unwrap_err();
+
+        assert!(matches!(err, CliError::Path(_)));
+    }
+
+    #[test]
+    fn validate_output_file_rejects_a_hard_link_to_the_key_file() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let dest_dir = tempfile::tempdir().unwrap();
+        let app_paths = AppPaths::at(data_dir.path());
+        std::fs::write(&app_paths.key_path, b"key").unwrap();
+        let link = dest_dir.path().join("sneaky.smx");
+        std::fs::hard_link(&app_paths.key_path, &link).unwrap();
+
+        let err = validate_output_file(&link, &app_paths).unwrap_err();
 
         assert!(matches!(err, CliError::Path(_)));
     }

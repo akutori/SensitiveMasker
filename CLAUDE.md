@@ -23,7 +23,7 @@
 - **masker-mcp**: `rmcp`(公式Rust SDK, stdioトランスポート)、`tokio`、`rustix`(Unixのタイムアウト時に、
   プロセスグループへのSIGKILLをシステムコールで直接送る。外部の`kill`コマンドは使わない)
 - **wipe-check**(テスト専用。masking-core・profile-storeのdev-dependencyのみ): メモリを消去してから解放したかを、
-  解放の直前の中身で確かめる(`GlobalAlloc`のラッパー)
+  解放の直前の中身で確かめる(`GlobalAlloc`のラッパー)。目印の文字列を含んだまま解放された実体も、数える
 - **gui**: Tauri v2。フロントエンドはReact 19 + TypeScript + Vite + TanStack Router + Tailwind CSS v4 +
   shadcn/ui(Radix)、パッケージマネージャーは常にbun。Tauriプラグイン: `dialog`(ファイル選択)、
   `clipboard-manager`+`arboard`(クリップボード)、`notification`(トレイのエラー通知)、
@@ -79,7 +79,13 @@ SensitiveMasker/
 - 復号鍵は`secrecy::SecretBox`で保持し、DBと別ファイルに分離してOSファイル権限
   (Unix chmod 600 / Windowsは`icacls`絶対パス指定)で所有ユーザーのみに制限する
 - 鍵・平文JSON等の機微データは`zeroize`でdrop時に消去する。コピーを作ってから消すのではなく、
-  そもそもコピーを作らない設計(借用ベースの構築、事前確保したヒープへの直接書き込み)を優先する。
+  そもそもコピーを作らない設計(借用ベースの構築、事前確保したヒープへの直接書き込み)を優先する
+  (ルールの直列化は、`serde(into)`の全体の複製でなく、借用のビューで行い、出力は、先に長さを数えて、消去する型の、
+  事前に確保した領域へ、1回で書く。復号は、暗号文と同じ大きさを先に確保した、消去する型へ読む)。
+  復号した平文の読み取りは、serdeの内部のバッファ(内部タグ付きenum・flatten)を使わない(`ExportPayload::from_json_slice`)。
+  消せないもの: ageの暗号化が内部に持つ平文の1チャンク(最大64KiB)、ageが、復号した1チャンクを縮めるとき(アロケータが、
+  領域を移すと、移る前の領域に、平文が残る。Windowsで観測)、serde_jsonが、エスケープが要る文字を含む値を読むときの
+  作業用のバッファ(1回の読み取りにつき1件)、正規表現のルールについて、`regex`が内部に持つパターンの写し
   Tauriは終了時に管理している状態をdropしないため、GUIが保持する平文(保留中のインポート)は、終了の通知
   (`RunEvent::Exit`)で明示的に破棄する
 - OSキーチェーン(keyring/DPAPI/Keychain)は不採用
@@ -106,7 +112,9 @@ SensitiveMasker/
 - **masking-core**: TDD(Red-Green-Refactor)。肯定テストと否定テストを対にする
 - **profile-store**: 実ファイルI/O・実DBを使った結合テスト中心(モックしない)
 - **メモリの消去(zeroize)**: 値が論理的に空になったかだけでは、`clear()`や`= None`(中身を上書きせずに解放する)でも
-  通ってしまうため、`wipe-check`で、追跡した文字列が、解放される直前に全て0であることを確かめる
+  通ってしまうため、`wipe-check`で、追跡した文字列が、解放される直前に全て0であることを確かめる。ライブラリが内部で
+  作る複製・伸長で捨てられる旧バッファは、追跡できないため、目印を入れたリテラルのルールを、復号・確定・保存・エクスポートの
+  経路に通し、`wipe_check::MarkerScan`で、目印を含んだまま解放された実体が無いことを確かめる
 - **gui**: Component-Driven Development(Storybookで個別コンポーネントを検証してから画面に組み込む)。
   主要フローは`gui/e2e/`のWebDriverベースE2Eテストで検証する
   - 画面(コンポーネント・操作の流れ)を変えたら、対応するStorybookのstory(playテスト)とE2Eを同じ変更で更新する

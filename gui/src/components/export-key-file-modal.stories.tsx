@@ -29,7 +29,7 @@ export const Idle: Story = {
     onExport: fn(),
   },
   play: async ({ args }) => {
-    await waitFor(() => expect(screen.getByText("この鍵ファイルを紛失すると、このプロファイルは二度と復号できません。")).toBeVisible());
+    await waitFor(() => expect(screen.getByText("この鍵ファイルを紛失すると、エクスポートしたファイルは二度と復号できません。")).toBeVisible());
     await expect(screen.getByRole("button", { name: "エクスポート" })).toBeEnabled();
     await expect(screen.getByRole("button", { name: "キャンセル" })).toBeEnabled();
 

@@ -4,9 +4,12 @@
 //! そのためエクスポート/インポートはローカル鍵を経由せず、ユーザーが指定したパスフレーズのみで
 //! 復号できる形(age -p相当)に再暗号化する。
 
+use std::io::Read;
+
 use age::scrypt::{Identity, Recipient};
 use age::x25519;
 use secrecy::{ExposeSecret, SecretString};
+use zeroize::Zeroizing;
 
 // ageのscrypt::Identity::set_max_work_factorの上限。ageクレート自身のドキュメントが
 // 「22を超えると悪意あるファイルの復号試行に数時間・数十GiBのRAMを要する場合がある」と
@@ -47,6 +50,13 @@ pub enum ExportError {
 /// 鍵ファイルの拡張子(ドットを含まない)。
 pub const KEY_FILE_EXTENSION: &str = "smxkey";
 
+/// 暗号文の先頭から、ヘッダー(ageの平文のヘッダー)の解析に渡す長さの上限。正規のヘッダーは、受け手が1つで、パスフレーズ用
+/// (scrypt)は約150バイト、鍵ファイル用(x25519)は約285バイトである。ageのヘッダーの解析は、ヘッダーの長さの二乗の時間を
+/// 要する(1バイトずつ読み足しては、最初から解析し直す)ため、細工された巨大なヘッダーで、長時間ハングしないよう、上限を
+/// 超えるヘッダーは、解析せずに拒否する。上限は、正規のヘッダーの最大(約285バイト)の7倍で、上限ちょうどのヘッダーの解析は、
+/// リリースビルドで数ミリ秒である。
+pub const MAX_HEADER_BYTES: usize = 2048;
+
 // 鍵ファイルの先頭に付ける、利用者向けのコメント(復号に使うのは、コメントでない行だけ)。
 const KEY_FILE_HEADER: &str = "# SensitiveMasker export key file\n\
      # Keep this file safe. Without it, the exported file cannot be decrypted.\n";
@@ -76,9 +86,11 @@ pub fn encrypt_for_export(plaintext: &[u8], passphrase: SecretString) -> Result<
 }
 
 /// 暗号化されたファイルの、復号の方式を判別する。パスフレーズ用(scrypt)のヘッダーなら`Passphrase`、それ以外は`KeyFile`。
-/// ageのファイルとして読み取れない場合は、エラーにする。
+/// ageのファイルとして読み取れない場合(ヘッダーが`MAX_HEADER_BYTES`を超える場合を含む)は、エラーにする。ヘッダーを含む先頭
+/// だけを渡せばよい(先頭の`MAX_HEADER_BYTES`バイトより後は、読まない)。
 pub fn detect_import_method(ciphertext: &[u8]) -> Result<ImportMethod, ExportError> {
-    let decryptor = age::Decryptor::new(ciphertext).map_err(|_| ExportError::NotAnExportFile)?;
+    let head = &ciphertext[..ciphertext.len().min(MAX_HEADER_BYTES)];
+    let decryptor = age::Decryptor::new(head).map_err(|_| ExportError::NotAnExportFile)?;
     Ok(if decryptor.is_scrypt() { ImportMethod::Passphrase } else { ImportMethod::KeyFile })
 }
 
@@ -100,6 +112,8 @@ pub fn encrypt_for_export_with_new_key(plaintext: &[u8]) -> Result<KeyFileExport
 
 // 鍵ファイルの中身から、秘密鍵を読み取る。空行と、#で始まるコメント行は、読み飛ばす(ageの鍵ファイルと同じ形式)。
 fn parse_key_file(contents: &str) -> Result<x25519::Identity, ExportError> {
+    // 編集で付いたBOM(メモ帳などが、UTF-8で保存すると付く)は、読み飛ばす(String::trimは、BOMを除かない)。
+    let contents = contents.strip_prefix('\u{FEFF}').unwrap_or(contents);
     let line = contents
         .lines()
         .map(str::trim)
@@ -108,30 +122,45 @@ fn parse_key_file(contents: &str) -> Result<x25519::Identity, ExportError> {
     line.parse::<x25519::Identity>().map_err(|_| ExportError::InvalidKeyFile)
 }
 
-/// 鍵ファイルの中身で、鍵ファイル方式で暗号化されたファイルを復号する。
+/// 鍵ファイルの中身で、鍵ファイル方式で暗号化されたファイルを復号する。復号した内容は、消去する型で返す。
 pub fn decrypt_import_with_key_file(
     ciphertext: &[u8],
     key_file_contents: &SecretString,
-) -> Result<Vec<u8>, ExportError> {
+) -> Result<Zeroizing<Vec<u8>>, ExportError> {
     let identity = parse_key_file(key_file_contents.expose_secret())?;
-    match age::decrypt(&identity, ciphertext) {
+    // ヘッダーが読み取れない(ageのファイルではない・大きすぎる)ファイルは、復号を試さない(理由はMAX_HEADER_BYTES)。
+    detect_import_method(ciphertext).map_err(|_| ExportError::CorruptedData)?;
+    match decrypt_to_zeroizing(&identity, ciphertext) {
         Ok(plaintext) => Ok(plaintext),
         Err(age::DecryptError::NoMatchingKeys) => Err(ExportError::KeyFileDoesNotMatch),
         Err(_) => Err(ExportError::CorruptedData),
     }
 }
 
+// ageの復号(age::decryptと同じ処理)を、復号した内容が、消去される型で返す形で行う。age::decryptは、空のVecへ読み足すため、
+// 伸長のたびに、平文を含む旧バッファが、消去されずに解放される。平文は暗号文より短いため、暗号文と同じ大きさを先に確保する。
+fn decrypt_to_zeroizing(
+    identity: &impl age::Identity,
+    ciphertext: &[u8],
+) -> Result<Zeroizing<Vec<u8>>, age::DecryptError> {
+    let decryptor = age::Decryptor::new_buffered(ciphertext)?;
+    let mut reader = decryptor.decrypt(std::iter::once(identity as &dyn age::Identity))?;
+    let mut plaintext = Zeroizing::new(Vec::with_capacity(ciphertext.len()));
+    reader.read_to_end(&mut plaintext)?;
+    Ok(plaintext)
+}
+
 /// 復号の結果。`passphrase_trimmed`は、入力のままでは復号できず、前後の空白・不可視文字を除いたパスフレーズで
 /// 復号できたことを表す(貼り付けで混ざった文字を、利用者へ知らせるため)。
 pub struct DecryptedImport {
-    pub plaintext: Vec<u8>,
+    pub plaintext: Zeroizing<Vec<u8>>,
     pub passphrase_trimmed: bool,
 }
 
 /// 復号した内容だけを返す(空白を除いて再試行したかは返さない)。テストが、復号の可否だけを確かめるために使う。
 #[cfg(test)]
 pub fn decrypt_import(ciphertext: &[u8], passphrase: SecretString) -> Result<Vec<u8>, ExportError> {
-    decrypt_with_whitespace_fallback(ciphertext, passphrase, MAX_WORK_FACTOR_LOG_N)
+    decrypt_with_whitespace_fallback(ciphertext, passphrase, MAX_WORK_FACTOR_LOG_N).map(|plaintext| plaintext.to_vec())
 }
 
 /// パスフレーズで復号する。入力のままでは復号できず、空白を除いて再試行して成功したかも返す。
@@ -139,10 +168,13 @@ pub fn decrypt_import_reporting_trim(
     ciphertext: &[u8],
     passphrase: SecretString,
 ) -> Result<DecryptedImport, ExportError> {
-    // 鍵ファイルで暗号化されたファイルは、パスフレーズでは復号できない。「パスフレーズが誤っている」とは別に、知らせる
-    // (ageのファイルとして読み取れない場合は、ここでは何もせず、下の復号の失敗に任せる)。
-    if matches!(detect_import_method(ciphertext), Ok(ImportMethod::KeyFile)) {
-        return Err(ExportError::KeyFileRequired);
+    // 鍵ファイルで暗号化されたファイルは、パスフレーズでは復号できない。「パスフレーズが誤っている」とは別に、知らせる。
+    // ヘッダーが読み取れない(ageのファイルではない・ヘッダーが大きすぎる)ファイルは、復号を試さずに、復号の失敗にする
+    // (復号は、ヘッダーの全体を解析するため、細工された巨大なヘッダーで、長時間ハングしないように。理由はMAX_HEADER_BYTES)。
+    match detect_import_method(ciphertext) {
+        Ok(ImportMethod::KeyFile) => return Err(ExportError::KeyFileRequired),
+        Err(_) => return Err(ExportError::DecryptionFailed),
+        Ok(ImportMethod::Passphrase) => {}
     }
     decrypt_with_whitespace_fallback_reporting(ciphertext, passphrase, MAX_WORK_FACTOR_LOG_N)
         .map(|(plaintext, passphrase_trimmed)| DecryptedImport { plaintext, passphrase_trimmed })
@@ -169,7 +201,7 @@ fn decrypt_with_whitespace_fallback(
     ciphertext: &[u8],
     passphrase: SecretString,
     max_log_n: u8,
-) -> Result<Vec<u8>, ExportError> {
+) -> Result<Zeroizing<Vec<u8>>, ExportError> {
     decrypt_with_whitespace_fallback_reporting(ciphertext, passphrase, max_log_n).map(|(plaintext, _)| plaintext)
 }
 
@@ -182,7 +214,7 @@ fn decrypt_with_whitespace_fallback_reporting(
     ciphertext: &[u8],
     passphrase: SecretString,
     max_log_n: u8,
-) -> Result<(Vec<u8>, bool), ExportError> {
+) -> Result<(Zeroizing<Vec<u8>>, bool), ExportError> {
     // 最初の試行がパスフレーズを消費するため、再試行用の値は先に作る。再試行の候補が無い
     // (通常の)場合は作らず、機微な値のコピーを増やさない。
     let fallback = retry_candidate(passphrase.expose_secret())
@@ -203,10 +235,14 @@ fn decrypt_import_with_max_work_factor(
     ciphertext: &[u8],
     passphrase: SecretString,
     max_log_n: u8,
-) -> Result<Vec<u8>, ExportError> {
+) -> Result<Zeroizing<Vec<u8>>, ExportError> {
+    // ヘッダーが読み取れない(ageのファイルではない・大きすぎる)ファイルは、復号を試さない(理由はMAX_HEADER_BYTES)。
+    if detect_import_method(ciphertext).is_err() {
+        return Err(ExportError::DecryptionFailed);
+    }
     let mut identity = Identity::new(passphrase);
     identity.set_max_work_factor(max_log_n);
-    match age::decrypt(&identity, ciphertext) {
+    match decrypt_to_zeroizing(&identity, ciphertext) {
         Ok(plaintext) => Ok(plaintext),
         // ExcessiveWorkはパスフレーズを試す前に、暗号文自身が埋め込むワークファクタと
         // このマシンのキャリブレーション値だけで決まる(パスフレーズの正誤とは無関係)。
@@ -240,7 +276,7 @@ mod tests {
 
         let decrypted = decrypt_import_with_key_file(&exported.ciphertext, &exported.key_file_contents).unwrap();
 
-        assert_eq!(decrypted, KEY_FILE_PLAINTEXT);
+        assert_eq!(decrypted.as_slice(), KEY_FILE_PLAINTEXT);
     }
 
     #[test]
@@ -283,7 +319,66 @@ mod tests {
 
         let decrypted = decrypt_import_with_key_file(&exported.ciphertext, &edited).unwrap();
 
-        assert_eq!(decrypted, KEY_FILE_PLAINTEXT);
+        assert_eq!(decrypted.as_slice(), KEY_FILE_PLAINTEXT);
+    }
+
+    // メモ帳などが、UTF-8で保存し直すと、先頭にBOMが付く。鍵の中身は同じなので、読み取れる。
+    #[test]
+    fn a_key_file_with_a_byte_order_mark_is_accepted() {
+        let exported = encrypt_for_export_with_new_key(KEY_FILE_PLAINTEXT).unwrap();
+        let with_bom = SecretString::from(format!("\u{FEFF}{}", exported.key_file_contents.expose_secret()));
+
+        let decrypted = decrypt_import_with_key_file(&exported.ciphertext, &with_bom).unwrap();
+
+        assert_eq!(decrypted.as_slice(), KEY_FILE_PLAINTEXT);
+    }
+
+    // 上限を超える大きさのヘッダー(細工されたファイル。未知の受け手を、大量に並べる)。ageの解析は、ヘッダーの長さの二乗の時間を
+    // 要し、64KiBで数秒(リリースビルド)、上限の8MiBでは何時間にもなる。解析せずに拒否する。
+    fn oversized_header_file() -> Vec<u8> {
+        let mut data = b"age-encryption.org/v1\n".to_vec();
+        let stanza = format!("-> grease {}\n{}\n", "A".repeat(43), "A".repeat(43));
+        while data.len() < 16 * 1024 {
+            data.extend_from_slice(stanza.as_bytes());
+        }
+        data.extend_from_slice(format!("--- {}\n", "A".repeat(43)).as_bytes());
+        data.extend_from_slice(&[0u8; 16]);
+        data
+    }
+
+    #[test]
+    fn an_oversized_header_is_rejected_without_being_parsed() {
+        let started = std::time::Instant::now();
+
+        let method = detect_import_method(&oversized_header_file());
+
+        assert!(matches!(method, Err(ExportError::NotAnExportFile)), "大きすぎるヘッダーは、拒否されるはず");
+        assert!(started.elapsed() < std::time::Duration::from_secs(5), "拒否に時間がかかりすぎた: {:?}", started.elapsed());
+    }
+
+    #[test]
+    fn decrypting_an_oversized_header_fails_at_once_for_both_methods() {
+        let data = oversized_header_file();
+        let some_key = encrypt_for_export_with_new_key(KEY_FILE_PLAINTEXT).unwrap();
+        let started = std::time::Instant::now();
+
+        let by_passphrase = decrypt_import_reporting_trim(&data, passphrase("pw"));
+        let by_key_file = decrypt_import_with_key_file(&data, &some_key.key_file_contents);
+
+        assert!(matches!(by_passphrase, Err(ExportError::DecryptionFailed)));
+        assert!(matches!(by_key_file, Err(ExportError::CorruptedData)));
+        assert!(started.elapsed() < std::time::Duration::from_secs(5), "拒否に時間がかかりすぎた: {:?}", started.elapsed());
+    }
+
+    // 対照: 正規のヘッダー(どちらの方式も、受け手が1つ)は、上限に十分収まる。
+    #[test]
+    fn the_headers_of_both_methods_fit_the_limit_with_room_to_spare() {
+        let with_passphrase = encrypt_for_export(KEY_FILE_PLAINTEXT, passphrase("correct-horse")).unwrap();
+        let with_key = encrypt_for_export_with_new_key(KEY_FILE_PLAINTEXT).unwrap();
+        for (label, data) in [("パスフレーズ", &with_passphrase), ("鍵ファイル", &with_key.ciphertext)] {
+            let header_end = data.windows(5).position(|w| w == b"\n--- ").expect("ヘッダーの終わりがあるはず");
+            assert!(header_end * 4 < MAX_HEADER_BYTES, "{label}のヘッダーが、上限の4分の1を超えている({header_end}バイト)");
+        }
     }
 
     #[test]
@@ -399,7 +494,7 @@ mod tests {
 
         let result = decrypt_import_with_max_work_factor(&encrypted, passphrase("pw"), 4);
 
-        assert_eq!(result.unwrap(), b"secret");
+        assert_eq!(result.unwrap().as_slice(), b"secret");
     }
 
     #[test]
@@ -486,7 +581,7 @@ mod tests {
 
         let padded = decrypt_import_reporting_trim(&encrypted, passphrase(" correct-horse\n")).unwrap();
         assert!(padded.passphrase_trimmed, "空白を除いて再試行して復号できたときは、除いたと報告する");
-        assert_eq!(padded.plaintext, b"secret");
+        assert_eq!(padded.plaintext.as_slice(), b"secret");
     }
 
     #[test]

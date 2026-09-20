@@ -200,6 +200,37 @@ async function holdSaveDialogCounting() {
   });
 }
 
+// 鍵ファイルの保存ダイアログの結果を、settleSaveKeyDialogが呼ばれるまで保留し、ダイアログを開こうとした回数(差し替え値が
+// 参照された回数)を数える。
+async function holdSaveKeyDialogCounting() {
+  await browser.tauri.execute(() => {
+    const w = window as unknown as {
+      __e2eFileDialogPaths?: object;
+      __e2eSaveKeyControl?: { resolve: (path: string | null) => void };
+      __e2eSaveKeyCalls?: number;
+    };
+    w.__e2eSaveKeyCalls = 0;
+    const pending = new Promise<string | null>((resolve) => {
+      w.__e2eSaveKeyControl = { resolve };
+    });
+    const paths = {};
+    Object.defineProperty(paths, "saveKey", {
+      enumerable: true,
+      get() {
+        w.__e2eSaveKeyCalls = (w.__e2eSaveKeyCalls ?? 0) + 1;
+        return pending;
+      },
+    });
+    w.__e2eFileDialogPaths = paths;
+  });
+}
+
+async function saveKeyDialogCalls(): Promise<number> {
+  return browser.tauri.execute(
+    () => (window as unknown as { __e2eSaveKeyCalls?: number }).__e2eSaveKeyCalls ?? 0
+  );
+}
+
 async function saveDialogCalls(): Promise<number> {
   return browser.tauri.execute(
     () => (window as unknown as { __e2eSaveCalls?: number }).__e2eSaveCalls ?? 0
@@ -2461,7 +2492,7 @@ describe("エクスポートの実行(ファイルダイアログの差し替え
     await openProfileManagement();
     await openExportMethodDialogFromRow(profileName);
     const dialog = await chooseKeyFileExportMethod();
-    expect(await dialog.getText()).toContain("この鍵ファイルを紛失すると、このプロファイルは二度と復号できません。");
+    expect(await dialog.getText()).toContain("この鍵ファイルを紛失すると、エクスポートしたファイルは二度と復号できません。");
     await (await dialog.$("button=エクスポート")).click();
     // 書き込みが終わると、画面は閉じる(鍵は、画面へ渡さないため、見せるものが無い)。
     await dialog.waitForExist({ reverse: true, timeout: 15000 });
@@ -2628,6 +2659,36 @@ describe("エクスポートの実行(ファイルダイアログの差し替え
     await holdExportWrite();
     await settleSaveKeyDialog({ path: keyPath });
     await expectNoExportWriteStarted([keyPath, smxPath]);
+    await returnToMainScreen();
+  });
+
+  it("鍵ファイルのエクスポートを、同じ瞬間に2回押しても、鍵ファイルの保存先の選択は、1回だけ実行される", async () => {
+    await completeInitialSetup();
+    const profileName = "E2E鍵ファイル二重実行確認";
+    await createProfileViaIpc(profileName);
+    await openProfileManagement();
+    await openExportMethodDialogFromRow(profileName);
+    const dialog = await chooseKeyFileExportMethod();
+    await holdSaveKeyDialogCounting();
+
+    // 1回のJSタスクの中で2回押す(描画される前なので、ボタンはまだ無効になっていない)。
+    await browser.tauri.execute(() => {
+      const button = Array.from(document.querySelectorAll('[role="dialog"] button')).find(
+        (b) => b.textContent?.trim() === "エクスポート"
+      ) as HTMLButtonElement | undefined;
+      if (!button) throw new Error("エクスポートのボタンが見つからない");
+      button.click();
+      button.click();
+    });
+    await waitForDialogText(dialog, "鍵ファイルの保存先を選択しています");
+    await browser.pause(300);
+    expect(await saveKeyDialogCalls()).toBe(1);
+
+    // 後片付け: 選択を取り消し、画面を閉じる。
+    await settleSaveKeyDialog({ path: null });
+    await (await dialog.$("button=エクスポート")).waitForEnabled({ timeout: 10000 });
+    await (await dialog.$("button=キャンセル")).click();
+    await dialog.waitForExist({ reverse: true, timeout: 10000 });
     await returnToMainScreen();
   });
 

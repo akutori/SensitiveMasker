@@ -52,7 +52,7 @@ export function ExportKeyFileModal({ open, onOpenChange, target, phase, onExport
             エクスポートしたファイルを復号するための鍵ファイル(.smxkey)を、別に保存します。鍵ファイルは、エクスポートした
             ファイルとは別の場所に、保管してください。
           </p>
-          <p className="font-medium">この鍵ファイルを紛失すると、このプロファイルは二度と復号できません。</p>
+          <p className="font-medium">この鍵ファイルを紛失すると、エクスポートしたファイルは二度と復号できません。</p>
           {/* 実行の進み具合。領域は、実行の前から置いておく(領域ごと後から現れると、読み上げられないことがあるため)。
               1行分の高さを常に確保し、文が出入りしても、画面の高さが動かないようにする。 */}
           <p className="min-h-5 text-muted-foreground" aria-live="polite">

@@ -5,6 +5,7 @@ mod bulk;
 mod crypto;
 mod db;
 mod export;
+mod export_files;
 mod key;
 mod paths;
 
@@ -18,7 +19,11 @@ use secrecy::SecretBox;
 use zeroize::{Zeroize, Zeroizing};
 
 pub use bulk::ExportPayload;
-pub use export::{detect_import_method, ImportMethod, KeyFileExport, KEY_FILE_EXTENSION};
+pub use export::{
+    detect_import_method, ImportMethod, KeyFileExport, KEY_FILE_EXTENSION,
+    MAX_HEADER_BYTES as MAX_EXPORT_HEADER_BYTES,
+};
+pub use export_files::write_key_file_export;
 pub use key::FileProtection;
 pub use paths::{normalize_and_reject_special_forms, AppPaths, PathError};
 // masker/gui側がexport_profile/import_profileにパスフレーズを渡す際、profile-storeが
@@ -209,7 +214,7 @@ impl ProfileStore {
     /// マッピングテーブルのキー等で使うため)。
     pub fn create_profile(&mut self, profile: &RuleProfile) -> Result<i64, ProfileStoreError> {
         let name = profile.profile_name();
-        let json = Zeroizing::new(serde_json::to_vec(profile).expect("RuleProfileのシリアライズは失敗しない"));
+        let json = to_json_zeroizing(profile);
         let encrypted = crypto::encrypt(&self.key, &json, name.as_bytes());
 
         // INSERTと「アクティブ未設定なら自動的にアクティブにする」settings更新を1つの
@@ -255,7 +260,7 @@ impl ProfileStore {
     fn single_export_json(&self, name: &str) -> Result<Zeroizing<Vec<u8>>, ProfileStoreError> {
         let exported = self.read_exported_profile(name)?;
         let payload = ExportPayload::Single { format_version: bulk::CURRENT_FORMAT_VERSION, profile: exported };
-        Ok(Zeroizing::new(serde_json::to_vec(&payload).expect("ExportPayloadのシリアライズは失敗しない")))
+        Ok(to_json_zeroizing(&payload))
     }
 
     /// 全プロファイル+タグ+お気に入り+アクティブプロファイル名をパスフレーズで
@@ -287,7 +292,7 @@ impl ProfileStore {
             active_profile_name,
             profiles,
         };
-        Ok(Zeroizing::new(serde_json::to_vec(&payload).expect("ExportPayloadのシリアライズは失敗しない")))
+        Ok(to_json_zeroizing(&payload))
     }
 
     /// `export_profile`/`export_all`が生成したバイト列を復号し、書き込み内容を計算する
@@ -366,8 +371,7 @@ impl ProfileStore {
         // previewは、借用で使う。関数を抜けるとき(成功・失敗のどちらでも)に、dropで内容が消去される。
         match &preview {
             ImportPreview::Single { name, exported } => {
-                let encrypted_json =
-                    Zeroizing::new(serde_json::to_vec(&exported.profile).expect("RuleProfileのシリアライズは失敗しない"));
+                let encrypted_json = to_json_zeroizing(&exported.profile);
                 let encrypted = crypto::encrypt(&self.key, &encrypted_json, name.as_bytes());
 
                 let tx = self.conn.transaction()?;
@@ -399,9 +403,7 @@ impl ProfileStore {
                         // 暗号文の自己申告とAAD/DB上の名前が食い違う状態が生まれ、元プロファイル
                         // 削除後に、信頼している名前がインポート由来のルール集合を指すようになりうる。
                         let renamed_profile = renamed_profile_for_import(&entry.resolved_name, exported)?;
-                        let json = Zeroizing::new(
-                            serde_json::to_vec(&*renamed_profile).expect("RuleProfileのシリアライズは失敗しない"),
-                        );
+                        let json = to_json_zeroizing(&*renamed_profile);
                         Ok(PreparedEntry {
                             resolved_name: &entry.resolved_name,
                             encrypted: crypto::encrypt(&self.key, &json, entry.resolved_name.as_bytes()),
@@ -486,7 +488,7 @@ impl ProfileStore {
     /// 参照のため、名前変更の影響を受けない。
     pub fn update_profile(&mut self, old_name: &str, new_profile: &RuleProfile) -> Result<(), ProfileStoreError> {
         let new_name = new_profile.profile_name();
-        let json = Zeroizing::new(serde_json::to_vec(new_profile).expect("RuleProfileのシリアライズは失敗しない"));
+        let json = to_json_zeroizing(new_profile);
         let encrypted = crypto::encrypt(&self.key, &json, new_name.as_bytes());
 
         let tx = self.conn.transaction()?;
@@ -703,11 +705,10 @@ pub fn decrypt_import_payload_with_key_file(
 }
 
 // 復号した平文のJSONを、ペイロードへ読み取る(規模の検査を、型付きのデシリアライズの前に行う)。平文は、使い終えたときに消去する。
-fn payload_from_plaintext(plaintext: Vec<u8>, passphrase_trimmed: bool) -> Result<DecryptedPayload, ProfileStoreError> {
-    let json = Zeroizing::new(plaintext);
+fn payload_from_plaintext(json: Zeroizing<Vec<u8>>, passphrase_trimmed: bool) -> Result<DecryptedPayload, ProfileStoreError> {
     check_import_size_limits(&json)?;
     let payload =
-        serde_json::from_slice(&json).map_err(|e| ProfileStoreError::CorruptProfileData(e.to_string()))?;
+        ExportPayload::from_json_slice(&json).map_err(|e| ProfileStoreError::CorruptProfileData(e.to_string()))?;
     Ok(DecryptedPayload { payload, passphrase_trimmed })
 }
 
@@ -735,7 +736,10 @@ fn renamed_profile_for_import(
         exported.profile.rules().to_vec(),
     )
     .map(Zeroizing::new)
-    .map_err(|e| ProfileStoreError::InvalidProfileName(e.to_string()))
+    .map_err(|e| match e {
+        masking_core::RuleProfileError::InvalidProfileName { reason } => ProfileStoreError::InvalidProfileName(reason),
+        other => ProfileStoreError::InvalidProfileName(other.to_string()),
+    })
 }
 
 fn check_format_version(found: u32) -> Result<(), ProfileStoreError> {
@@ -753,35 +757,35 @@ pub const MAX_RULES_PER_PROFILE: usize = 500;
 const MAX_TOTAL_RULES_PER_IMPORT: usize = 2000;
 
 /// `ExportPayload`への型付きデシリアライズ(各ルールの正規表現を実際にコンパイルする
-/// `Rule::new`経由)を行う前に、プロファイル数・ルール数を`serde_json::Value`として
-/// 構造的に(regexへは一切触れずに)検査する。巨大な数のルールを仕込んだ悪意ある
-/// ファイルによるコンパイルコストの積み上げを、型付きデシリアライズ自体が走る前に
-/// 防ぐため。JSON自体が不正な形の場合はここでは何も拒否せず、後続の
+/// `Rule::new`経由)を行う前に、プロファイル数・ルール数を、構造的に(regexへは一切触れずに)検査する。
+/// 巨大な数のルールを仕込んだ悪意あるファイルによるコンパイルコストの積み上げを、型付き
+/// デシリアライズ自体が走る前に防ぐため。JSON自体が不正な形の場合はここでは何も拒否せず、後続の
 /// 型付きデシリアライズが持つ`CorruptProfileData`に判断を委ねる。
+///
+/// ルールの中身(パターン・固定値など)は、`IgnoredAny`で読み飛ばし、どこにも複製しない(`serde_json::Value`へ
+/// 読むと、平文の全体の複製が、消去されずに残る)。
 fn check_import_size_limits(json: &[u8]) -> Result<(), ProfileStoreError> {
-    let Ok(value) = serde_json::from_slice::<serde_json::Value>(json) else {
+    let Ok(probe) = serde_json::from_slice::<SizeProbe>(json) else {
         return Ok(());
     };
 
     // 単一/全体の判別は、実際のExportPayloadデシリアライズと同じ"kind"タグを基準にする
     // ("profiles"キーの有無等の周辺的な手がかりで代用すると、実際のデシリアライズが
     // 無視する余分なキーを足すだけで判定をすり抜けられる)。
-    let rule_counts: Vec<usize> = match value.get("kind").and_then(serde_json::Value::as_str) {
+    let rule_counts: Vec<usize> = match probe.kind.as_deref() {
         Some("all") => {
-            let profiles = value.get("profiles").and_then(serde_json::Value::as_array);
-            let profiles = match profiles {
-                Some(profiles) => profiles,
-                None => return Ok(()),
+            let Some(profiles) = probe.profiles else {
+                return Ok(());
             };
             if profiles.len() > MAX_PROFILES_PER_IMPORT {
                 return Err(ProfileStoreError::ImportTooLarge(format!(
                     "プロファイル数が上限({MAX_PROFILES_PER_IMPORT}件)を超えています"
                 )));
             }
-            profiles.iter().map(rule_count_of).collect()
+            profiles.iter().map(ProfileProbe::rule_count).collect()
         }
-        Some("single") => match value.get("profile") {
-            Some(profile) => vec![rule_count_of(profile)],
+        Some("single") => match probe.profile {
+            Some(profile) => vec![profile.rule_count()],
             None => return Ok(()),
         },
         // 未知のkindは、この後の型付きデシリアライズが持つCorruptProfileData等の
@@ -805,6 +809,50 @@ fn check_import_size_limits(json: &[u8]) -> Result<(), ProfileStoreError> {
     }
 
     Ok(())
+}
+
+// 規模の検査(check_import_size_limits)が読む、必要な部分だけ(種別・プロファイル・ルールの数)。
+#[derive(serde::Deserialize)]
+struct SizeProbe {
+    kind: Option<String>,
+    profiles: Option<Vec<ProfileProbe>>,
+    profile: Option<ProfileProbe>,
+}
+
+#[derive(serde::Deserialize)]
+struct ProfileProbe {
+    rules: Option<Vec<serde::de::IgnoredAny>>,
+}
+
+impl ProfileProbe {
+    fn rule_count(&self) -> usize {
+        self.rules.as_ref().map_or(0, Vec::len)
+    }
+}
+
+// 値をJSONへ直列化した結果を、消去する型で返す。serde_json::to_vecは、小さなバッファから伸長しながら書くため、伸長のたびに、
+// 平文(ルールのパターン・固定値など)を含む旧バッファが、消去されずに解放される。先に、出力の長さを数え(数える処理は、出力を
+// どこにも残さない)、その大きさを、1回で確保する。
+fn to_json_zeroizing<T: serde::Serialize + ?Sized>(value: &T) -> Zeroizing<Vec<u8>> {
+    let mut counter = CountingWriter(0);
+    serde_json::to_writer(&mut counter, value).expect("直列化は失敗しない");
+    let mut json = Zeroizing::new(Vec::with_capacity(counter.0));
+    serde_json::to_writer(&mut *json, value).expect("直列化は失敗しない");
+    json
+}
+
+// 書き込まれたバイト数だけを数える(内容は、保持しない)。
+struct CountingWriter(usize);
+
+impl std::io::Write for CountingWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0 += buf.len();
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 struct RuleCounts {
@@ -1580,6 +1628,306 @@ mod tests {
         assert_eq!(watch.tracked_count(), PROFILE_TEXTS, "追跡する文字列を、取りこぼしている");
         drop(renamed);
         watch.assert_all_wiped_when_freed();
+    }
+
+    // ---- 消去されない複製の確認(wipe_check::MarkerScan) ----
+    //
+    // 経路の途中で、ライブラリ(serde・age・暗号化)が、内部で作る複製・伸長で捨てられる旧バッファは、Watchで追跡できない。
+    // ルールのパターン・固定値・タグに、目印を入れ、経路を通した間に、目印を含んだまま解放された実体が、0件であることを確かめる。
+    // 対象はリテラルのルール(正規表現のルールは、regexクレートが、パターンの写しを内部に持ち、消去できない)。
+    //
+    // 復号の入力は、固定の暗号文(下のleak_vectors)を使う: このプロセスで暗号化すると、ageが、平文の1チャンクを消去せずに
+    // 解放し、その領域が、後の確保で再利用される(残った平文の断片が、別の確保の中に、目印として残る)ため、復号の窓に、
+    // 混ざってしまう。数え上げは、プロセス全体の解放を見るため、同じ目印を使うテストは、直列に実行する(LEAK_SCAN_LOCK)。
+    // それでも、アロケータの再利用の揺らぎで、まれに1件が混ざる(ライブラリの内部にも、縮めるときに領域を移すものがある)ため、
+    // 窓を複数回行い、どの回にも残った件数(最小)で判断する: 本物の複製は、何度行っても残る。
+
+    static LEAK_SCAN_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn lock_leak_scan() -> std::sync::MutexGuard<'static, ()> {
+        LEAK_SCAN_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn leaks_in_every_attempt(mut window: impl FnMut() -> usize) -> usize {
+        (0..3).map(|_| window()).min().unwrap()
+    }
+
+    // 固定の暗号文。目印を含むプロファイル(名前work・リテラルのルール1件・タグ1件)を、エクスポートしたもの。
+    // 鍵ファイルの改行は|で表す。パスフレーズ方式は、パスフレーズ"correct-horse"で、ワークファクタを4に下げてある。
+    mod leak_vectors {
+        pub const PLAIN_MARKER: &str = "leak-scan-plain-6c1e93";
+        pub const ESCAPED_MARKER: &str = "leak-\"scan\\-escaped-9e1f27";
+        pub const PASSPHRASE: &str = "correct-horse";
+        pub const PLAIN_SINGLE_KEY_FILE: &str = "# SensitiveMasker export key file|# Keep this file safe. Without it, the exported file cannot be decrypted.|AGE-SECRET-KEY-1PKADYA7R7M053SHPUT37VJX4T3NEMYFZJCT4WT8PKCURQQA6W2ASDE4SQX|";
+        pub const PLAIN_SINGLE_KEY_CIPHERTEXT: &str = "6167652d656e6372797074696f6e2e6f72672f76310a2d3e2058323535313920324e6d4874784c42432b4475684a56303059763744672f354330634473597565362b6862394c2b6c4678490a4866413135734f6c36504f47636c3575784b376f753278306d6b4e4b7a6639454a6a54514e46434e6e75450a2d3e2040266b763f5c2d677265617365203e6e5668762720316524526d2034327e75667c2053317747260a4264537177412f506e394378417067484c76423567423773777750544f46744761766f794a44427a7a3065534a546156345a7746413565726e617346414e706b0a5732656835645841487643390a2d2d2d204e6149754e4833775978666a4c78385764536d4e79466275392b715962654739365a3575714a6d667743450a52362fb09ebe8d254488b57a48324fe2cc0198768ab42a491839adf3036baa74600162a546fffc2722ec0b0cdf67fe44f54f97a50fbfcc6189068fe9950236230e444fe2eac399ba62d650e0bc37e3983c1baa3b897232d3d2e54159aa47ea46947b5a5eb29259e7e531dfd62659632480a184b914e2e31f38f941148244aa3ec0f33b28b90e1406473b511b4ab29845dcf280c6496e21c816ad777c33404d654d9664f65318e96a535a5dcc6431c47b0a0aa4d4d7b3a77f740d9ab1ad7f76bfdf5d152a83a0ee495aec2b41f41db859bac9e48bc6f0bbe05b4bdb358752bb89fb957b12ee670c8f55932ac1aa7a97f94aa8affe3afe2d5a572b7b9949ea6118740ddfdd151fade72ba349e409b530433cd323c36e657c63ba694ed2d49764496c2e03d8ef7761a70042bcdabe10e219458d068b147afad607a99ab39c057b4c604ab630a35fc2fbb2168c815aa0a5d2148e36332f184661b0cc8d92fc120c1219b4be459c32a98333e880ec125e88b5f2f72f662612ac55ac5990743450f6098c";
+        pub const PLAIN_SINGLE_PASS_CIPHERTEXT: &str = "6167652d656e6372797074696f6e2e6f72672f76310a2d3e207363727970742044636d2b63362b436739795a6d53786a565639756f4120340a444c7265554e677a6d587775507568466f4d6e5a79333856515455794335564363346233756e426f6f624d0a2d2d2d20746b444135502f58346d48506863735a5a692f634b53374f4b7a3675396c3956725667577a53426b4235490abf554770d45c1d0ec8913b75a143fad6229b092128fc9e58720bbc9cac8ed73861559affc50a473925c60b6d6b87db3db66abcd31f6b9a457fef35573654617ea6547d3e42a07dfd85d29c243935e232867ce647fe2b4d23da1e698c8ccadb66cad6aaa362fa34fed12c1bebce1d4b34ed5cc9b0b7ee521a72c33cef3d3a27bc374cc292b6c2c756323eb55fb21ca2cae28c4eb6a554ac422023b0dd50d9f9496b25880f4515efdee9f92551bf32808048d3e3a8d566cb709edafb1aca4ca8919dd61d8d31a60a1464cf7a52cbf90b9fa70cae22272b258da049a8ff6fb89ca8f622835c1c250d8e541b8fdad0143e88407fc8e2543f7c0f546c6803537498e54410f46af134d83f97e96e7a208848ea4d321b3ed25cf758bead064930f77242758eb88bc97c3aace1088773ae7ec81b513fff755d447e808bdfb6acc21a98d1e8796c7b831973ab5b7f829ffbeaf2219c4ad9aa538daa9e1ca6147f672c113c75fb54af9e8518ab63ced1751da235b5ff7933ed9512da38cd8d9f183272d012b4";
+        pub const PLAIN_ALL_KEY_FILE: &str = "# SensitiveMasker export key file|# Keep this file safe. Without it, the exported file cannot be decrypted.|AGE-SECRET-KEY-1WJX0R37RYGLAAL75KM4LWYVMA2XJXNXWR0DMNJ66Q5VST98XWYXSSMJNQT|";
+        pub const PLAIN_ALL_KEY_CIPHERTEXT: &str = "6167652d656e6372797074696f6e2e6f72672f76310a2d3e20583235353139205153485a317230454a72566867436856695437455a563954705474466a532b6c3876516d483531444a6b340a433669736848665a6b2b6f676a76743451466e672f634a4274307233706d58756d79753467463066624e6b0a2d3e20732d6772656173650a774d422b5463304341744a4e53664c5243672f4c6f643855546e345048717234646a65324e6c3459724a4a734d62763871424c394a41644e62466139374e43520a4c4230354339314575784c5168726d7a4e6e394c5633794d4247462b784a424b0a2d2d2d20655370376b6845354c62506a6f645432587954307847464e7575702f636434516f566a4d6962625a7237380ade0c7a767a974b65dbc62ad1ce5e173df7292f6c0ad50fe619fb6341ac6f26db6079467e2e233d94c15ff3503f3a4af67bb95902435b09a7f4db8b6361acd26da87a1987439bfdc3304946c86549e71996c282ed63b0e9d3ce2f65642d23e5615eb9fd7fe98c2bba908ec76d97134f7428fe76ee2a4d3809d3c207631e855661244351c6ec4fb5a9f9a567d6886f2de6336262e9199742f075126876b3d208ed031e0178799ea4722c4b1772db983a97841ba47370f3b226a1929f1646e7e772ce223a8b90bae5657bb81f9acbd26033fbaec15ea8983f28789dd4d992ff668f2df084c7d3bdc894e3cb51423213fffd522ceedebd7dbeed178351b4f113cb836a14fe755a3275d38afbc04533ca21cdda298bb985203a91f25d1c93bf4bd35b5005b443296d5656c3f8badab7cba79e29550addd9b8182da4bdf7b27b642eaf5c3dbed8535853c61ca68046c27d74a085d22b2696486dea017dc47210ff63f21a9c60fd3611cc1c22aab74e9b9bd0e0bc058517b0859a7d596a4dace6f6b304f1797bbdcb422a4636aafc655e399509c23d5149cea618aef7863719f529";
+        pub const ESCAPED_SINGLE_KEY_FILE: &str = "# SensitiveMasker export key file|# Keep this file safe. Without it, the exported file cannot be decrypted.|AGE-SECRET-KEY-1SCW6MKSY87G9C0Q5MFRD2DHJJETTTDPF94KY5AQYR6UZVSAP0ZMS4EXKRJ|";
+        pub const ESCAPED_SINGLE_KEY_CIPHERTEXT: &str = "6167652d656e6372797074696f6e2e6f72672f76310a2d3e205832353531392030356662726f42775135786974665462474e492f2b7443443167572b6f495967716377524979334e4468590a452f4b74322f3653374c592b2f76687853422b596a385379556b39683332555672414a4c746d38546466380a2d3e204b3c5b787d2d6772656173650a56764678575762524561672f4f316f447462633045425230724c7246707032516c6774385176443578524a492f5a494b496846376f76437a42314738757972440a2b70304b52704b304d5046696b69424652636e714272343435484b33483279584b744e4f704e6b394c6e50520a2d2d2d20366866612b736e685934546d6e6c3756324e4b6359465368506f557974545034384f5237576379525957450ac5aede4f99b84380d0c278c222fe5bc2ed2b1a11c7f5518866b7a3e477baec6258ea5a449c6c8efc39b0b8efbc3ca74c11178fca937e0b7024394b092f92bea3115d3b943581a6745a0ba8b2ae7ed98b4d7dd927555578cc78171e45f31b5fc8c60c08df3673dd751e097c6ff3ad4594a4ce95a48f17ebf181584584bb39ded90ab601e9077072c50479fa8d8ca6038628d2d6ab4e33baaffd1eb4d797942fb13a78dc32122c42922d0b9923214ca227fe824a98f0898470c1bb31924bef2d076e968dcc9f52307cb062ac5425ef5891cd96440e136ed946bb5ebf060e0e413e65ea041a6014ba60370ea68419aec5c07d95aa737bbabc50c0cf2ef323ce32ae8bcdc5f68cc465ee556766f4bb0ba8aaa9d5a3da4120e38f581a3fe3a71027c85809c869ca63c5ed286a97674bb34d453ce0da52a101aaf1701e075a9665a0e818f6b10dacd96eaae8ad56eb6dbdacba0c297955eedccef9aeae142c0239195bc6f195d52b72fdcd9c30749349125989993e0f46ed84463c26c5c857ee778f5b8071afc53f362a3857f15cfcf239aa2f81a72e";
+        pub const ESCAPED_SINGLE_PASS_CIPHERTEXT: &str = "6167652d656e6372797074696f6e2e6f72672f76310a2d3e2073637279707420673533374d6739666c37662b334f587075514e46685120340a38395a6f494730356543574a62756948515452324f316c78312b744a7476586d4d3179654c4d51594479490a2d2d2d206d584969314242426948624849723853534e61504f682f79743642695050315268534b4e492b43764d32550a681c99aeee6a71dc9d851cd7a3b96448ac2f0e8d0d5979114dc93f43342c0ee54b7fa23eea90b984ff240284b818d12272451ee89978a98b75cc16ef0e3eb7020c5dea4f2c2a82c51fa712bd14cc6704d7a1257eae473f8ef26bd7a8cc57402dc6306d205c1b5c3d713a49d850720bba4159540a3b8d633f4e4d18576bee606e47266d991ca4ddf513916d98348d11a46667400074887f64eba799bdd1af63b285ca87875f2a91907dbcb3691da11e8c640a86bb21690ccfa7943dd5d409c17752fed92d0a69bbd90b4f3c65b71f9c4dce6ad436cfa50d07b3c7b4ced5d5a82ac068a7c2883f20b97c3aec7c7caad3d5d109eaaa419e074e7639cb588e9e08efaee9ac88f5f41b4454b6d3f1f8c80f76d169d5a25bb306c4d9bf69c860464e7c2aca2da2c3fdb6144357705e02d2bd972caee7f396e5e9b474df94e9d1d92675110ddc2d9984f064e6243d4bb865a838e442d197aef8e9452c5c6f3cd54faca0fbc8baa3394374a04d1ffe318fd716b6227ab6a3dce3aa40088eda17a0020aba4f5c4342d57a02468b91b905736b18da08204b";
+    }
+
+    fn decode_hex(hex: &str) -> Vec<u8> {
+        (0..hex.len()).step_by(2).map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap()).collect()
+    }
+
+    fn vector_key_file(text: &str) -> SecretString {
+        SecretString::from(text.replace('|', "\n"))
+    }
+
+    fn vector_passphrase() -> SecretString {
+        SecretString::from(leak_vectors::PASSPHRASE.to_string())
+    }
+
+    fn vector_key_file_payload(ciphertext_hex: &str, key_file: &str) -> ExportPayload {
+        decrypt_import_payload_with_key_file(&decode_hex(ciphertext_hex), &vector_key_file(key_file)).unwrap().payload
+    }
+
+    // 目印を含む、リテラルのルールを持つプロファイル(パターン・固定値に、マスク対象の実際の値を想定)。
+    fn profile_carrying(marker: &str, name: &str) -> RuleProfile {
+        let rule = Rule::new(
+            "rule-one",
+            PatternType::Literal,
+            format!("pattern-{marker}"),
+            Mode::Fixed,
+            Some(format!("value-{marker}")),
+            None,
+            true,
+            None,
+        )
+        .unwrap();
+        // 説明にも、目印を入れる(JSONの先頭に近く、伸長で捨てられる小さな旧バッファにも、目印の全体が含まれる)。
+        RuleProfile::new(name, Some(format!("description-{marker}")), vec![rule]).unwrap()
+    }
+
+    #[test]
+    fn the_leak_vectors_decrypt_to_the_marked_profiles() {
+        let _guard = lock_leak_scan();
+        let by_key_file = vector_key_file_payload(leak_vectors::PLAIN_SINGLE_KEY_CIPHERTEXT, leak_vectors::PLAIN_SINGLE_KEY_FILE);
+        let by_passphrase =
+            decrypt_import_payload(&decode_hex(leak_vectors::PLAIN_SINGLE_PASS_CIPHERTEXT), vector_passphrase()).unwrap().payload;
+        let all = vector_key_file_payload(leak_vectors::PLAIN_ALL_KEY_CIPHERTEXT, leak_vectors::PLAIN_ALL_KEY_FILE);
+        let escaped = vector_key_file_payload(leak_vectors::ESCAPED_SINGLE_KEY_CIPHERTEXT, leak_vectors::ESCAPED_SINGLE_KEY_FILE);
+
+        // 目印を含む文字列を、新しく作らない(消去せずに解放すると、その領域が、後の確保に再利用され、別のテストの窓に混ざる)。
+        for (label, payload, marker) in [
+            ("鍵ファイル", by_key_file, leak_vectors::PLAIN_MARKER),
+            ("パスフレーズ", by_passphrase, leak_vectors::PLAIN_MARKER),
+            ("エスケープを含む値", escaped, leak_vectors::ESCAPED_MARKER),
+        ] {
+            let ExportPayload::Single { profile, .. } = &payload else { panic!("{label}: 単一のはず") };
+            assert_eq!(profile.profile.profile_name(), "work", "{label}");
+            assert!(profile.profile.rules()[0].pattern().ends_with(marker), "{label}");
+            assert!(profile.profile.rules()[0].fixed_value().unwrap().ends_with(marker), "{label}");
+            assert!(profile.tags.len() == 1 && profile.tags[0].ends_with(marker), "{label}");
+        }
+        let ExportPayload::All { profiles, .. } = &all else { panic!("全体のはず") };
+        assert!(profiles[0].profile.rules()[0].fixed_value().unwrap().ends_with(leak_vectors::PLAIN_MARKER));
+    }
+
+    #[test]
+    fn decrypting_a_key_file_export_leaves_no_unwiped_copy_of_the_rules() {
+        let _guard = lock_leak_scan();
+        let ciphertext = decode_hex(leak_vectors::PLAIN_SINGLE_KEY_CIPHERTEXT);
+        let key_file = vector_key_file(leak_vectors::PLAIN_SINGLE_KEY_FILE);
+
+        let leaks = leaks_in_every_attempt(|| {
+            let scan = wipe_check::MarkerScan::start(leak_vectors::PLAIN_MARKER);
+            let decrypted = decrypt_import_payload_with_key_file(&ciphertext, &key_file).unwrap();
+            drop(decrypted);
+            scan.finish()
+        });
+
+        assert_eq!(leaks, 0, "復号した内容の、消去されない複製が、どの回にも残っている");
+    }
+
+    #[test]
+    fn decrypting_a_passphrase_export_leaves_no_unwiped_copy_of_the_rules() {
+        let _guard = lock_leak_scan();
+        let ciphertext = decode_hex(leak_vectors::PLAIN_SINGLE_PASS_CIPHERTEXT);
+
+        let leaks = leaks_in_every_attempt(|| {
+            let passphrase = vector_passphrase();
+            let scan = wipe_check::MarkerScan::start(leak_vectors::PLAIN_MARKER);
+            let decrypted = decrypt_import_payload(&ciphertext, passphrase).unwrap();
+            drop(decrypted);
+            scan.finish()
+        });
+
+        assert_eq!(leaks, 0, "復号した内容の、消去されない複製が、どの回にも残っている");
+    }
+
+    #[test]
+    fn previewing_and_committing_an_import_leaves_no_unwiped_copy_of_the_rules() {
+        let _guard = lock_leak_scan();
+
+        let leaks = leaks_in_every_attempt(|| {
+            let payload =
+                vector_key_file_payload(leak_vectors::PLAIN_SINGLE_KEY_CIPHERTEXT, leak_vectors::PLAIN_SINGLE_KEY_FILE);
+            let (_dir, mut store) = empty_store();
+            let scan = wipe_check::MarkerScan::start(leak_vectors::PLAIN_MARKER);
+            let preview = store.resolve_import_preview(payload).unwrap();
+            store.commit_import(preview).unwrap();
+            let leaks = scan.finish();
+            assert_eq!(store.get_profile("work").unwrap().rules().len(), 1);
+            leaks
+        });
+
+        assert_eq!(leaks, 0, "取り込みの、消去されない複製が、どの回にも残っている");
+    }
+
+    // 名前が衝突して、名前を差し替えたプロファイルを保存する経路(全体のインポート)。
+    #[test]
+    fn committing_an_import_with_a_renamed_profile_leaves_no_unwiped_copy_of_the_rules() {
+        let _guard = lock_leak_scan();
+
+        let leaks = leaks_in_every_attempt(|| {
+            let payload = vector_key_file_payload(leak_vectors::PLAIN_ALL_KEY_CIPHERTEXT, leak_vectors::PLAIN_ALL_KEY_FILE);
+            // 取り込み先に、同じ名前のプロファイルがある(名前が、衝突する)。
+            let (_dir, mut store) = empty_store();
+            store.create_profile(&sample_profile("work")).unwrap();
+            let scan = wipe_check::MarkerScan::start(leak_vectors::PLAIN_MARKER);
+            let preview = store.resolve_import_preview(payload).unwrap();
+            store.commit_import(preview).unwrap();
+            let leaks = scan.finish();
+            assert_eq!(store.list_profiles().unwrap().len(), 2, "名前が衝突して、別名で取り込まれるはず");
+            leaks
+        });
+
+        assert_eq!(leaks, 0, "名前を差し替えた取り込みの、消去されない複製が、どの回にも残っている");
+    }
+
+    #[test]
+    fn saving_and_updating_a_profile_leaves_no_unwiped_copy_of_its_json() {
+        let _guard = lock_leak_scan();
+
+        let leaks = leaks_in_every_attempt(|| {
+            let (_dir, mut store) = empty_store();
+            let mut source = profile_carrying(leak_vectors::PLAIN_MARKER, "work");
+            let mut renamed = profile_carrying(leak_vectors::PLAIN_MARKER, "work2");
+            let scan = wipe_check::MarkerScan::start(leak_vectors::PLAIN_MARKER);
+            store.create_profile(&source).unwrap();
+            store.update_profile("work", &renamed).unwrap();
+            let leaks = scan.finish();
+            // テストの入力も、消去してから捨てる(消去せずに解放した領域が、後の確保に再利用され、別の窓に混ざるため)。
+            source.zeroize();
+            renamed.zeroize();
+            leaks
+        });
+
+        assert_eq!(leaks, 0, "保存の経路の、消去されない複製が、どの回にも残っている");
+    }
+
+    // エクスポートは、ageの暗号化(age::encrypt)が、平文の1チャンク(最大64KiB)を、消去しないVecで持つ(age 0.12.1の
+    // StreamWriter。ライブラリの内部で、アプリからは消去できない)ため、1回の暗号化につき1件までは、残る。それを超える複製
+    // (アプリの側の、平文のJSON・ルールの複製)が、残っていないことを確かめる。方式ごとに、別の目印・別のストアで行う
+    // (先の暗号化で残った断片が、後の窓に混ざらないように)。
+    #[test]
+    fn exporting_a_profile_leaves_no_unwiped_copy_beyond_the_age_chunk_buffer() {
+        let _guard = lock_leak_scan();
+        const KEY_FILE_MARKER: &str = "leak-scan-export-key-2c66f5";
+        const PASSPHRASE_MARKER: &str = "leak-scan-export-pass-8a10d4";
+
+        let key_file_leaks = leaks_in_every_attempt(|| {
+            let (_dir, mut store) = empty_store();
+            let mut source = profile_carrying(KEY_FILE_MARKER, "work");
+            store.create_profile(&source).unwrap();
+            let mut tags = vec![format!("tag-{KEY_FILE_MARKER}")];
+            store.set_profile_tags("work", &tags).unwrap();
+            tags.zeroize();
+            let scan = wipe_check::MarkerScan::start(KEY_FILE_MARKER);
+            let exported = store.export_profile_with_key_file("work").unwrap();
+            let leaks = scan.finish();
+            source.zeroize();
+            drop(exported);
+            leaks
+        });
+        let passphrase_leaks = leaks_in_every_attempt(|| {
+            let (_dir, mut store) = empty_store();
+            let mut source = profile_carrying(PASSPHRASE_MARKER, "work");
+            store.create_profile(&source).unwrap();
+            let mut tags = vec![format!("tag-{PASSPHRASE_MARKER}")];
+            store.set_profile_tags("work", &tags).unwrap();
+            tags.zeroize();
+            let scan = wipe_check::MarkerScan::start(PASSPHRASE_MARKER);
+            let exported = store.export_profile("work", vector_passphrase()).unwrap();
+            let leaks = scan.finish();
+            source.zeroize();
+            drop(exported);
+            leaks
+        });
+
+        assert!(key_file_leaks <= 1, "鍵ファイル方式のエクスポートで、ageの内部を超える複製が残っている: {key_file_leaks}件");
+        assert!(passphrase_leaks <= 1, "パスフレーズ方式のエクスポートで、ageの内部を超える複製が残っている: {passphrase_leaks}件");
+    }
+
+    // 読み取りの後の検証(ルール名の重複)で拒否したときも、読み取った値(タグ・説明・ルールの中身)の、消去されない複製が、
+    // 残らない。
+    #[test]
+    fn a_rejected_payload_leaves_no_unwiped_copy_of_the_values_it_read() {
+        let _guard = lock_leak_scan();
+        const MARKER: &str = "leak-scan-rejected-b5c2e8";
+        // 目印を含む一時の文字列を、消去せずに解放しない(その領域が、窓の中の確保に再利用され、断片が、目印として数えられる
+        // ため)。1つの、消去する型の文字列へ、順に書き足す。
+        let mut json = zeroize::Zeroizing::new(String::with_capacity(2048));
+        json.push_str(r#"{"kind":"single","format_version":1,"profile":{"is_favorite":false,"tags":["tag-"#);
+        json.push_str(MARKER);
+        json.push_str(r#""],"profile_name":"p","description":"description-"#);
+        json.push_str(MARKER);
+        json.push_str(r#"","rules":["#);
+        for (index, pattern) in ["pattern-a-", "pattern-b-"].into_iter().enumerate() {
+            if index > 0 {
+                json.push(',');
+            }
+            json.push_str(r#"{"name":"dup","pattern_type":"literal","pattern":""#);
+            json.push_str(pattern);
+            json.push_str(MARKER);
+            json.push_str(r#"","mode":"fixed","fixed_value":"value-"#);
+            json.push_str(MARKER);
+            json.push_str(r#""}"#);
+        }
+        json.push_str("]}}");
+
+        let leaks = leaks_in_every_attempt(|| {
+            let scan = wipe_check::MarkerScan::start(MARKER);
+            let result = bulk::ExportPayload::from_json_slice(json.as_bytes());
+            assert!(result.is_err(), "ルール名が重複しているのに、読み取れた");
+            drop(result);
+            scan.finish()
+        });
+
+        assert_eq!(leaks, 0, "拒否した読み取りの、消去されない複製が、どの回にも残っている");
+    }
+
+    // エスケープが要る文字(引用符・バックスラッシュ)を含む値。serdeの内部タグ付きenum・flattenの読み取りは、値を、内部の
+    // バッファへ、いったん複製する(エスケープを含まない値は、元の文字列を借りるだけで、複製しない)ため、payloadは、その
+    // バッファを使わずに読む(ExportPayload::from_json_slice。古い読み取りは、この値で4件の複製が残った)。目印は、
+    // 複製された(エスケープを外した)値の中身と、同じ文字列である。残る1件は、serde_jsonが、エスケープを外すために持つ
+    // 作業用のバッファ(1回の読み取りにつき1件。ライブラリの内部で、アプリからは消去できない)。
+    #[test]
+    fn decrypting_an_export_with_escaped_values_leaves_no_unwiped_copy_of_the_rules() {
+        let _guard = lock_leak_scan();
+        let by_key_file_ciphertext = decode_hex(leak_vectors::ESCAPED_SINGLE_KEY_CIPHERTEXT);
+        let key_file = vector_key_file(leak_vectors::ESCAPED_SINGLE_KEY_FILE);
+        let by_passphrase_ciphertext = decode_hex(leak_vectors::ESCAPED_SINGLE_PASS_CIPHERTEXT);
+
+        let key_file_leaks = leaks_in_every_attempt(|| {
+            let scan = wipe_check::MarkerScan::start(leak_vectors::ESCAPED_MARKER);
+            let decrypted = decrypt_import_payload_with_key_file(&by_key_file_ciphertext, &key_file).unwrap();
+            drop(decrypted);
+            scan.finish()
+        });
+        let passphrase_leaks = leaks_in_every_attempt(|| {
+            let passphrase = vector_passphrase();
+            let scan = wipe_check::MarkerScan::start(leak_vectors::ESCAPED_MARKER);
+            let decrypted = decrypt_import_payload(&by_passphrase_ciphertext, passphrase).unwrap();
+            drop(decrypted);
+            scan.finish()
+        });
+
+        assert!(key_file_leaks <= 1, "鍵ファイル方式: エスケープを含む値の、消去されない複製が残っている: {key_file_leaks}件");
+        assert!(passphrase_leaks <= 1, "パスフレーズ方式: エスケープを含む値の、消去されない複製が残っている: {passphrase_leaks}件");
     }
 
     #[test]

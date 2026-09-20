@@ -31,6 +31,8 @@ fn write_text_file_impl(path: &str, content: &str, app_paths: Result<AppPaths, S
     let app_paths = app_paths?;
     let dest_parent = validated.parent().ok_or_else(|| "ファイルを書き込めませんでした".to_string())?;
     app_paths.reject_if_dir_is_inside_data_dir(dest_parent).map_err(|e| e.to_string())?;
+    // 親のフォルダが外でも、ハードリンク等で、鍵・DBの実体を指すパスは、拒否する。
+    app_paths.reject_if_file_is_app_data(&validated).map_err(|e| e.to_string())?;
     write_validated(&validated, content)
 }
 

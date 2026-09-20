@@ -17,7 +17,7 @@ import { useAppState, SMX_FILE_FILTERS, toImportPreviewRows } from "@/lib/app-st
 import { isExportImportError } from "@/lib/profile-ipc";
 import { openFileDialog, saveFileDialog } from "@/lib/file-dialog";
 import { actionOnHiddenToTray } from "@/lib/hidden-to-tray";
-import { KEY_FILE_FILTERS, keyFileNameOf } from "@/lib/key-file";
+import { KEY_FILE_FILTERS, keyFileExportBaseName, keyFileNameOf } from "@/lib/key-file";
 import { useImportKeyFile } from "@/lib/use-import-key-file";
 import { suppressContextMenu } from "@/lib/suppress-context-menu";
 import { useOnHiddenToTray } from "@/lib/use-on-hidden-to-tray";
@@ -137,6 +137,9 @@ function ProfilesRoute() {
   // 鍵ファイル方式のエクスポート画面を開いた回の番号(開くたびに増やす)。閉じて開き直した後に届く、古い操作の
   // 結果と、区別するため。
   const exportKeyFileSessionCounter = useRef(0);
+  // 鍵ファイル方式のエクスポートを実行している間だけtrue。画面の状態(phase)は、再描画されるまで反映されないため、同じ瞬間に
+  // 届いた2回目の押下が、古い状態(idle)を見て、二重に始めてしまうのを、同期的に読める印で防ぐ。
+  const keyFileExportRunning = useRef(false);
   // パスフレーズ入力画面で、復号している間だけtrue(理由はimport-passphrase-handlers.ts)。
   const importDecrypting = useRef(false);
   // この画面が所有する保留(復号の結果として、Rust側に保留された内容)の識別子。確認画面の確定・破棄・離脱は、
@@ -431,8 +434,10 @@ function ProfilesRoute() {
   // まだ何も書き出していないため、画面を閉じられる。閉じられていた(閉じた・別の画面へ移った)場合は、その選択の結果では、
   // 書き込まない。
   const exportWithKeyFile = async () => {
+    if (keyFileExportRunning.current) return;
     const shown = dialogRef.current;
     if (shown.kind !== "exportKeyFile" || shown.phase !== "idle") return;
+    keyFileExportRunning.current = true;
     const { session, profileId } = shown;
     const stillOpen = () => {
       const current = dialogRef.current;
@@ -455,8 +460,9 @@ function ProfilesRoute() {
       });
 
     try {
-      // プロファイル名を既定ファイル名に使わない理由は、exportToFileと同じ。
-      const baseName = profileId === null ? "sensitivemasker_all" : "sensitivemasker_export";
+      // プロファイル名を既定ファイル名に使わない理由は、exportToFileと同じ。日時を含めるのは、前のエクスポートの鍵ファイルを、
+      // 置き換えにくくするため(2つのファイルの名前を、そろえるため、ここで1回だけ決める)。
+      const baseName = keyFileExportBaseName(profileId === null, new Date());
       setPhase("choosingKeyFile");
       const keyDestPath = await chooseDestination(`${baseName}.smxkey`, KEY_FILE_FILTERS, "key");
       if (!keyDestPath || !stillOpen()) {
@@ -484,6 +490,8 @@ function ProfilesRoute() {
     } catch {
       // 失敗の通知は、appState側のtoastが行う。画面は開いたままにし、別の保存先で、やり直せるようにする。
       if (stillOpen()) setPhase("idle");
+    } finally {
+      keyFileExportRunning.current = false;
     }
   };
 

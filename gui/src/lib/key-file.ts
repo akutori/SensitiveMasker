@@ -5,6 +5,17 @@ export const KEY_FILE_EXTENSION = "smxkey";
 
 export const KEY_FILE_FILTERS = [{ name: "SensitiveMaskerの鍵ファイル", extensions: [KEY_FILE_EXTENSION] }];
 
+// 鍵ファイル方式のエクスポートの、既定のファイル名(拡張子の前)。日時を含める: 固定の名前だと、2回目のエクスポートで、
+// 前のエクスポートの鍵ファイルを、置き換えてしまいやすい(置き換えると、前のエクスポートしたファイルを、別の名前で
+// 残していても、二度と復号できなくなる)。プロファイル名は、ファイル名(最近使ったファイルの履歴)に、平文の
+// メタデータとして残るため、使わない。
+export function keyFileExportBaseName(all: boolean, now: Date): string {
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const date = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}`;
+  const time = `${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+  return `${all ? "sensitivemasker_all" : "sensitivemasker_export"}_${date}-${time}`;
+}
+
 export function keyFileNameOf(path: string): string {
   return path.split(/[\\/]/).pop() ?? path;
 }

@@ -4,9 +4,7 @@
 //! 誤って`{:?}`(Debug)やログ出力に渡した際に鍵が丸ごと露出してしまうため。
 
 use std::fs;
-use std::io::Read;
-#[cfg(unix)]
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::Path;
 
 use rand::RngExt;
@@ -77,28 +75,55 @@ pub enum FileProtection {
 }
 
 /// 利用者が指定した場所へ、秘密を含むファイル(エクスポートの鍵ファイルなど)を書き、所有ユーザーだけの権限にする。
-/// 権限を制限できなくても、書き込み自体は成功として、その旨を返す(保管先が、権限を持たないファイルシステムの場合が
-/// ありうるため。呼び出し側が、利用者へ知らせる)。既に有るファイルは、内容を置き換え、権限も制限し直す。
+/// 内容を書く前に、空のファイルを作って権限を制限する(書いた後に制限すると、その間、秘密が、他のユーザーに読める権限で
+/// 置かれる)。権限を制限できなくても、書き込み自体は成功として、その旨を返す(保管先が、権限を持たないファイルシステムの
+/// 場合がありうるため。呼び出し側が、利用者へ知らせる)。既に有るファイルは、内容を置き換え、権限も制限し直す。
 pub fn write_owner_only_file(path: &Path, contents: &[u8]) -> Result<FileProtection, KeyError> {
+    write_owner_only_file_with(path, contents, restrict_to_owner)
+}
+
+// 権限を制限する処理を差し替えられる形(テストが、制限できない保管先・制限の失敗・制限の順序を、再現するため)。
+fn write_owner_only_file_with(
+    path: &Path,
+    contents: &[u8],
+    restrict: impl FnOnce(&Path) -> Result<(), KeyError>,
+) -> Result<FileProtection, KeyError> {
+    create_empty_file(path)?;
+    let restricted = restrict(path).is_ok();
+    // 制限した後に、開き直して書く(制限に使う外部のプロセス[icacls]が、開いたままのハンドルと競合しないようにするため)。
+    let mut file = fs::OpenOptions::new().write(true).truncate(true).open(path)?;
+    file.write_all(contents)?;
+    // クラッシュの後に、片方のファイルだけが残らないよう、書いた内容を、保管先へ確定させてから返す。
+    file.sync_all()?;
+    Ok(if restricted { FileProtection::OwnerOnly } else { FileProtection::NotRestricted })
+}
+
+// 空のファイルを作る(既に有れば、空にする)。Unixでは、作成時のモードを、所有ユーザーだけにする。
+fn create_empty_file(path: &Path) -> Result<(), KeyError> {
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-        let mut file =
-            fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(path)?;
-        // 既に有るファイルには、作成時のモードが効かないため、明示する(内容を書く前に、権限を絞る)。
-        let restricted = file.set_permissions(fs::Permissions::from_mode(0o600)).is_ok();
-        file.write_all(contents)?;
-        Ok(if restricted { FileProtection::OwnerOnly } else { FileProtection::NotRestricted })
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    options.open(path)?;
+    Ok(())
+}
+
+// 既に有るファイルには、作成時のモードが効かないため、明示する。権限を持たない保管先(quietを付けてマウントしたvfatなど)では、
+// chmodが成功しても効かないため、読み戻して確かめる。
+#[cfg(unix)]
+fn restrict_to_owner(path: &Path) -> Result<(), KeyError> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    let mode = fs::metadata(path)?.permissions().mode();
+    if mode & 0o077 != 0 {
+        return Err(KeyError::Permission(format!("権限が反映されませんでした(モード{:o})", mode & 0o777)));
     }
-    #[cfg(windows)]
-    {
-        fs::write(path, contents)?;
-        Ok(if restrict_to_current_user(path).is_ok() {
-            FileProtection::OwnerOnly
-        } else {
-            FileProtection::NotRestricted
-        })
-    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn restrict_to_owner(path: &Path) -> Result<(), KeyError> {
+    restrict_to_current_user(path)
 }
 
 /// Unixでは作成時点でモードを指定できるため、「書き込み後に権限を絞る」窓が生じない。
@@ -141,21 +166,30 @@ fn create_restricted_file(path: &Path, key: &[u8; KEY_LEN]) -> Result<(), KeyErr
     restrict_to_current_user(path)
 }
 
-/// 既存のファイルを、現在のユーザーだけがフルコントロールを持つ状態にする。
-/// - /reset: 継承のACLへ戻す。親のフォルダが継承できるエントリを持たないと(管理者権限のプロセスに限らない)、
-///   作られたファイルは、既定のDACLとして、SYSTEMなどの明示のエントリを持ち、それは、/inheritance:rでは消えないため
-/// - /inheritance:r: 継承のエントリ(SYSTEM/Administrators等)を除去する
-/// - /grant:r: 現在のユーザーのみにフルコントロールを与える
 #[cfg(windows)]
 fn restrict_to_current_user(path: &Path) -> Result<(), KeyError> {
-    use std::process::Command;
-
     let username = std::env::var("USERNAME")
         .map_err(|_| KeyError::Permission("USERNAME環境変数を取得できません".to_string()))?;
+    restrict_to_user(path, &username)
+}
+
+/// 既存のファイルを、指定したユーザーだけがフルコントロールを持つ状態にする。
+/// - /reset: 継承のACLへ戻す。親のフォルダが継承できるエントリを持たないと(管理者権限のプロセスに限らない)、
+///   作られたファイルは、既定のDACLとして、SYSTEMなどの明示のエントリを持ち、それは、/inheritance:rでは消えないため
+/// - /grant:r: 指定したユーザーのみにフルコントロールを与える
+/// - /inheritance:r: 継承のエントリ(SYSTEM/Administrators等)を除去する
+///
+/// 順序が重要: 継承のエントリを除去する前に、ユーザーへ与える。先に除去すると、与える処理が失敗したとき(ユーザー名を
+/// 解決できないなど)、誰の権限も無い状態になり、所有者も読めなくなる。この順序なら、途中で失敗しても、継承の権限が残り、
+/// 制限する前と同じく、所有者は読める。
+#[cfg(windows)]
+fn restrict_to_user(path: &Path, username: &str) -> Result<(), KeyError> {
+    use std::process::Command;
+
     let icacls = icacls_path()?;
     let grant = format!("{username}:F");
 
-    for args in [&["/reset"][..], &["/inheritance:r"][..], &["/grant:r", grant.as_str()][..]] {
+    for args in [&["/reset"][..], &["/grant:r", grant.as_str()][..], &["/inheritance:r"][..]] {
         let output = Command::new(&icacls).arg(path).args(args).output()?;
         if !output.status.success() {
             return Err(KeyError::Permission(format!(
@@ -255,6 +289,52 @@ mod tests {
         assert!(stdout.contains(&username), "現在のユーザーへの許可が無い: {stdout}");
         assert!(!stdout.contains("SYSTEM"), "SYSTEMの明示のエントリが残っている: {stdout}");
         assert!(!stdout.contains("Administrators"), "Administratorsの明示のエントリが残っている: {stdout}");
+    }
+
+    // 制限に失敗したときに、誰も読めない状態にしない(先に継承のエントリを除くと、与える処理の失敗で、所有者も読めなくなる)。
+    #[test]
+    #[cfg(windows)]
+    fn a_failed_grant_leaves_the_file_readable_to_its_owner() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("secret.smxkey");
+        std::fs::write(&path, b"contents").unwrap();
+
+        let err = restrict_to_user(&path, "no-such-user-for-the-test").expect_err("存在しないユーザーへは、与えられないはず");
+
+        assert!(matches!(err, KeyError::Permission(_)), "{err}");
+        assert_eq!(std::fs::read(&path).unwrap(), b"contents", "与える処理に失敗しても、所有者は読めるはず");
+    }
+
+    // 内容を書く前に、空のファイルの状態で、権限を制限する(書いた後に制限すると、その間、秘密が、他のユーザーに読める権限で置かれる)。
+    #[test]
+    fn the_file_is_restricted_while_it_is_still_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("secret.smxkey");
+        std::fs::write(&path, b"old contents").unwrap();
+        let mut length_when_restricted = None;
+
+        let protection = write_owner_only_file_with(&path, b"new secret", |p| {
+            length_when_restricted = Some(std::fs::metadata(p).unwrap().len());
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(length_when_restricted, Some(0), "制限するとき、ファイルは、空のはず(内容が、先に書かれている)");
+        assert_eq!(protection, FileProtection::OwnerOnly);
+        assert_eq!(std::fs::read(&path).unwrap(), b"new secret");
+    }
+
+    // 制限できない保管先(権限を持たないファイルシステム・制限の失敗)でも、書き込みは成功し、その旨を返す。
+    #[test]
+    fn a_failed_restriction_is_reported_and_the_contents_are_still_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("secret.smxkey");
+
+        let protection =
+            write_owner_only_file_with(&path, b"secret", |_| Err(KeyError::Permission("test".to_string()))).unwrap();
+
+        assert_eq!(protection, FileProtection::NotRestricted);
+        assert_eq!(std::fs::read(&path).unwrap(), b"secret");
     }
 
     #[test]
