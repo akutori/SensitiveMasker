@@ -105,12 +105,14 @@ SensitiveMasker/
     保留だけに作用する(識別子を省略した破棄は、全ての保留を消す。E2Eの後片付け用で、画面は使わない)。画面の外から
     確定を直接呼ぶE2Eのために、E2Eビルドに限り、`gui/src/lib/e2e-pending-import.ts`が受け取った識別子を
     `window.__e2ePendingImportIds`へ残す(本番ビルドには含まれない)
-  - Rustのコマンドの、引数・応答のキー名(IPCの境界)は、`tauri::test`の`MockRuntime`上で、実際のコマンドをJSONを
-    通して呼ぶテスト(`gui/src-tauri/src/export_import.rs`のtests)で固定する。Windows(MSVC)のデバッグビルドでは、
-    `gui/src-tauri/build.rs`が、comctl32 v6のマニフェストを、tauri-buildのリソースでなくリンカーで全ターゲットへ
-    埋め込む(`tauri::test`でアプリを組み立てるテストの実行ファイルは、マニフェストが無いと、起動時に
-    `STATUS_ENTRYPOINT_NOT_FOUND`で落ちるため)。リリースビルドは、tauri-buildの既定のまま(そのため、Windowsでは、
-    リリースプロファイルの`cargo test`で、`tauri::test`を使うテストは起動しない)
+  - インポートの保留の3コマンド(`preview_import`・`commit_pending_import`・`clear_pending_import`)の、引数・応答の
+    キー名(IPCの境界)は、`tauri::test`の`MockRuntime`上で、実際のコマンドをJSONを通して呼ぶテスト
+    (`gui/src-tauri/src/export_import.rs`のtests)で固定する(他のコマンドは、この方法では固定していない)。
+    Windows(MSVC)のデバッグビルドでは、`gui/src-tauri/build.rs`が、comctl32 v6のマニフェストを、tauri-buildの
+    リソースでなくリンカーで全ターゲットへ埋め込む(`tauri::test`でアプリを組み立てるテストの実行ファイルは、
+    マニフェストが無いと、起動時に`STATUS_ENTRYPOINT_NOT_FOUND`で落ちるため)。リリースビルドは、tauri-buildの
+    既定のまま(そのため、Windowsのリリースプロファイルでは、ライブラリ`gui_lib`の単体テストの実行ファイル全体が
+    起動しない)
   - リリース(`.github/workflows/release.yml`)は、`verify.yml`(型検査・単体テスト・storyのplayテスト・
     `cargo test --workspace --locked`・配布用フロントエンドへのE2E専用コード混入確認`bun run check:dist`)に通った場合に限り公開する
 - ロジックを伴う実装(機能追加・修正・リファクタリング)では`adversarial-verification` Skillの
