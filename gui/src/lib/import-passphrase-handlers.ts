@@ -60,11 +60,17 @@ export function createImportPassphraseHandlers<Preview extends PendingPreview>(
           return;
         }
         const previousPendingId = ownedPendingId.current;
-        if (previousPendingId !== null) {
-          // 破棄の失敗は、前の保留の後始末の失敗であり、この結果の失敗ではない。
-          deps.discardPending(previousPendingId).catch(() => {});
-        }
+        // この結果の保留を所有する記録は、前の保留の破棄を発行するより先に行う(破棄の発行が同期的に失敗しても、
+        // 新しい保留を、所有しないまま残さないため)。
         ownedPendingId.current = preview.pendingId;
+        if (previousPendingId !== null) {
+          // 破棄の失敗(同期的な失敗を含む)は、前の保留の後始末の失敗であり、この結果の失敗ではない。
+          try {
+            void Promise.resolve(deps.discardPending(previousPendingId)).catch(() => {});
+          } catch {
+            // 同期的に失敗した場合も、この結果は、確認画面へ進める。
+          }
+        }
         deps.showConfirm(preview);
       } catch (error) {
         // 閉じられた後の失敗(破棄の失敗を含む)は、見る人がいないため、表示しない。

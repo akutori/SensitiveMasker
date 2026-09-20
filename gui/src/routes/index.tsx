@@ -111,7 +111,9 @@ function MainRoute() {
         // 別々の具体的なメッセージとして返すため、1つの汎用文言に一本化しない
         // (一本化すると、正しいパスフレーズでも「誤っている」という誤案内になり、
         // 正当なバックアップファイルを誤って破棄しかねない)。ExportImportError以外の
-        // 想定外の例外(Tauri IPC自体の失敗等)の場合のみ汎用文言にフォールバックする。
+        // 想定外の例外(Tauri IPC自体の失敗等)の場合のみ汎用文言にフォールバックする
+        // (原因を辿れるよう、ログには残す)。
+        if (!isExportImportError(error)) console.error("preview_import failed", error);
         setPassphraseError(
           isExportImportError(error)
             ? error.message

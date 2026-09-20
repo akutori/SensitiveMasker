@@ -228,6 +228,27 @@ describe.each([0, 7])("createImportPassphraseHandlers(届いた結果の識別�
       ]);
       expect(ownedPendingId.current).toBe(other);
     });
+
+    it("前の保留の破棄の発行が、同期的に例外を投げても、エラーは表示せず、新しい識別子を記録して、確認画面へ進む(新しい保留を、所有しないまま残さない)", async () => {
+      const { calls, ownedPendingId, secondResult, handlers } = await afterFirstResultLeftUnconfirmed({
+        discardPending: (discardedId) => {
+          calls.push(`discardPending:${discardedId}`);
+          throw new Error("dummy synchronous failure");
+        },
+      });
+
+      const second = handlers.onConfirm();
+      secondResult.resolve(SECOND_PREVIEW);
+      await second;
+
+      expect(calls).toEqual([
+        "busy:true",
+        `discardPending:${pendingId}`,
+        `showConfirm:dummy-preview-2:owned=${other}`,
+        "busy:false",
+      ]);
+      expect(ownedPendingId.current).toBe(other);
+    });
   });
 
   it("開いたままかは、OKを押した時の画面(開いた回の番号)で判定する。同じファイルを開き直した別の画面は、開いたままとは見なさない", async () => {
