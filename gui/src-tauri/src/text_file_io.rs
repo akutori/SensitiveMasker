@@ -140,6 +140,29 @@ mod tests {
         assert!(!sneaky.exists(), "検証を通過して実際に書き込まれてしまった");
     }
 
+    // データフォルダの外に作られた、鍵・DBの実体へのハードリンクは、保存先にできない(親のフォルダの検査だけでは、通ってしまい、
+    // 平文で、暗号化DB・鍵を上書きする)。
+    #[test]
+    fn write_text_file_rejects_a_hard_link_to_the_key_file_or_the_database() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let app_paths = AppPaths::at(data_dir.path());
+        std::fs::write(&app_paths.key_path, b"key").unwrap();
+        std::fs::write(&app_paths.db_path, b"database").unwrap();
+        let key_link = elsewhere.path().join("sneaky-key.txt");
+        let db_link = elsewhere.path().join("sneaky-db.txt");
+        std::fs::hard_link(&app_paths.key_path, &key_link).unwrap();
+        std::fs::hard_link(&app_paths.db_path, &db_link).unwrap();
+
+        let key = write_text_file_impl(key_link.to_str().unwrap(), "overwritten", Ok(app_paths.clone()));
+        let db = write_text_file_impl(db_link.to_str().unwrap(), "overwritten", Ok(app_paths.clone()));
+
+        assert!(key.is_err(), "鍵の実体へのハードリンクへ、書き込めてしまった");
+        assert!(db.is_err(), "DBの実体へのハードリンクへ、書き込めてしまった");
+        assert_eq!(std::fs::read(&app_paths.key_path).unwrap(), b"key", "鍵が、上書きされた");
+        assert_eq!(std::fs::read(&app_paths.db_path).unwrap(), b"database", "DBが、上書きされた");
+    }
+
     #[test]
     fn write_text_file_fails_closed_when_the_app_data_dir_cannot_be_resolved() {
         let dir = tempfile::tempdir().unwrap();
