@@ -88,7 +88,10 @@ SensitiveMasker/
   `tauri.conf.json`の`generalAutofillEnabled: false`で無効にする(入力欄の候補を残さない。パスワード・
   クレジットカードの自動補完は対象外。macOS/Linuxでは無視される)
 - `monaco-editor`が同梱するDOMPurifyの写しは、脆弱性の対象の版のため、`gui/vite.config.ts`のプラグインで、npmの`dompurify`
-  (`gui/package.json`の`overrides`で、修正済みの版に固定)へ差し替える。配布物に入った版は`bun run check:dist`が確かめる
+  (`gui/package.json`の`overrides`で、修正済みの版に固定)へ差し替える(`vite build`の配布ビルドだけ。開発サーバーと
+  Storybookの事前バンドルには効かない)。配布物に入った版が、npm版で、修正済みの版以上であることは`bun run check:dist`が確かめる
+- `gui/package.json`の`overrides`は、配布物に含まれないE2E用ツール(mocha・wdio)の依存も、`bun audit`が報告する脆弱性の
+  修正済みの版に固定している(上流が追随したら外す)
 - 外部実行ファイル(`icacls`/`taskkill`)はPATH解決に頼らず`%SystemRoot%`から絶対パスを組み立てて呼ぶ
 
 ## 開発手法
@@ -116,7 +119,7 @@ SensitiveMasker/
     既定のまま(そのため、Windowsのリリースプロファイルでは、ライブラリ`gui_lib`の単体テストの実行ファイル全体が
     起動しない)
   - リリース(`.github/workflows/release.yml`)は、`verify.yml`(型検査・単体テスト・storyのplayテスト・
-    `cargo test --workspace --locked`・配布用フロントエンドの検査`bun run check:dist`(E2E専用コードの混入と、DOMPurifyがnpm版であること))に通った場合に限り公開する
+    `cargo test --workspace --locked`・配布用フロントエンドの検査`bun run check:dist`(E2E専用コードの混入と、DOMPurifyの版))に通った場合に限り公開する
 - ロジックを伴う実装(機能追加・修正・リファクタリング)では`adversarial-verification` Skillの
   「実装計画 → 実装 → 敵対的検証 → 修正」ループに従う
 

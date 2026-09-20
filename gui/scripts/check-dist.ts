@@ -10,8 +10,9 @@
 // その分岐が壊れていないことを、ビルドした結果のファイルの中身で確かめる。
 //
 // あわせて、配布物に入ったDOMPurifyが、npmのdompurify(package.jsonのoverridesで、修正済みの版に固定している)
-// であることを確かめる。monaco-editorは、DOMPurifyの写しを同梱していて、その版はMonaco自身が更新されるまで
-// 変わらない。vite.config.tsのプラグインが効かなくなると、脆弱性の対象の、同梱の写しが配布物に残る。
+// であり、脆弱性が修正された版以上であることを確かめる。monaco-editorは、DOMPurifyの写しを同梱していて、
+// その版はMonaco自身が更新されるまで変わらない。vite.config.tsのプラグインが効かなくなると、脆弱性の対象の、
+// 同梱の写しが配布物に残る。overridesが外れると、npmのdompurifyも、脆弱性の対象の版に戻りうる。
 //
 // 使い方: bun run scripts/check-dist.ts [distのパス(省略時はgui/dist)]
 
@@ -29,6 +30,18 @@ const TEXT_EXTENSIONS = new Set([".js", ".mjs", ".cjs", ".css", ".html", ".json"
 // DOMPurifyは、生成した自分自身に、版(version)と空の配列(removed)を、次の並びで書き込む
 // (ミニファイの後も、この並びは残る)。
 const DOMPURIFY_VERSION_PATTERN = /\.version=`(\d+\.\d+\.\d+)`,[\w$]+\.removed=\[\]/g;
+
+// 配布物に入れてよい、DOMPurifyの最も古い版(これより古い版は、XSS系の脆弱性の対象)。
+const MIN_SAFE_DOMPURIFY_VERSION = "3.4.13";
+
+function isVersionAtLeast(version: string, minimum: string): boolean {
+  const parts = version.split(".").map(Number);
+  const minimumParts = minimum.split(".").map(Number);
+  for (let i = 0; i < minimumParts.length; i += 1) {
+    if ((parts[i] ?? 0) !== minimumParts[i]) return (parts[i] ?? 0) > minimumParts[i];
+  }
+  return true;
+}
 
 function listFiles(dir: string): string[] {
   return readdirSync(dir).flatMap((name) => {
@@ -96,6 +109,14 @@ if (unexpectedVersions.length > 0) {
   console.error(
     `配布用のフロントエンドのDOMPurify(${unexpectedVersions.join(", ")})が、npmのdompurify(${npmDompurifyVersion})と異なる: ` +
       "monaco-editorが同梱する写しが残っている(vite.config.tsのプラグインが効いていない)",
+  );
+  process.exit(1);
+}
+const outdatedVersions = [...bundledDompurifyVersions].filter((version) => !isVersionAtLeast(version, MIN_SAFE_DOMPURIFY_VERSION));
+if (outdatedVersions.length > 0) {
+  console.error(
+    `配布用のフロントエンドのDOMPurify(${outdatedVersions.join(", ")})が、脆弱性が修正された版(${MIN_SAFE_DOMPURIFY_VERSION}以上)より古い: ` +
+      "package.jsonのoverridesで、dompurifyを修正済みの版に固定する",
   );
   process.exit(1);
 }

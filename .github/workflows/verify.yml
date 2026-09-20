@@ -38,7 +38,7 @@ jobs:
         working-directory: gui
         run: bun run build
 
-      - name: check that the frontend build has no E2E-only code
+      - name: check the frontend build (no E2E-only code, patched DOMPurify)
         working-directory: gui
         run: bun run check:dist
 

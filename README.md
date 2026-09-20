@@ -139,15 +139,16 @@ cd gui && bun run test:stories
 # E2Eテスト(WebDriver。e2e-testing featureでdebugビルドしてから実行する)
 cd gui && bun run e2e:build && bun run e2e
 
-# 配布用のフロントエンドに、E2E専用のコードが混入していないことの確認(先に配布用のビルドが必要。
-# e2e:buildの後のdistは、E2E専用のコードを含むため、このコマンドは失敗する)
+# 配布用のフロントエンドの検査(E2E専用のコードが混入していないことと、DOMPurifyが修正済みのnpm版であること。
+# 先に配布用のビルドが必要。e2e:buildの後のdistは、E2E専用のコードを含むため、このコマンドは失敗する)
 cd gui && bun run build && bun run check:dist
 ```
 
 タグ(`v*`)をpushすると、GitHub Actions(`.github/workflows/release.yml`)が、先に検証
 (`.github/workflows/verify.yml`: フロントエンドの型検査・単体テスト・Storybookのplayテスト、
-E2E専用コードの混入確認、`cargo test --workspace --locked`)を行い、通った場合に限り、Windows/macOS/Linux向けの
-GUIインストーラーとCLI/MCPサーバーの実行ファイルをビルドし、GitHub Releasesに公開します。
+配布用フロントエンドの検査(E2E専用コードの混入・DOMPurifyの版)、`cargo test --workspace --locked`)を行い、
+通った場合に限り、Windows/macOS/Linux向けのGUIインストーラーとCLI/MCPサーバーの実行ファイルをビルドし、
+GitHub Releasesに公開します(各OSのビルドでも、公開の前に、配布用フロントエンドの検査を行います)。
 検証だけを、タグを打つ前に、GitHubのActions画面(Verify)から手動で実行することもできます。
 
 ## ディレクトリ構成
