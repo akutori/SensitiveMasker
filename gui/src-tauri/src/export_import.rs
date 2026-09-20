@@ -158,8 +158,8 @@ impl PendingImportState {
 /// ページを読み込み直す(初回の読み込み・再読み込み)と、その画面のJavaScriptの状態が失われ、保留の識別子を
 /// 持つ画面が無くなる。確認画面を開いたまま再読み込みされた場合などに、確定も破棄もされなくなった保留は、
 /// そのままでは、復号済みの平文(ルールのパターン・固定値)としてRust側に残り続けるため。ページ内の画面遷移
-/// (履歴による切り替え)は、ページの読み込みを起こさないので、対象にならない(WebView2で、E2Eにより確認した。
-/// macOS・Linuxのウェブビューでの挙動は、確認していない)。
+/// (履歴による切り替え)は、WebView2では、ページの読み込みを起こさないので、対象にならない(他のウェブビューでも
+/// 同じとは限らない)。
 ///
 /// 読み込みの完了(Finished)では、何もしない。on_page_loadはBuilder全体に登録され、全てのウェブビューへ
 /// 適用されるため、メインウィンドウ以外の読み込みでも、何もしない(メインウィンドウの確認画面の保留を、
@@ -339,9 +339,9 @@ fn preview_import_with_hook(
         return Err(ExportImportError::InvalidInput("ファイルサイズが大きすぎます".to_string()));
     }
     let data = std::fs::read(&source_path).map_err(|_| ExportImportError::Failed(GENERIC_IO_ERROR.to_string()))?;
+    before_decrypt();
     // パスフレーズ検証(scrypt、数百ms〜数秒)はストアのロックを握らずに行う。ロック内で
     // 実行すると、他のプロファイル/タグ系コマンドがこの間ずっとブロックされてしまう。
-    before_decrypt();
     let payload = decrypt_import_payload(&data, passphrase).map_err(|e| ExportImportError::Failed(e.to_string()))?;
     let preview =
         with_store(state, |store| store.resolve_import_preview(payload)).map_err(ExportImportError::Failed)?;
