@@ -1761,8 +1761,9 @@ describe("エクスポートの実行(ファイルダイアログの差し替え
     await browser.refresh();
     const reloadRequestedMs = Date.now() - startedAt;
     await completeInitialSetup();
-    // 前提: 読み込み直しの要求は、復号が終わるよりずっと前に出ている(復号が終わった後に読み込みが始まると、結果は、
-    // ページの世代の保護とは無関係に、読み込みの開始で消えるため、この確認は何も確かめない)。
+    // 前提: 読み込み直しの要求は、復号が終わるよりずっと前に出ている(復号が終わった後に読み込みが始まると、その結果は、
+    // ページの世代の保護を通らずに、読み込みの開始で消える。その復号は識別子を払い出すため、下の識別子の確認が、実装が
+    // 正しくても落ちる。その落ち方を、実装の不具合でなく、タイミングの崩れとして、ここで先に示す)。
     withHint(
       `復号(${Math.round(decryptMs)}ms)が終わる前に、読み込み直しを要求できなかった(${reloadRequestedMs}ms)`,
       () => expect(reloadRequestedMs).toBeLessThan(decryptMs / 2)
@@ -1771,8 +1772,8 @@ describe("エクスポートの実行(ファイルダイアログの差し替え
     await browser.pause(Math.max(3000, decryptMs * 2));
 
     // 復号の結果を捨てていれば、その復号は識別子を払い出さないので、次に払い出される識別子は idBefore + 1 になる。
-    // 結果を保留していれば(読み込みの開始の前後どちらでも)、その復号が識別子 idBefore + 1 を払い出し、次の識別子は
-    // idBefore + 2 になる。
+    // 結果を保留していれば(読み込みの開始の前後どちらでも)、その復号が識別子を払い出し、次の識別子は idBefore + 2
+    // 以上になる(読み込み直しで中断されたIPCが、再送されて、復号が複数回走ることがあるため)。
     const nextId = await previewPendingImportViaIpc(smxPath, passphrase);
     withHint(`次に払い出された識別子は ${nextId}(復号中の結果を捨てていれば ${idBefore + 1})`, () =>
       expect(nextId).toBe(idBefore + 1)
