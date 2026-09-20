@@ -13,8 +13,11 @@ import {
   createTag as ipcCreateTag,
   deleteProfile as ipcDeleteProfile,
   deleteTag as ipcDeleteTag,
+  detectImportMethod as ipcDetectImportMethod,
   exportAllToFile as ipcExportAllToFile,
+  exportAllToFileWithKeyFile as ipcExportAllToFileWithKeyFile,
   exportProfileToFile as ipcExportProfileToFile,
+  exportProfileToFileWithKeyFile as ipcExportProfileToFileWithKeyFile,
   getProfile as ipcGetProfile,
   initializeStore,
   isStoreInitialized,
@@ -25,12 +28,15 @@ import {
   onTagsChanged,
   openStore,
   previewImport as ipcPreviewImport,
+  previewImportWithKeyFile as ipcPreviewImportWithKeyFile,
   renameTag as ipcRenameTag,
   setActiveProfile as ipcSetActiveProfile,
   setFavorite as ipcSetFavorite,
   setProfileTags as ipcSetProfileTags,
   updateProfile as ipcUpdateProfile,
   isExportImportError,
+  type ExportWithKeyFileResult,
+  type ImportMethod,
   type ImportPreviewDto,
   type ImportPreviewResult,
   type ProfileDetail,
@@ -110,7 +116,13 @@ export interface AppStateValue {
   setProfileTags: (id: string, tags: string[]) => Promise<void>;
   exportProfile: (id: string, passphrase: string, destPath: string) => Promise<void>;
   exportAll: (passphrase: string, destPath: string) => Promise<void>;
+  // 鍵ファイル方式のエクスポート(鍵は、Rustが生成し、鍵ファイルとして保存する。画面へは渡さない)。
+  exportProfileWithKeyFile: (id: string, destPath: string, keyDestPath: string) => Promise<ExportWithKeyFileResult>;
+  exportAllWithKeyFile: (destPath: string, keyDestPath: string) => Promise<ExportWithKeyFileResult>;
+  // 取り込むファイルの、復号の方式(パスフレーズ・鍵ファイル)を、ファイルの先頭のヘッダーから判別する。
+  detectImportMethod: (sourcePath: string) => Promise<ImportMethod>;
   previewImport: (sourcePath: string, passphrase: string) => Promise<ImportPreviewResult>;
+  previewImportWithKeyFile: (sourcePath: string, keyPath: string) => Promise<ImportPreviewResult>;
   // 確定・破棄は、previewImportの結果の保留の識別子(pendingId)で、その保留だけを指す。
   commitImport: (pendingId: number) => Promise<void>;
   clearPendingImport: (pendingId: number) => Promise<void>;
@@ -160,6 +172,19 @@ async function reportExportErrorAndRethrow<T>(action: () => Promise<T>): Promise
     // インポート側と同じ理由でexport.kindによる絞り込みをしない。
     // Rust側は原因ごとに具体的なメッセージを返すため、それをそのまま使う。
     const message = isExportImportError(error) ? error.message : "エクスポートに失敗しました";
+    console.error(message, error);
+    toast.error(message);
+    throw error;
+  }
+}
+
+// 取り込むファイルを開いて、復号の方式を判別するときの失敗を、Rust側の具体的な文言で通知する(拡張子が違う・
+// エクスポートしたファイルではない、など)。想定外の失敗は、固定の文言にする。
+async function reportFileOpenErrorAndRethrow<T>(action: () => Promise<T>): Promise<T> {
+  try {
+    return await action();
+  } catch (error) {
+    const message = isExportImportError(error) ? error.message : "ファイルを開けませんでした";
     console.error(message, error);
     toast.error(message);
     throw error;
@@ -399,6 +424,20 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
         reportExportErrorAndRethrow(async () => {
           await ipcExportAllToFile(passphrase, destPath);
         }),
+      exportProfileWithKeyFile: (id, destPath, keyDestPath) =>
+        reportExportErrorAndRethrow(async () => {
+          const name = findNameById(id);
+          if (!name) throw new Error(`profile not found: ${id}`);
+          return ipcExportProfileToFileWithKeyFile(name, destPath, keyDestPath);
+        }),
+      exportAllWithKeyFile: (destPath, keyDestPath) =>
+        reportExportErrorAndRethrow(() => ipcExportAllToFileWithKeyFile(destPath, keyDestPath)),
+      // ファイルを開けない・エクスポートしたファイルではない、などの理由は、Rust側が具体的な文言で返す。
+      detectImportMethod: (sourcePath) =>
+        reportFileOpenErrorAndRethrow(() => ipcDetectImportMethod(sourcePath)),
+      // 鍵ファイルの取り込みも、パスフレーズと同じ理由で、汎用トーストを使わない(呼び出し元の鍵ファイル入力画面が、
+      // インラインのエラーとして表示する)。
+      previewImportWithKeyFile: (sourcePath, keyPath) => ipcPreviewImportWithKeyFile(sourcePath, keyPath),
       // ここは意図的にreportAndRethrow(汎用トースト)を使わない: 誤ったパスフレーズは
       // 想定内の入力ミスであり、モックアップ通り呼び出し元(パスフレーズ入力欄)で
       // インラインエラーとして表示する。

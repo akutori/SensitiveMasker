@@ -6,7 +6,10 @@ import { ProfileNameDialog } from "@/components/profile-name-dialog";
 import { TemplateSelectDialog, DEFAULT_TEMPLATES } from "@/components/template-select-dialog";
 import { TagManagementDialog } from "@/components/tag-management-dialog";
 import { ExportModal } from "@/components/export-modal";
+import { ExportMethodDialog, type ExportMethod } from "@/components/export-method-dialog";
+import { ExportKeyFileModal, type ExportKeyFilePhase } from "@/components/export-key-file-modal";
 import { ImportPassphraseDialog } from "@/components/import-passphrase-dialog";
+import { ImportKeyFileDialog } from "@/components/import-key-file-dialog";
 import { ImportConfirmDialog, type ImportPreviewRow } from "@/components/import-confirm-dialog";
 import { EnvImportSelectDialog } from "@/components/env-import-select-dialog";
 import type { RuleListItem } from "@/components/rule-edit-screen";
@@ -14,6 +17,8 @@ import { useAppState, SMX_FILE_FILTERS, toImportPreviewRows } from "@/lib/app-st
 import { isExportImportError } from "@/lib/profile-ipc";
 import { openFileDialog, saveFileDialog } from "@/lib/file-dialog";
 import { actionOnHiddenToTray } from "@/lib/hidden-to-tray";
+import { KEY_FILE_FILTERS, keyFileNameOf } from "@/lib/key-file";
+import { useImportKeyFile } from "@/lib/use-import-key-file";
 import { suppressContextMenu } from "@/lib/suppress-context-menu";
 import { useOnHiddenToTray } from "@/lib/use-on-hidden-to-tray";
 import {
@@ -87,8 +92,11 @@ type DialogState =
   | { kind: "templateSelect" }
   | { kind: "profileNameFromTemplate"; templateValue: string }
   | { kind: "tagManagement" }
+  | { kind: "exportMethod"; target: string; profileId: string | null }
+  | { kind: "exportKeyFile"; target: string; profileId: string | null; session: number; phase: ExportKeyFilePhase }
   | { kind: "export"; target: string; profileId: string | null; session: ExportDialogState }
   | { kind: "importPassphrase"; session: number; sourcePath: string; fileName: string }
+  | { kind: "importKeyFile"; session: number; sourcePath: string; fileName: string }
   | { kind: "importConfirm"; rows: ImportPreviewRow[]; passphraseTrimmed: boolean }
   | { kind: "envImportSelect"; candidates: EnvCandidate[] }
   | { kind: "envImportName"; selectedRules: Omit<RuleListItem, "id">[] };
@@ -123,6 +131,11 @@ function ProfilesRoute() {
   const exportSessionRef = useRef<ExportDialogState | null>(null);
   // ウィンドウがトレイへ格納されるたびに進める。書き出し済みのエクスポート画面が、パスフレーズの表示を伏せ字へ戻す合図。
   const [concealSignal, setConcealSignal] = useState(0);
+  // エクスポートの方法の選択(鍵ファイル・パスフレーズ)。エクスポートを始めるたびに、鍵ファイルへ戻す。
+  const [exportMethod, setExportMethod] = useState<ExportMethod>("key_file");
+  // 鍵ファイル方式のエクスポート画面を開いた回の番号(開くたびに増やす)。閉じて開き直した後に届く、古い操作の
+  // 結果と、区別するため。
+  const exportKeyFileSessionCounter = useRef(0);
   // パスフレーズ入力画面で、復号している間だけtrue(理由はimport-passphrase-handlers.ts)。
   const importDecrypting = useRef(false);
   // この画面が所有する保留(復号の結果として、Rust側に保留された内容)の識別子。確認画面の確定・破棄・離脱は、
@@ -214,6 +227,40 @@ function ProfilesRoute() {
             ? error.message
             : "パスフレーズが誤っているか、対応していないファイル形式です"
         );
+      },
+      discardPending: (pendingId) => appState.clearPendingImport(pendingId),
+      onBusyChange: setImportBusy,
+    },
+    importDecrypting,
+    ownedPendingImportId
+  );
+
+  // 鍵ファイル方式の取り込み。パスフレーズ入力と同じ流れ(復号している間の再入の防止・閉じられた画面の結果の破棄・
+  // 保留の所有の記録)を使う。流れの中で、入力の値として渡すのは、鍵ファイルのパス(鍵の中身は、画面へ渡さない)。
+  const importKeyFile = useImportKeyFile(dialog.kind === "importKeyFile");
+  const importKeyFileHandlers = createImportPassphraseHandlers(
+    {
+      target: () =>
+        dialog.kind === "importKeyFile" && importKeyFile.keyFilePath !== null
+          ? { session: dialog.session, sourcePath: dialog.sourcePath, passphrase: importKeyFile.keyFilePath }
+          : null,
+      preview: (sourcePath, keyPath) => appState.previewImportWithKeyFile(sourcePath, keyPath),
+      isStillOpen: (session) => {
+        const shown = dialogRef.current;
+        return mounted.current && shown.kind === "importKeyFile" && shown.session === session;
+      },
+      showConfirm: (result) => {
+        setDialog({
+          kind: "importConfirm",
+          rows: toImportPreviewRows(result.preview),
+          passphraseTrimmed: false,
+        });
+        importKeyFile.reset();
+      },
+      showError: (error) => {
+        // Rust側は、鍵ファイルの形式・別の鍵ファイル・データの破損などを、原因ごとに、具体的な文言で返す。
+        if (!isExportImportError(error)) console.error("preview_import_with_key_file failed", error);
+        importKeyFile.setError(isExportImportError(error) ? error.message : "鍵ファイルで復号できませんでした");
       },
       discardPending: (pendingId) => appState.clearPendingImport(pendingId),
       onBusyChange: setImportBusy,
@@ -347,6 +394,91 @@ function ProfilesRoute() {
     }
   };
 
+  // エクスポートを始める: まず、復号の方法(鍵ファイル・パスフレーズ)を選ぶ。鍵ファイルが、初期の選択。
+  const openExportMethodChoice = (target: string, profileId: string | null) => {
+    setExportMethod("key_file");
+    setDialog({ kind: "exportMethod", target, profileId });
+  };
+
+  // 方法の選択から、次へ進む。パスフレーズなら、パスフレーズを生成して、確認・コピーできる画面へ。鍵ファイルなら、鍵ファイルを
+  // 保存する画面へ。
+  const continueExport = () => {
+    const shown = dialogRef.current;
+    if (shown.kind !== "exportMethod") return;
+    if (exportMethod === "passphrase") {
+      openExportSession(shown.target, shown.profileId);
+      return;
+    }
+    setDialog({
+      kind: "exportKeyFile",
+      target: shown.target,
+      profileId: shown.profileId,
+      session: ++exportKeyFileSessionCounter.current,
+      phase: "idle",
+    });
+  };
+
+  // 鍵ファイル方式のエクスポート。鍵ファイルの保存先、エクスポートするファイルの保存先の順に選び、両方決まってから、Rustが、鍵を
+  // 生成して、2つのファイルを書く(どちらかの選択を取り消すと、何も書かない。鍵は、画面へ渡さない)。保存先を選ぶ間は、
+  // まだ何も書き出していないため、画面を閉じられる。閉じられていた(閉じた・別の画面へ移った)場合は、その選択の結果では、
+  // 書き込まない。
+  const exportWithKeyFile = async () => {
+    const shown = dialogRef.current;
+    if (shown.kind !== "exportKeyFile" || shown.phase !== "idle") return;
+    const { session, profileId } = shown;
+    const stillOpen = () => {
+      const current = dialogRef.current;
+      return mounted.current && current.kind === "exportKeyFile" && current.session === session;
+    };
+    const setPhase = (phase: ExportKeyFilePhase) =>
+      setDialog((current) =>
+        current.kind === "exportKeyFile" && current.session === session ? { ...current, phase } : current
+      );
+    // 保存先の選択そのものが失敗した場合は、appState側のtoastを通らないため、ここで通知する。
+    const chooseDestination = (
+      defaultPath: string,
+      filters: typeof SMX_FILE_FILTERS,
+      purpose: "data" | "key"
+    ) =>
+      saveFileDialog({ defaultPath, filters }, purpose).catch((error) => {
+        console.error("save dialog failed", error);
+        toast.error("保存先を選択できませんでした");
+        return null;
+      });
+
+    try {
+      // プロファイル名を既定ファイル名に使わない理由は、exportToFileと同じ。
+      const baseName = profileId === null ? "sensitivemasker_all" : "sensitivemasker_export";
+      setPhase("choosingKeyFile");
+      const keyDestPath = await chooseDestination(`${baseName}.smxkey`, KEY_FILE_FILTERS, "key");
+      if (!keyDestPath || !stillOpen()) {
+        if (stillOpen()) setPhase("idle");
+        return;
+      }
+      setPhase("choosingExportFile");
+      const destPath = await chooseDestination(`${baseName}.smx`, SMX_FILE_FILTERS, "data");
+      if (!destPath || !stillOpen()) {
+        if (stillOpen()) setPhase("idle");
+        return;
+      }
+      setPhase("writing");
+      const result =
+        profileId === null
+          ? await appState.exportAllWithKeyFile(destPath, keyDestPath)
+          : await appState.exportProfileWithKeyFile(profileId, destPath, keyDestPath);
+      toast.success("エクスポートが完了しました。鍵ファイルは、エクスポートしたファイルとは別の場所に、保管してください");
+      if (!result.keyFileRestricted) {
+        toast.warning("鍵ファイルを、自分だけが読める権限にできませんでした。保存先を確認してください");
+      }
+      setDialog((current) =>
+        current.kind === "exportKeyFile" && current.session === session ? { kind: "none" } : current
+      );
+    } catch {
+      // 失敗の通知は、appState側のtoastが行う。画面は開いたままにし、別の保存先で、やり直せるようにする。
+      if (stillOpen()) setPhase("idle");
+    }
+  };
+
   const confirmNewProfileName = async () => {
     if (profiles.some((p) => p.name === draftName)) {
       setDraftError("同じ名前のプロファイルが既に存在します");
@@ -403,21 +535,29 @@ function ProfilesRoute() {
           setInvalidTagId(undefined);
           setDialog({ kind: "tagManagement" });
         }}
-        onExportAll={() => openExportSession("全プロファイル", null)}
+        onExportAll={() => openExportMethodChoice("全プロファイル", null)}
         onImport={async () => {
           const path = await openFileDialog({ multiple: false, filters: SMX_FILE_FILTERS });
           if (!path || Array.isArray(path)) return;
           // ファイルの選択を待つ間に別の画面が開かれていたら、置き換えない(書き出し中・書き出し済みの
           // エクスポート画面ならパスフレーズを、確認待ちのインポート画面なら復号済みの内容を、失うため)。
           if (dialogRef.current.kind !== "none") return;
+          // ファイルの先頭の、平文のヘッダーから、復号の方式(パスフレーズ・鍵ファイル)を判別する。失敗の通知は、
+          // appState側のtoastが行う。
+          const method = await appState.detectImportMethod(path).catch(() => null);
+          if (method === null) return;
+          // 判別を待つ間に別の画面が開かれていたら、同じ理由で、置き換えない。
+          if (dialogRef.current.kind !== "none") return;
+          const session = ++importSessionCounter.current;
+          const fileName = path.split(/[\\/]/).pop() ?? path;
+          if (method === "key_file") {
+            importKeyFile.reset();
+            setDialog({ kind: "importKeyFile", session, sourcePath: path, fileName });
+            return;
+          }
           setImportPassphrase("");
           setImportPassphraseError(undefined);
-          setDialog({
-            kind: "importPassphrase",
-            session: ++importSessionCounter.current,
-            sourcePath: path,
-            fileName: path.split(/[\\/]/).pop() ?? path,
-          });
+          setDialog({ kind: "importPassphrase", session, sourcePath: path, fileName });
         }}
         onEnvImport={async () => {
           // 拡張子フィルタは付けない(index.tsxの「ファイルから」と同じ理由: ".env"は
@@ -445,7 +585,7 @@ function ProfilesRoute() {
         onEditProfile={(id) => navigate({ to: "/rules/$profileId", params: { profileId: id } })}
         onDuplicateProfile={(id, newName) => appState.duplicateProfile(id, newName)}
         onExportProfile={(id) => {
-          openExportSession(profiles.find((p) => p.id === id)?.name ?? "", id);
+          openExportMethodChoice(profiles.find((p) => p.id === id)?.name ?? "", id);
         }}
         onDeleteProfile={(id) => appState.deleteProfile(id)}
         onProfileTagsChange={(id, tags) => {
@@ -544,6 +684,23 @@ function ProfilesRoute() {
         invalidTagId={invalidTagId}
       />
 
+      <ExportMethodDialog
+        open={dialog.kind === "exportMethod"}
+        onOpenChange={(open) => !open && closeDialog()}
+        target={dialog.kind === "exportMethod" ? dialog.target : ""}
+        method={exportMethod}
+        onMethodChange={setExportMethod}
+        onNext={continueExport}
+      />
+
+      <ExportKeyFileModal
+        open={dialog.kind === "exportKeyFile"}
+        onOpenChange={(open) => !open && closeDialog()}
+        target={dialog.kind === "exportKeyFile" ? dialog.target : ""}
+        phase={dialog.kind === "exportKeyFile" ? dialog.phase : "idle"}
+        onExport={exportWithKeyFile}
+      />
+
       <ExportModal
         open={dialog.kind === "export"}
         // 閉じるとパスフレーズは、画面の状態と、進行状況の正(exportSessionRef)の両方から手放す
@@ -597,6 +754,22 @@ function ProfilesRoute() {
         }}
         errorMessage={importPassphraseError}
         onConfirm={importPassphraseHandlers.onConfirm}
+        busy={importBusy}
+      />
+
+      <ImportKeyFileDialog
+        open={dialog.kind === "importKeyFile"}
+        onOpenChange={(open) => {
+          if (open) return;
+          closeDialog();
+          importKeyFile.reset();
+        }}
+        fileName={dialog.kind === "importKeyFile" ? dialog.fileName : ""}
+        keyFileName={importKeyFile.keyFilePath === null ? null : keyFileNameOf(importKeyFile.keyFilePath)}
+        dragActive={importKeyFile.dragActive}
+        onSelectKeyFile={importKeyFile.selectKeyFile}
+        errorMessage={importKeyFile.error}
+        onConfirm={importKeyFileHandlers.onConfirm}
         busy={importBusy}
       />
 

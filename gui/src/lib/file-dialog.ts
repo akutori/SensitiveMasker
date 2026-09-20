@@ -19,7 +19,13 @@ import {
 interface E2eFileDialogPaths {
   save?: string | Promise<string | null>;
   open?: string | Promise<string | null>;
+  // 鍵ファイル(.smxkey)の保存・選択用。エクスポートしたファイル(.smx)と、別に指定する。
+  saveKey?: string | Promise<string | null>;
+  openKey?: string | Promise<string | null>;
 }
+
+// data: エクスポートしたファイル(.smx)など。key: 鍵ファイル(.smxkey)。E2Eで、差し替える値を分けるための区別。
+export type FileDialogPurpose = "data" | "key";
 
 declare global {
   interface Window {
@@ -34,15 +40,19 @@ function e2eReplacement<K extends keyof E2eFileDialogPaths>(kind: K): E2eFileDia
   return window.__e2eFileDialogPaths?.[kind];
 }
 
-export async function saveFileDialog(options?: SaveDialogOptions): Promise<string | null> {
-  return e2eReplacement("save") ?? save(options);
+export async function saveFileDialog(
+  options?: SaveDialogOptions,
+  purpose: FileDialogPurpose = "data"
+): Promise<string | null> {
+  return e2eReplacement(purpose === "key" ? "saveKey" : "save") ?? save(options);
 }
 
 // 差し替え時に返すのは単一のパスのみ(このアプリのopen呼び出しはmultiple: falseのみ)。
 export async function openFileDialog<T extends OpenDialogOptions>(
-  options?: T
+  options?: T,
+  purpose: FileDialogPurpose = "data"
 ): Promise<OpenDialogReturn<T>> {
-  const path = e2eReplacement("open");
+  const path = e2eReplacement(purpose === "key" ? "openKey" : "open");
   if (path !== undefined) return path as unknown as OpenDialogReturn<T>;
   return open(options);
 }

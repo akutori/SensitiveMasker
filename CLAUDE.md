@@ -84,8 +84,9 @@ SensitiveMasker/
   (`RunEvent::Exit`)で明示的に破棄する
 - OSキーチェーン(keyring/DPAPI/Keychain)は不採用
 - 未初期化(鍵/DB不在)時は`mask`等をエラーで停止する(fail-safe defaults)
-- エクスポート/インポートは`age`クレートによるパスフレーズ再暗号化(GUI側はアプリ生成の高エントロピー
-  パスフレーズ、CLI側は手入力。`zxcvbn`でスコアが低い場合は警告する)
+- エクスポート/インポートは`age`クレートによる再暗号化(パスフレーズ方式: GUI側はアプリ生成の高エントロピー
+  パスフレーズ、CLI側は手入力。`zxcvbn`でスコアが低い場合は警告する。GUIは、鍵ファイル方式(age x25519、拡張子`.smxkey`)
+  も選べる。鍵は、Rustが生成・保存・読み込みを行い、画面(JavaScript)へは渡さない。CLIは、鍵ファイル方式を扱わない)
 - 保存先パスのbundle identifierは`io.github.akutori.sensitivemasker`
   (`crates/profile-store/src/paths.rs`)。GUI側の`tauri.conf.json`の`identifier`と一致させる必要がある
 - GUI(Tauri)はACL(`capabilities/default.json`、`build.rs`で自動生成)で全コマンドを個別許可制にし、

@@ -7,10 +7,13 @@ import { FileImportChoiceDialog } from "@/components/file-import-choice-dialog";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { MatchCountConfirmDialog, type MatchCountRow } from "@/components/match-count-confirm-dialog";
 import { ImportPassphraseDialog } from "@/components/import-passphrase-dialog";
+import { ImportKeyFileDialog } from "@/components/import-key-file-dialog";
 import { ImportConfirmDialog, type ImportPreviewRow } from "@/components/import-confirm-dialog";
 import { useAppState, SMX_FILE_FILTERS, toImportPreviewRows } from "@/lib/app-state";
 import { createImportConfirmHandlers } from "@/lib/import-confirm-handlers";
 import { actionOnHiddenToTray } from "@/lib/hidden-to-tray";
+import { keyFileNameOf } from "@/lib/key-file";
+import { useImportKeyFile } from "@/lib/use-import-key-file";
 import { createImportPassphraseHandlers } from "@/lib/import-passphrase-handlers";
 import { isExportImportError } from "@/lib/profile-ipc";
 import { openFileDialog, saveFileDialog } from "@/lib/file-dialog";
@@ -39,6 +42,7 @@ type DialogState =
   | { kind: "overwriteConfirm"; content: string }
   | { kind: "matchCountConfirm"; rows: MatchCountRow[]; maskedText: string; sourcePath: string }
   | { kind: "importPassphrase"; session: number; sourcePath: string; fileName: string }
+  | { kind: "importKeyFile"; session: number; sourcePath: string; fileName: string }
   | { kind: "importConfirm"; rows: ImportPreviewRow[]; passphraseTrimmed: boolean };
 
 function MainRoute() {
@@ -133,6 +137,40 @@ function MainRoute() {
     ownedPendingImportId
   );
 
+  // 鍵ファイル方式の取り込み。パスフレーズ入力と同じ流れ(復号している間の再入の防止・閉じられた画面の結果の破棄・
+  // 保留の所有の記録)を使う。流れの中で、入力の値として渡すのは、鍵ファイルのパス(鍵の中身は、画面へ渡さない)。
+  const importKeyFile = useImportKeyFile(dialog.kind === "importKeyFile");
+  const importKeyFileHandlers = createImportPassphraseHandlers(
+    {
+      target: () =>
+        dialog.kind === "importKeyFile" && importKeyFile.keyFilePath !== null
+          ? { session: dialog.session, sourcePath: dialog.sourcePath, passphrase: importKeyFile.keyFilePath }
+          : null,
+      preview: (sourcePath, keyPath) => appState.previewImportWithKeyFile(sourcePath, keyPath),
+      isStillOpen: (session) => {
+        const shown = dialogRef.current;
+        return mounted.current && shown.kind === "importKeyFile" && shown.session === session;
+      },
+      showConfirm: (result) => {
+        setDialog({
+          kind: "importConfirm",
+          rows: toImportPreviewRows(result.preview),
+          passphraseTrimmed: false,
+        });
+        importKeyFile.reset();
+      },
+      showError: (error) => {
+        // Rust側は、鍵ファイルの形式・別の鍵ファイル・データの破損などを、原因ごとに、具体的な文言で返す。
+        if (!isExportImportError(error)) console.error("preview_import_with_key_file failed", error);
+        importKeyFile.setError(isExportImportError(error) ? error.message : "鍵ファイルで復号できませんでした");
+      },
+      discardPending: (pendingId) => appState.clearPendingImport(pendingId),
+      onBusyChange: setImportBusy,
+    },
+    importDecrypting,
+    ownedPendingImportId
+  );
+
   // この画面を離れる(破棄される)と、復号済みの内容(Rust側の保留)を確認する人が居なくなるため、この画面が
   // 所有する保留を破棄する(破棄しない場合の理由はimport-confirm-handlers.ts)。復号している最中に離れた場合は、
   // 結果が届いた時に、isStillOpenがfalseになって、その結果の保留が破棄される。
@@ -185,14 +223,22 @@ function MainRoute() {
           // ファイルの選択を待つ間に別の画面が開かれていたら、置き換えない(その画面の内容や、確認待ちの
           // 復号済みの内容を、失うため)。
           if (dialogRef.current.kind !== "none") return;
+          // ファイルの先頭の、平文のヘッダーから、復号の方式(パスフレーズ・鍵ファイル)を判別する。失敗の通知は、
+          // appState側のtoastが行う。
+          const method = await appState.detectImportMethod(path).catch(() => null);
+          if (method === null) return;
+          // 判別を待つ間に別の画面が開かれていたら、同じ理由で、置き換えない。
+          if (dialogRef.current.kind !== "none") return;
+          const session = ++importSessionCounter.current;
+          const fileName = path.split(/[\\/]/).pop() ?? path;
+          if (method === "key_file") {
+            importKeyFile.reset();
+            setDialog({ kind: "importKeyFile", session, sourcePath: path, fileName });
+            return;
+          }
           setPassphrase("");
           setPassphraseError(undefined);
-          setDialog({
-            kind: "importPassphrase",
-            session: ++importSessionCounter.current,
-            sourcePath: path,
-            fileName: path.split(/[\\/]/).pop() ?? path,
-          });
+          setDialog({ kind: "importPassphrase", session, sourcePath: path, fileName });
         }}
         onReload={async () => {
           try {
@@ -380,6 +426,22 @@ function MainRoute() {
         }}
         errorMessage={passphraseError}
         onConfirm={importPassphraseHandlers.onConfirm}
+        busy={importBusy}
+      />
+
+      <ImportKeyFileDialog
+        open={dialog.kind === "importKeyFile"}
+        onOpenChange={(open) => {
+          if (open) return;
+          closeDialog();
+          importKeyFile.reset();
+        }}
+        fileName={dialog.kind === "importKeyFile" ? dialog.fileName : ""}
+        keyFileName={importKeyFile.keyFilePath === null ? null : keyFileNameOf(importKeyFile.keyFilePath)}
+        dragActive={importKeyFile.dragActive}
+        onSelectKeyFile={importKeyFile.selectKeyFile}
+        errorMessage={importKeyFile.error}
+        onConfirm={importKeyFileHandlers.onConfirm}
         busy={importBusy}
       />
 

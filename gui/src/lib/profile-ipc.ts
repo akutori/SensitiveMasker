@@ -172,19 +172,72 @@ function assertPendingId(value: unknown): asserts value is number {
   if (!isPendingId(value)) throw new TypeError(`invalid pending import id: ${String(value)}`);
 }
 
+type PreviewImportResponse =
+  | { pending_id: unknown; preview: ImportPreviewDto; passphrase_trimmed?: unknown }
+  | null
+  | undefined;
+
 export async function previewImport(sourcePath: string, passphrase: string): Promise<ImportPreviewResult> {
+  const response = await invoke<PreviewImportResponse>("preview_import", { sourcePath, passphrase });
+  return toPreviewResult("preview_import", response);
+}
+
+// previewImportの、鍵ファイル方式。鍵ファイルは、パスだけを渡す(鍵の中身は、Rustが読み、画面へ渡さない)。
+export async function previewImportWithKeyFile(sourcePath: string, keyPath: string): Promise<ImportPreviewResult> {
+  const response = await invoke<PreviewImportResponse>("preview_import_with_key_file", { sourcePath, keyPath });
+  return toPreviewResult("preview_import_with_key_file", response);
+}
+
+function toPreviewResult(command: string, response: PreviewImportResponse): ImportPreviewResult {
   // 応答の形は、型引数で断定できるだけで、Rust側との取り決めがずれると、識別子が欠ける。識別子の無い保留を
   // 画面へ渡さないよう、実行時に検証する。
-  const response = await invoke<
-    { pending_id: unknown; preview: ImportPreviewDto; passphrase_trimmed?: unknown } | null | undefined
-  >("preview_import", { sourcePath, passphrase });
   const pendingId = response?.pending_id;
   if (!response || !isPendingId(pendingId)) {
-    throw new Error(`preview_import returned an invalid pending_id: ${String(pendingId)}`);
+    throw new Error(`${command} returned an invalid pending_id: ${String(pendingId)}`);
   }
   recordPendingImportIdForE2e(pendingId);
   // passphrase_trimmedは、知らせるだけの印のため、無い・真偽値でないときは、falseとして扱う(確認画面へ進む流れは止めない)。
   return { pendingId, preview: response.preview, passphraseTrimmed: response.passphrase_trimmed === true };
+}
+
+// エクスポートしたファイルの、復号の方式(ファイルの先頭の、平文のヘッダーから分かる)。
+export type ImportMethod = "passphrase" | "key_file";
+
+export async function detectImportMethod(sourcePath: string): Promise<ImportMethod> {
+  const method = await invoke<unknown>("detect_import_method", { sourcePath });
+  if (method !== "passphrase" && method !== "key_file") {
+    throw new Error(`detect_import_method returned an invalid method: ${String(method)}`);
+  }
+  return method;
+}
+
+// 鍵ファイル付きのエクスポートの結果。keyFileRestrictedは、鍵ファイルを、所有ユーザーだけの権限にできたか
+// (FAT/exFATのUSBメモリなどでは、できない)。応答に無い・真偽値でないときは、falseとして扱う(知らせる側に倒す)。
+export interface ExportWithKeyFileResult {
+  keyFileRestricted: boolean;
+}
+
+function toExportWithKeyFileResult(response: { key_file_restricted?: unknown } | null | undefined) {
+  return { keyFileRestricted: response?.key_file_restricted === true };
+}
+
+export async function exportProfileToFileWithKeyFile(
+  name: string,
+  destPath: string,
+  keyDestPath: string
+): Promise<ExportWithKeyFileResult> {
+  await waitForE2eExportWriteGate();
+  return toExportWithKeyFileResult(
+    await invoke("export_profile_with_key_file", { name, destPath, keyDestPath })
+  );
+}
+
+export async function exportAllToFileWithKeyFile(
+  destPath: string,
+  keyDestPath: string
+): Promise<ExportWithKeyFileResult> {
+  await waitForE2eExportWriteGate();
+  return toExportWithKeyFileResult(await invoke("export_all_with_key_file", { destPath, keyDestPath }));
 }
 
 export interface CommitImportResultDto {

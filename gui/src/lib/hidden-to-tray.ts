@@ -20,6 +20,11 @@ const KEPT_KINDS: ReadonlySet<string> = new Set([
   "templateSelect",
   "profileNameFromTemplate",
   "tagManagement",
+  // 鍵ファイル方式の、エクスポートの方式選択・鍵ファイルの保存、インポートの鍵ファイル入力は、鍵の中身も、パスフレーズも、
+  // 持たない(持つのは、ファイルのパスだけ)。
+  "exportMethod",
+  "exportKeyFile",
+  "importKeyFile",
   "fileImportChoice",
   "overwriteConfirm",
   "matchCountConfirm",

@@ -59,7 +59,12 @@ async function setActiveProfileViaIpc(name: string) {
 }
 
 // 保存/開くダイアログの代わりに返すパスを、アプリ(E2Eビルド)側へ設定する。
-async function setE2eFileDialogPaths(paths: { save?: string; open?: string }) {
+async function setE2eFileDialogPaths(paths: {
+  save?: string;
+  open?: string;
+  saveKey?: string;
+  openKey?: string;
+}) {
   await browser.tauri.execute((_tauri, p) => {
     (window as unknown as { __e2eFileDialogPaths?: typeof p }).__e2eFileDialogPaths = p;
   }, paths);
@@ -78,6 +83,33 @@ async function holdSaveDialog() {
       }),
     };
   });
+}
+
+// 鍵ファイルの保存ダイアログの結果を、settleSaveKeyDialogが呼ばれるまで保留する(エクスポートしたファイルの保存先は、
+// 指定しない側で、別に決める)。
+async function holdSaveKeyDialog(dataPath?: string) {
+  await browser.tauri.execute((_tauri, save) => {
+    const w = window as unknown as {
+      __e2eFileDialogPaths?: { save?: string; saveKey?: Promise<string | null> };
+      __e2eSaveKeyControl?: { resolve: (path: string | null) => void };
+    };
+    w.__e2eFileDialogPaths = {
+      ...(save ? { save } : {}),
+      saveKey: new Promise<string | null>((resolve) => {
+        w.__e2eSaveKeyControl = { resolve };
+      }),
+    };
+  }, dataPath);
+}
+
+// 保留した鍵ファイルの保存ダイアログを、保存先の決定(path)・取り消し(null)で決着させる。
+async function settleSaveKeyDialog(outcome: { path: string | null }) {
+  await browser.tauri.execute((_tauri, o) => {
+    const control = (window as unknown as { __e2eSaveKeyControl?: { resolve: (path: string | null) => void } })
+      .__e2eSaveKeyControl;
+    if (!control) throw new Error("鍵ファイルの保存ダイアログが保留されていない(holdSaveKeyDialogを先に呼ぶ)");
+    control.resolve(o.path);
+  }, outcome);
 }
 
 // 保留した保存ダイアログを、保存先の決定(path)・取り消し(null)・失敗(error)のいずれかで決着させる。
@@ -355,6 +387,7 @@ afterEach(async () => {
       const w = window as unknown as {
         __e2eFileDialogPaths?: unknown;
         __e2eSaveControl?: { resolve: (path: string | null) => void };
+        __e2eSaveKeyControl?: { resolve: (path: string | null) => void };
         __e2eOpenControl?: { resolve: (path: string | null) => void };
         __e2ePendingImportIds?: number[];
         __e2eExportWriteGate?: unknown;
@@ -365,9 +398,11 @@ afterEach(async () => {
       w.__e2eReleaseExportWrite = undefined;
       w.__e2eExportWriteGate = undefined;
       w.__e2eSaveControl?.resolve(null);
+      w.__e2eSaveKeyControl?.resolve(null);
       w.__e2eOpenControl?.resolve(null);
       // 次のテストが、保留していないのにsettleしたとき、前のテストの参照に当たらず失敗するようにする。
       w.__e2eSaveControl = undefined;
+      w.__e2eSaveKeyControl = undefined;
       w.__e2eOpenControl = undefined;
       w.__e2eFileDialogPaths = undefined;
       // 次のテストの「直近に受け取った保留の識別子」が、前のテストのものにならないようにする。
@@ -400,8 +435,17 @@ async function openProfileManagement() {
   await $("h1=プロファイル管理").waitForExist({ timeout: 10000 });
 }
 
-// プロファイル管理画面で、指定した名前の行の「エクスポート」を押してモーダルを返す。
-async function openExportDialogFromRow(profileName: string) {
+// エクスポートの方法の選択画面(鍵ファイル・パスフレーズの選択)。
+const EXPORT_METHOD_DIALOG = '//*[@role="dialog"][.//*[@role="radiogroup"]]';
+// パスフレーズのエクスポート画面(読み取り専用のパスフレーズ欄を持つ)。
+const PASSPHRASE_EXPORT_DIALOG = '//*[@role="dialog"][.//input[@readonly]]';
+// インポートの、鍵ファイルの入力画面。
+const IMPORT_KEY_FILE_DIALOG = '//*[@role="dialog"][.//*[contains(text(),"鍵ファイルで暗号化されています")]]';
+// 鍵ファイルのエクスポート画面(鍵ファイルを別に保存する、と示す)。
+const KEY_FILE_EXPORT_DIALOG = '//*[@role="dialog"][.//*[contains(text(),"を、別に保存します")]]';
+
+// プロファイル管理画面で、指定した名前の行の「エクスポート」を押して、エクスポートの方法の選択画面を返す。
+async function openExportMethodDialogFromRow(profileName: string) {
   const row = await $(
     `//div[contains(@class,"rounded-lg")][.//*[contains(text(),"${profileName}")]]`
   );
@@ -409,9 +453,45 @@ async function openExportDialogFromRow(profileName: string) {
   await exportButton.waitForExist({ timeout: 10000 });
   await exportButton.click();
 
-  const dialog = await $('[role="dialog"]');
+  const dialog = await $(EXPORT_METHOD_DIALOG);
   await dialog.waitForExist({ timeout: 10000 });
   return dialog;
+}
+
+// エクスポートの方法の選択画面で、パスフレーズを選んで、次へ進み、パスフレーズのエクスポート画面を返す。
+async function choosePassphraseExportMethod() {
+  const methodDialog = await $(EXPORT_METHOD_DIALOG);
+  await methodDialog.waitForExist({ timeout: 10000 });
+  await (await methodDialog.$('//label[.//span[normalize-space()="パスフレーズ"]]')).click();
+  await (await methodDialog.$("button=次へ")).click();
+  // 消えていく途中の方法の選択画面(ボタンが残る)を、次の画面と取り違えないよう、消えるまで待つ。
+  await methodDialog.waitForExist({ reverse: true, timeout: 10000 });
+  const dialog = await $(PASSPHRASE_EXPORT_DIALOG);
+  await dialog.waitForExist({ timeout: 10000 });
+  return dialog;
+}
+
+// エクスポートの方法の選択画面で、鍵ファイル(初期の選択のまま)で、次へ進み、鍵ファイルのエクスポート画面を返す。
+async function chooseKeyFileExportMethod() {
+  const methodDialog = await $(EXPORT_METHOD_DIALOG);
+  await methodDialog.waitForExist({ timeout: 10000 });
+  await (await methodDialog.$("button=次へ")).click();
+  await methodDialog.waitForExist({ reverse: true, timeout: 10000 });
+  const dialog = await $(KEY_FILE_EXPORT_DIALOG);
+  await dialog.waitForExist({ timeout: 10000 });
+  return dialog;
+}
+
+// 「全体エクスポート」を押して、パスフレーズを選び、パスフレーズのエクスポート画面を返す。
+async function openAllExportDialogWithPassphrase() {
+  await (await $("button=全体エクスポート")).click();
+  return choosePassphraseExportMethod();
+}
+
+// プロファイル管理画面で、指定した名前の行の「エクスポート」から、パスフレーズを選んで、モーダルを返す。
+async function openExportDialogFromRow(profileName: string) {
+  await openExportMethodDialogFromRow(profileName);
+  return choosePassphraseExportMethod();
 }
 
 // メイン画面からプロファイル管理画面を開き、指定した名前の行のエクスポートモーダルを返す。
@@ -429,6 +509,20 @@ async function returnToMainScreen() {
 }
 
 let keeperSequence = 0;
+let dummySequence = 0;
+
+// 取り込み元として指すだけの、実在するパスフレーズ方式の.smxを、IPCで作る(取り込みの前に、ファイルの先頭から、復号の方式を
+// 判別するため)。作ったプロファイルは、消さない(アクティブなプロファイルは、消せないため)。
+async function createDummyExportFile(filePath: string): Promise<void> {
+  const name = `E2Eダミー${++dummySequence}`;
+  await createProfileViaIpc(name);
+  await browser.tauri.execute(
+    ({ core }, profileName, destPath) =>
+      core.invoke("export_profile_to_file", { name: profileName, passphrase: "dummy-passphrase-0001", destPath }),
+    name,
+    filePath
+  );
+}
 
 // プロファイルを書き出し(書き出したファイルのパスフレーズを返す)、そのプロファイルを削除する
 // (取り込み直せる状態にするため)。アクティブなプロファイルは削除できないため、別のプロファイルを
@@ -1023,9 +1117,7 @@ describe("エクスポートの実行(ファイルダイアログの差し替え
     await setE2eFileDialogPaths({ save: filePath, open: filePath });
 
     await openProfileManagement();
-    await (await $("button=全体エクスポート")).click();
-    const exportDialog = await $('[role="dialog"]');
-    await exportDialog.waitForExist({ timeout: 10000 });
+    const exportDialog = await openAllExportDialogWithPassphrase();
     const passphraseInput = await exportDialog.$("input[readonly]");
     const initial = await passphraseInput.getValue();
 
@@ -1122,9 +1214,7 @@ describe("エクスポートの実行(ファイルダイアログの差し替え
     await setE2eFileDialogPaths({ save: filePath, open: filePath });
 
     await openProfileManagement();
-    await (await $("button=全体エクスポート")).click();
-    const exportDialog = await $('[role="dialog"]');
-    await exportDialog.waitForExist({ timeout: 10000 });
+    const exportDialog = await openAllExportDialogWithPassphrase();
     const passphraseInput = await exportDialog.$("input[readonly]");
     const initial = await passphraseInput.getValue();
     await (await exportDialog.$("button=再生成")).click();
@@ -1252,9 +1342,7 @@ describe("エクスポートの実行(ファイルダイアログの差し替え
     // 単一プロファイルのインポートは、同名のプロファイルが既にあると拒否される。同じDBでの
     // 往復は、重複した名前が自動でリネームされる全体エクスポートで行う。
     await openProfileManagement();
-    await (await $("button=全体エクスポート")).click();
-    const exportDialog = await $('[role="dialog"]');
-    await exportDialog.waitForExist({ timeout: 10000 });
+    const exportDialog = await openAllExportDialogWithPassphrase();
     const passphrase = await (await exportDialog.$("input[readonly]")).getValue();
     await (await exportDialog.$("button=エクスポート")).click();
     await waitForExportNotice(exportDialog);
@@ -1292,8 +1380,10 @@ describe("エクスポートの実行(ファイルダイアログの差し替え
 
   it("インポートのパスフレーズ欄は伏せ字から始まり、「表示」で入力内容を確認でき、開き直すと伏せ字へ戻る", async () => {
     await completeInitialSetup();
-    // パスフレーズ入力画面を開くだけなので、指すファイルは実在しなくてよい。
-    await setE2eFileDialogPaths({ open: path.join(exportDir, "dummy.smx") });
+    // パスフレーズ入力画面を開くだけだが、方式の判別が、ファイルの先頭を読むため、実在するパスフレーズ方式のファイルを指す。
+    const dummyPath = path.join(exportDir, "dummy.smx");
+    await createDummyExportFile(dummyPath);
+    await setE2eFileDialogPaths({ open: dummyPath });
     await openProfileManagement();
 
     await (await $("button=インポート")).click();
@@ -1330,9 +1420,7 @@ describe("エクスポートの実行(ファイルダイアログの差し替え
     await setE2eFileDialogPaths({ save: roundTripPath, open: roundTripPath });
 
     await openProfileManagement();
-    await (await $("button=全体エクスポート")).click();
-    const exportDialog = await $('[role="dialog"]');
-    await exportDialog.waitForExist({ timeout: 10000 });
+    const exportDialog = await openAllExportDialogWithPassphrase();
     const passphrase = await (await exportDialog.$("input[readonly]")).getValue();
     await (await exportDialog.$("button=エクスポート")).click();
     await waitForExportNotice(exportDialog);
@@ -1505,8 +1593,9 @@ describe("エクスポートの実行(ファイルダイアログの差し替え
     await completeInitialSetup();
     const profileName = "E2Eインポート選択中確認";
     await createProfileViaIpc(profileName);
-    // パスフレーズ入力画面を開くだけなので、指すファイルは実在しなくてよい。
+    // パスフレーズ入力画面を開くだけだが、方式の判別が、ファイルの先頭を読むため、実在するパスフレーズ方式のファイルを指す。
     const filePath = path.join(exportDir, "picking.smx");
+    await createDummyExportFile(filePath);
     await openProfileManagement();
 
     // 対照: エクスポート画面を開かなければ、選択が終わった時点で、パスフレーズの入力画面が出る。
@@ -1828,6 +1917,8 @@ describe("エクスポートの実行(ファイルダイアログの差し替え
       );
       if (route === "main") await returnToMainScreen();
       const invalidBytesWarning = await $(`div*=${INVALID_BYTES_WARNING_TEXT}`);
+      // 「インポート」の入口は、方式の判別が、ファイルの先頭を読むため、実在する.smxを選ぶ。他の入口は、.envを選ぶ。
+      const pickedPath = label === "インポート" ? smxPath : textPath;
 
       // 対照: 確認画面が開かれていなければ、選択・読み込みが終わった時点で、その入口の画面が開く。読み込みを
       // 伴う入口では、警告も出る。開くまでの時間を測り、後で「置き換えられない」ことを確かめるまでの待ちの目安にする。
@@ -1835,7 +1926,7 @@ describe("エクスポートの実行(ファイルダイアログの差し替え
       await pressBackgroundButton(label);
       expect(await openDialogCalls()).toBe(1);
       const settledAt = Date.now();
-      await settleOpenDialog(textPath);
+      await settleOpenDialog(pickedPath);
       const opened = await $('[role="dialog"]');
       await opened.waitForExist({ timeout: 10000 });
       const openedAfterMs = Date.now() - settledAt;
@@ -1852,7 +1943,7 @@ describe("エクスポートの実行(ファイルダイアログの差し替え
       await holdOpenDialog();
       await pressBackgroundButton(label);
       expect(await openDialogCalls()).toBe(1);
-      await settleOpenDialog(textPath);
+      await settleOpenDialog(pickedPath);
       await browser.pause(Math.max(1500, openedAfterMs * 3));
       expect(await $('[role="alertdialog"]').isDisplayed()).toBe(true);
       expect(await $('[role="dialog"]').isExisting()).toBe(false);
@@ -2027,7 +2118,9 @@ describe("エクスポートの実行(ファイルダイアログの差し替え
 
   it("トレイへ格納すると、開いていたインポートのパスフレーズ入力画面が閉じ、入力していたパスフレーズは残らない", async () => {
     await completeInitialSetup();
-    await setE2eFileDialogPaths({ open: path.join(exportDir, "hide-with-typed-passphrase.smx") });
+    const typedPassphrasePath = path.join(exportDir, "hide-with-typed-passphrase.smx");
+    await createDummyExportFile(typedPassphrasePath);
+    await setE2eFileDialogPaths({ open: typedPassphrasePath });
     await openProfileManagement();
     await (await $("button=インポート")).click();
     const importDialog = await $('[role="dialog"]');
@@ -2169,6 +2262,276 @@ describe("エクスポートの実行(ファイルダイアログの差し替え
     await (await dialog.$("button=閉じる")).click();
     await dialog.waitForExist({ reverse: true, timeout: 10000 });
     expect(await contextMenuIsSuppressed()).toBe(false);
+    await returnToMainScreen();
+  });
+
+  // ===== 鍵ファイル方式 =====
+
+  it("エクスポートを始めると、方法の選択画面が出て、鍵ファイルが初期の選択で、キャンセルすると閉じる", async () => {
+    await completeInitialSetup();
+    const profileName = "E2E方法選択確認";
+    await createProfileViaIpc(profileName);
+    await openProfileManagement();
+
+    const dialog = await openExportMethodDialogFromRow(profileName);
+
+    const radios = await dialog.$$('[role="radio"]');
+    expect(radios).toHaveLength(2);
+    expect(await radios[0].getAttribute("aria-checked")).toBe("true");
+    expect(await radios[1].getAttribute("aria-checked")).toBe("false");
+    expect(await dialog.getText()).toContain("鍵ファイル(推奨)");
+    await (await dialog.$("button=キャンセル")).click();
+    await dialog.waitForExist({ reverse: true, timeout: 10000 });
+    expect(await $(PASSPHRASE_EXPORT_DIALOG).isExisting()).toBe(false);
+    expect(await $(KEY_FILE_EXPORT_DIALOG).isExisting()).toBe(false);
+    await returnToMainScreen();
+  });
+
+  it("鍵ファイルを選んでエクスポートすると、エクスポートしたファイルと鍵ファイルが書き出され、その鍵ファイルで、インポートできる", async () => {
+    await completeInitialSetup();
+    const profileName = "E2E鍵ファイル往復確認";
+    const smxPath = path.join(exportDir, "key-round-trip.smx");
+    const keyPath = path.join(exportDir, "key-round-trip.smxkey");
+    const keeperName = `E2E保持用${++keeperSequence}`;
+    await createProfileViaIpc(keeperName);
+    await setActiveProfileViaIpc(keeperName);
+    await createProfileViaIpc(profileName);
+    await setE2eFileDialogPaths({ saveKey: keyPath, save: smxPath, open: smxPath, openKey: keyPath });
+
+    await openProfileManagement();
+    await openExportMethodDialogFromRow(profileName);
+    const dialog = await chooseKeyFileExportMethod();
+    expect(await dialog.getText()).toContain("この鍵ファイルを紛失すると、このプロファイルは二度と復号できません。");
+    await (await dialog.$("button=エクスポート")).click();
+    // 書き込みが終わると、画面は閉じる(鍵は、画面へ渡さないため、見せるものが無い)。
+    await dialog.waitForExist({ reverse: true, timeout: 15000 });
+
+    expect(fs.existsSync(smxPath)).toBe(true);
+    const keyText = fs.readFileSync(keyPath, "utf8");
+    expect(keyText).toContain("AGE-SECRET-KEY-1");
+    expect(keyText.startsWith("#")).toBe(true);
+    await deleteProfileViaIpc(profileName);
+
+    // インポート: 復号の方式は、ファイルの先頭から、鍵ファイルと判別され、鍵ファイルの入力画面が開く。
+    await (await $("button=インポート")).click();
+    const keyDialog = await $(IMPORT_KEY_FILE_DIALOG);
+    await keyDialog.waitForExist({ timeout: 10000 });
+    expect(await (await keyDialog.$("button=OK")).isEnabled()).toBe(false);
+    await (await keyDialog.$("button=鍵ファイルを選択…")).click();
+    await browser.waitUntil(async () => (await keyDialog.getText()).includes("key-round-trip.smxkey"), {
+      timeout: 10000,
+      timeoutMsg: "選んだ鍵ファイルの名前が示されなかった",
+    });
+    await (await keyDialog.$("button=OK")).click();
+    const confirmDialog = await $('[role="alertdialog"]');
+    await confirmDialog.waitForExist({ timeout: 15000 });
+    expect(await confirmDialog.getText()).toContain(profileName);
+    await (await confirmDialog.$("button=インポート実行")).click();
+    await confirmDialog.waitForExist({ reverse: true, timeout: 10000 });
+    await browser.waitUntil(async () => (await listProfileNames()).includes(profileName), {
+      timeout: 10000,
+      timeoutMsg: "インポートしたプロファイルが復元されなかった",
+    });
+    await returnToMainScreen();
+  });
+
+  it("メイン画面のインポートでも、鍵ファイル方式のファイルは、鍵ファイルの入力画面が開き、その鍵ファイルで、インポートできる", async () => {
+    await completeInitialSetup();
+    const profileName = "E2Eメイン画面鍵ファイル確認";
+    const smxPath = path.join(exportDir, "key-main.smx");
+    const keyPath = path.join(exportDir, "key-main.smxkey");
+    const keeperName = `E2E保持用${++keeperSequence}`;
+    await createProfileViaIpc(keeperName);
+    await setActiveProfileViaIpc(keeperName);
+    await createProfileViaIpc(profileName);
+    await setE2eFileDialogPaths({ saveKey: keyPath, save: smxPath, open: smxPath, openKey: keyPath });
+    await openProfileManagement();
+    await openExportMethodDialogFromRow(profileName);
+    const exportDialog = await chooseKeyFileExportMethod();
+    await (await exportDialog.$("button=エクスポート")).click();
+    await exportDialog.waitForExist({ reverse: true, timeout: 15000 });
+    await deleteProfileViaIpc(profileName);
+    await returnToMainScreen();
+
+    await (await $("button=インポート")).click();
+    const keyDialog = await $(IMPORT_KEY_FILE_DIALOG);
+    await keyDialog.waitForExist({ timeout: 10000 });
+    await (await keyDialog.$("button=鍵ファイルを選択…")).click();
+    await browser.waitUntil(async () => (await keyDialog.getText()).includes("key-main.smxkey"), { timeout: 10000 });
+    await (await keyDialog.$("button=OK")).click();
+    const confirmDialog = await $('[role="alertdialog"]');
+    await confirmDialog.waitForExist({ timeout: 15000 });
+    await (await confirmDialog.$("button=インポート実行")).click();
+    await confirmDialog.waitForExist({ reverse: true, timeout: 10000 });
+    await browser.waitUntil(async () => (await listProfileNames()).includes(profileName), { timeout: 10000 });
+  });
+
+  it("別のエクスポートの鍵ファイル・拡張子が違うファイルでは、インポートできず、理由が示され、正しい鍵ファイルへ選び直すと、インポートできる", async () => {
+    await completeInitialSetup();
+    const nameA = "E2E鍵ファイル誤り確認A";
+    const nameB = "E2E鍵ファイル誤り確認B";
+    const smxA = path.join(exportDir, "key-wrong-a.smx");
+    const keyA = path.join(exportDir, "key-wrong-a.smxkey");
+    const smxB = path.join(exportDir, "key-wrong-b.smx");
+    const keyB = path.join(exportDir, "key-wrong-b.smxkey");
+    const notAKey = path.join(exportDir, "not-a-key.txt");
+    fs.writeFileSync(notAKey, "not a key file");
+    const keeperName = `E2E保持用${++keeperSequence}`;
+    await createProfileViaIpc(keeperName);
+    await setActiveProfileViaIpc(keeperName);
+    await createProfileViaIpc(nameA);
+    await createProfileViaIpc(nameB);
+    await openProfileManagement();
+    for (const [name, smx, key] of [[nameA, smxA, keyA], [nameB, smxB, keyB]] as const) {
+      await setE2eFileDialogPaths({ saveKey: key, save: smx });
+      await openExportMethodDialogFromRow(name);
+      const dialog = await chooseKeyFileExportMethod();
+      await (await dialog.$("button=エクスポート")).click();
+      await dialog.waitForExist({ reverse: true, timeout: 15000 });
+    }
+    await deleteProfileViaIpc(nameA);
+
+    await setE2eFileDialogPaths({ open: smxA, openKey: keyB });
+    await (await $("button=インポート")).click();
+    const keyDialog = await $(IMPORT_KEY_FILE_DIALOG);
+    await keyDialog.waitForExist({ timeout: 10000 });
+    await (await keyDialog.$("button=鍵ファイルを選択…")).click();
+    await browser.waitUntil(async () => (await keyDialog.getText()).includes("key-wrong-b.smxkey"), { timeout: 10000 });
+    await (await keyDialog.$("button=OK")).click();
+    const wrongKeyError = await keyDialog.$('[role="alert"]');
+    await wrongKeyError.waitForExist({ timeout: 15000 });
+    expect(await wrongKeyError.getText()).toContain("この鍵ファイルでは復号できません");
+    expect(await $('[role="alertdialog"]').isExisting()).toBe(false);
+
+    // 拡張子が違うファイルを選んでも、理由が示される。
+    await setE2eFileDialogPaths({ open: smxA, openKey: notAKey });
+    await (await keyDialog.$("button=鍵ファイルを選択…")).click();
+    await browser.waitUntil(async () => (await keyDialog.getText()).includes("not-a-key.txt"), { timeout: 10000 });
+    await (await keyDialog.$("button=OK")).click();
+    await browser.waitUntil(async () => (await keyDialog.$('[role="alert"]').getText()).includes(".smxkey"), {
+      timeout: 15000,
+      timeoutMsg: "拡張子が違う鍵ファイルの理由が示されなかった",
+    });
+
+    // 正しい鍵ファイルへ選び直すと、確認画面へ進む。
+    await setE2eFileDialogPaths({ open: smxA, openKey: keyA });
+    await (await keyDialog.$("button=鍵ファイルを選択…")).click();
+    await browser.waitUntil(async () => (await keyDialog.getText()).includes("key-wrong-a.smxkey"), { timeout: 10000 });
+    expect(await keyDialog.$('[role="alert"]').isExisting()).toBe(false);
+    await (await keyDialog.$("button=OK")).click();
+    const confirmDialog = await $('[role="alertdialog"]');
+    await confirmDialog.waitForExist({ timeout: 15000 });
+    await (await confirmDialog.$("button=キャンセル")).click();
+    await confirmDialog.waitForExist({ reverse: true, timeout: 10000 });
+    await returnToMainScreen();
+  });
+
+  it("エクスポートしたファイルではないファイルを取り込もうとすると、理由が通知され、入力画面は開かない", async () => {
+    await completeInitialSetup();
+    const garbagePath = path.join(exportDir, "garbage.smx");
+    fs.writeFileSync(garbagePath, "this is not an exported file");
+    await setE2eFileDialogPaths({ open: garbagePath });
+    await openProfileManagement();
+
+    await (await $("button=インポート")).click();
+
+    await browser.waitUntil(
+      async () =>
+        (
+          await browser.execute(() =>
+            Array.from(document.querySelectorAll("[data-sonner-toast]")).map((t) => t.textContent ?? "")
+          )
+        ).some((text) => text.includes("エクスポートしたファイルとして読み取れません")),
+      { timeout: 10000, timeoutMsg: "読み取れない理由が通知されなかった" }
+    );
+    expect(await $('[role="dialog"]').isExisting()).toBe(false);
+    await returnToMainScreen();
+  });
+
+  it("鍵ファイルの保存先を選ぶ間は、画面を閉じられ、その選択が決着しても、書き出されない", async () => {
+    await completeInitialSetup();
+    const profileName = "E2E鍵ファイル選択中確認";
+    await createProfileViaIpc(profileName);
+    await openProfileManagement();
+    await openExportMethodDialogFromRow(profileName);
+    const dialog = await chooseKeyFileExportMethod();
+    const smxPath = path.join(exportDir, "closed-while-choosing-key.smx");
+    const keyPath = path.join(exportDir, "closed-while-choosing-key.smxkey");
+    await holdSaveKeyDialog(smxPath);
+    await (await dialog.$("button=エクスポート")).click();
+    await waitForDialogText(dialog, "鍵ファイルの保存先を選択しています");
+    expect(await (await dialog.$("button=エクスポート")).isEnabled()).toBe(false);
+    expect(await (await dialog.$("button=キャンセル")).isEnabled()).toBe(true);
+
+    await browser.keys("Escape");
+    await dialog.waitForExist({ reverse: true, timeout: 10000 });
+    await settleSaveKeyDialog({ path: keyPath });
+    await browser.pause(1500);
+
+    expect(fs.existsSync(keyPath)).toBe(false);
+    expect(fs.existsSync(smxPath)).toBe(false);
+    await returnToMainScreen();
+  });
+
+  it("鍵ファイルの保存先の選択を取り消すと、何も書き出されず、画面は開いたままで、やり直せる", async () => {
+    await completeInitialSetup();
+    const profileName = "E2E鍵ファイル取消確認";
+    await createProfileViaIpc(profileName);
+    await openProfileManagement();
+    await openExportMethodDialogFromRow(profileName);
+    const dialog = await chooseKeyFileExportMethod();
+    const smxPath = path.join(exportDir, "cancelled-key.smx");
+    const keyPath = path.join(exportDir, "cancelled-key.smxkey");
+    await holdSaveKeyDialog(smxPath);
+    await (await dialog.$("button=エクスポート")).click();
+    await waitForDialogText(dialog, "鍵ファイルの保存先を選択しています");
+
+    await settleSaveKeyDialog({ path: null });
+
+    await browser.waitUntil(async () => (await dialog.$("button=エクスポート")).isEnabled(), {
+      timeout: 10000,
+      timeoutMsg: "取り消しの後、エクスポートを押せる状態へ戻らなかった",
+    });
+    expect(await dialog.isExisting()).toBe(true);
+    expect(fs.existsSync(keyPath)).toBe(false);
+    expect(fs.existsSync(smxPath)).toBe(false);
+
+    // エクスポートしたファイルの保存先の選択を取り消しても、鍵ファイルだけが書き出されることはない。
+    await setE2eFileDialogPaths({ saveKey: keyPath });
+    await browser.tauri.execute(() => {
+      (window as unknown as { __e2eFileDialogPaths: { save?: Promise<string | null> } }).__e2eFileDialogPaths.save =
+        Promise.resolve(null);
+    });
+    await (await dialog.$("button=エクスポート")).click();
+    await browser.waitUntil(async () => (await dialog.$("button=エクスポート")).isEnabled(), { timeout: 10000 });
+    expect(fs.existsSync(keyPath)).toBe(false);
+    await (await dialog.$("button=キャンセル")).click();
+    await dialog.waitForExist({ reverse: true, timeout: 10000 });
+    await returnToMainScreen();
+  });
+
+  it("鍵ファイルの書き込み中は、画面を閉じられない", async () => {
+    await completeInitialSetup();
+    const profileName = "E2E鍵ファイル書き込み中確認";
+    await createProfileViaIpc(profileName);
+    await openProfileManagement();
+    await openExportMethodDialogFromRow(profileName);
+    const dialog = await chooseKeyFileExportMethod();
+    const smxPath = path.join(exportDir, "writing-key.smx");
+    const keyPath = path.join(exportDir, "writing-key.smxkey");
+    await setE2eFileDialogPaths({ saveKey: keyPath, save: smxPath });
+    await holdExportWrite();
+    await (await dialog.$("button=エクスポート")).click();
+    await waitForDialogText(dialog, "書き込んでいます");
+
+    expect(await (await dialog.$("button=キャンセル")).isEnabled()).toBe(false);
+    await browser.keys("Escape");
+    await browser.pause(500);
+    expect(await dialog.isExisting()).toBe(true);
+
+    await releaseExportWrite();
+    await dialog.waitForExist({ reverse: true, timeout: 15000 });
+    expect(fs.existsSync(keyPath) && fs.existsSync(smxPath)).toBe(true);
     await returnToMainScreen();
   });
 

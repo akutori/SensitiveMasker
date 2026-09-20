@@ -8,8 +8,12 @@ import { listen } from "@tauri-apps/api/event";
 import {
   clearPendingImport,
   commitPendingImport,
+  detectImportMethod,
+  exportAllToFileWithKeyFile,
+  exportProfileToFileWithKeyFile,
   onMainWindowHiddenToTray,
   previewImport,
+  previewImportWithKeyFile,
 } from "./profile-ipc";
 
 const DUMMY_PREVIEW = {
@@ -82,6 +86,89 @@ describe("インポートの保留のIPC", () => {
 
     expect(tauriCore.invoke).toHaveBeenCalledWith("clear_pending_import", { pendingId: 12 });
   });
+});
+
+// 鍵ファイル方式のコマンド(detect_import_method・preview_import_with_key_file・export_*_with_key_file)との、
+// 引数名・応答の形の取り決めを固定する。鍵は、画面へ渡さない(渡すのは、パスだけ)。
+describe("鍵ファイル方式のIPC", () => {
+  beforeEach(() => {
+    tauriCore.invoke.mockReset();
+  });
+
+  it.each(["passphrase", "key_file"] as const)("detectImportMethodは、Rustの応答「%s」を、そのまま返す", async (method) => {
+    tauriCore.invoke.mockResolvedValue(method);
+
+    expect(await detectImportMethod("C:/dummy/export.smx")).toBe(method);
+    expect(tauriCore.invoke).toHaveBeenCalledWith("detect_import_method", { sourcePath: "C:/dummy/export.smx" });
+  });
+
+  it.each([["不明な方式", "other"], ["応答なし", undefined], ["null", null]])(
+    "detectImportMethodは、応答が「%s」のとき、エラーを投げる(方式を推測しない)",
+    async (_label, response) => {
+      tauriCore.invoke.mockResolvedValue(response);
+
+      await expect(detectImportMethod("C:/dummy/export.smx")).rejects.toThrow(/invalid method/);
+    }
+  );
+
+  it("previewImportWithKeyFileは、sourcePathとkeyPathを渡し、結果を、pendingId・preview・passphraseTrimmed(常にfalse)へ詰め替える", async () => {
+    tauriCore.invoke.mockResolvedValue({ pending_id: 5, preview: DUMMY_PREVIEW });
+
+    const result = await previewImportWithKeyFile("C:/dummy/export.smx", "C:/dummy/export.smxkey");
+
+    expect(tauriCore.invoke).toHaveBeenCalledWith("preview_import_with_key_file", {
+      sourcePath: "C:/dummy/export.smx",
+      keyPath: "C:/dummy/export.smxkey",
+    });
+    expect(result).toEqual({ pendingId: 5, preview: DUMMY_PREVIEW, passphraseTrimmed: false });
+  });
+
+  it.each([["pending_idが無い", { preview: DUMMY_PREVIEW }], ["応答がnull", null], ["pending_idがNaN", { pending_id: Number.NaN, preview: DUMMY_PREVIEW }]])(
+    "previewImportWithKeyFileは、%sのとき、エラーを投げる(識別子の無い保留を、確認画面へ渡さない)",
+    async (_label, response) => {
+      tauriCore.invoke.mockResolvedValue(response);
+
+      await expect(previewImportWithKeyFile("C:/dummy/export.smx", "C:/dummy/export.smxkey")).rejects.toThrow(
+        /invalid pending_id/
+      );
+    }
+  );
+
+  it("exportProfileToFileWithKeyFileは、name・destPath・keyDestPathを渡し、key_file_restrictedをkeyFileRestrictedへ写す", async () => {
+    tauriCore.invoke.mockResolvedValue({ key_file_restricted: true });
+
+    const result = await exportProfileToFileWithKeyFile("dummy", "C:/dummy/e.smx", "C:/dummy/e.smxkey");
+
+    expect(tauriCore.invoke).toHaveBeenCalledWith("export_profile_with_key_file", {
+      name: "dummy",
+      destPath: "C:/dummy/e.smx",
+      keyDestPath: "C:/dummy/e.smxkey",
+    });
+    expect(result).toEqual({ keyFileRestricted: true });
+  });
+
+  it("exportAllToFileWithKeyFileは、destPathとkeyDestPathだけを渡す", async () => {
+    tauriCore.invoke.mockResolvedValue({ key_file_restricted: false });
+
+    const result = await exportAllToFileWithKeyFile("C:/dummy/e.smx", "C:/dummy/e.smxkey");
+
+    expect(tauriCore.invoke).toHaveBeenCalledWith("export_all_with_key_file", {
+      destPath: "C:/dummy/e.smx",
+      keyDestPath: "C:/dummy/e.smxkey",
+    });
+    expect(result).toEqual({ keyFileRestricted: false });
+  });
+
+  it.each([["応答なし", undefined], ["null", null], ["キーが無い", {}], ["真偽値でない", { key_file_restricted: "true" }]])(
+    "鍵ファイル付きのエクスポートは、応答が「%s」のとき、権限を制限できていないものとして扱う(利用者へ知らせる側に倒す)",
+    async (_label, response) => {
+      tauriCore.invoke.mockResolvedValue(response);
+
+      const result = await exportAllToFileWithKeyFile("C:/dummy/e.smx", "C:/dummy/e.smxkey");
+
+      expect(result.keyFileRestricted).toBe(false);
+    }
+  );
 });
 
 // Rust側(tray.rsのMAIN_WINDOW_HIDDEN_EVENT)が、メインウィンドウのトレイへの格納を知らせるイベントの名前を固定する。
