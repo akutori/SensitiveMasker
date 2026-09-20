@@ -31,17 +31,18 @@ jobs:
         working-directory: gui
         run: bun install --frozen-lockfile
 
-      # src・E2E・scripts・vite.config.ts・wdio.conf.tsの型を検査する(下のbun run buildのtscは、srcだけを検査する)。
-      - name: type check (src, e2e, scripts, config)
-        working-directory: gui
-        run: bun run typecheck
-
       # 配布用と同じ設定(VITE_E2E_TESTINGなし)でビルドする。型検査も兼ねる。
       # gui/src-tauriのコンパイル(cargo test)は、ビルド済みのdistが存在することを要求するため、
       # Rustのテストより前に行う。
       - name: build frontend
         working-directory: gui
         run: bun run build
+
+      # src・E2E・scripts・vite.config.ts・wdio.conf.tsの型を検査する(上のbun run buildのtscは、srcだけを検査する)。
+      # ルートの型(src/routeTree.gen.ts)は、ビルドが生成するため、ビルドの後に行う。
+      - name: type check (src, e2e, scripts, config)
+        working-directory: gui
+        run: bun run typecheck
 
       - name: check the frontend build (no E2E-only code, patched DOMPurify)
         working-directory: gui

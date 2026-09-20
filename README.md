@@ -127,7 +127,8 @@ cargo build -p masker-mcp --release
 cargo build --workspace
 cargo test --workspace
 
-# フロントエンドの型検査(src・E2E・scripts・vite.config.ts・wdio.conf.ts。`bun run build`のtscは、srcだけを検査する)
+# フロントエンドの型検査(src・E2E・scripts・vite.config.ts・wdio.conf.ts。`bun run build`のtscは、srcだけを検査する。
+# ルートの型(src/routeTree.gen.ts)は、`bun run build`か`bun run dev`が生成するため、それらの後に行う)
 cd gui && bun run typecheck
 
 # フロントエンドのテスト(純関数の単体テストとStorybookのplayテスト。それぞれ単独でも実行できる)
