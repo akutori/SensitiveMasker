@@ -5,6 +5,7 @@ describe("actionOnHiddenToTray", () => {
   describe("パスフレーズ・復号済みの内容・.envの値を持つ画面は、閉じる", () => {
     it.each([
       "importPassphrase",
+      "importKeyFile",
       "importConfirm",
       "envImportSelect",
       "envImportName",
@@ -22,7 +23,6 @@ describe("actionOnHiddenToTray", () => {
       "tagManagement",
       "exportMethod",
       "exportKeyFile",
-      "importKeyFile",
       "fileImportChoice",
       "overwriteConfirm",
       "matchCountConfirm",
@@ -44,8 +44,8 @@ describe("actionOnHiddenToTray", () => {
       expect(actionOnHiddenToTray("export", "choosing")).toBe("close");
     });
 
-    it("書き込み中は、閉じずに残す(閉じると、パスフレーズを失ったまま、ファイルだけが書き出される)", () => {
-      expect(actionOnHiddenToTray("export", "writing")).toBe("keep");
+    it("書き込み中は、閉じずに、表示を伏せ字へ戻す(閉じると、パスフレーズを失ったまま、ファイルだけが書き出される)", () => {
+      expect(actionOnHiddenToTray("export", "writing")).toBe("conceal");
     });
 
     it("書き出し済みは、閉じずに、表示を伏せ字へ戻す(閉じると、パスフレーズを二度と表示できない)", () => {
@@ -60,5 +60,6 @@ describe("actionOnHiddenToTray", () => {
   it("エクスポート以外の画面は、局面を渡されても、種類だけで決まる", () => {
     expect(actionOnHiddenToTray("importConfirm", "exported")).toBe("close");
     expect(actionOnHiddenToTray("none", "writing")).toBe("keep");
+    expect(actionOnHiddenToTray("importKeyFile", "writing")).toBe("close");
   });
 });

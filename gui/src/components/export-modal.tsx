@@ -64,8 +64,8 @@ export function ExportModal({
     if (choosing || writing) passphraseInputRef.current?.focus();
   }, [choosing, writing]);
 
-  // Escapeと背景を押す操作は、操作の意図を確かめずに閉じてしまう。編集中(まだ何も書き出して
-  // いない)以外は、パスフレーズを失うため受け付けない。
+  // Escapeと背景を押す操作は、操作の意図を確かめずに閉じてしまう。書き込み中・書き出し済み(パスフレーズを
+  // 失うと困る局面)は受け付けない。編集中と保存先の選択中は、まだ何も書き出していないため、受け付ける。
   const preventImplicitClose = (event: Event) => {
     if (isPassphraseAtRisk(status)) event.preventDefault();
   };

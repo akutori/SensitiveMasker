@@ -139,7 +139,7 @@ function MainRoute() {
 
   // 鍵ファイル方式の取り込み。パスフレーズ入力と同じ流れ(復号している間の再入の防止・閉じられた画面の結果の破棄・
   // 保留の所有の記録)を使う。流れの中で、入力の値として渡すのは、鍵ファイルのパス(鍵の中身は、画面へ渡さない)。
-  const importKeyFile = useImportKeyFile(dialog.kind === "importKeyFile");
+  const importKeyFile = useImportKeyFile(dialog.kind === "importKeyFile", importBusy);
   const importKeyFileHandlers = createImportPassphraseHandlers(
     {
       target: () =>
@@ -187,10 +187,17 @@ function MainRoute() {
   useOnHiddenToTray(() => {
     const shown = dialogRef.current;
     if (actionOnHiddenToTray(shown.kind) !== "close") return;
+    // 閉じる画面の写し(dialogRef)を、再描画より先に、閉じた状態へ進める。復号の結果が、再描画の前に届いても、閉じた画面を、
+    // まだ開いているとは見ない(isStillOpen)ため。
+    dialogRef.current = { kind: "none" };
     switch (shown.kind) {
       case "importPassphrase":
         closeDialog();
         setPassphrase("");
+        break;
+      case "importKeyFile":
+        closeDialog();
+        importKeyFile.reset();
         break;
       case "importConfirm":
         importConfirmHandlers.onOpenChange(false);

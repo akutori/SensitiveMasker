@@ -9,12 +9,16 @@
 declare global {
   interface Window {
     __e2eExportWriteGate?: Promise<void>;
+    // 書き込みが、この口へ来た回数。書き込みを始めてはならない場面で、始めていないことを、書き込みの所要時間
+    // (負荷で伸びる)に頼らずに確かめるために使う。
+    __e2eExportWriteAttempts?: number;
   }
 }
 
 // 環境変数は文字列のため、"false"などを誤って真と扱わないよう、"true"との一致で判定する。
 export async function waitForE2eExportWriteGate(): Promise<void> {
   if (import.meta.env.VITE_E2E_TESTING === "true") {
+    window.__e2eExportWriteAttempts = (window.__e2eExportWriteAttempts ?? 0) + 1;
     await window.__e2eExportWriteGate;
   }
 }

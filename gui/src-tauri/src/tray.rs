@@ -225,9 +225,15 @@ pub fn handle_window_event<R: Runtime>(window: &tauri::Window<R>, event: &Window
         return;
     }
     if let WindowEvent::CloseRequested { api, .. } = event {
-        api.prevent_close();
-        hide_to_tray(window);
+        on_main_window_close_requested(window, || api.prevent_close());
     }
+}
+
+/// メインウィンドウの「閉じる要求」: 閉じずに、トレイへ格納する。閉じるのを止める操作(CloseRequestApiは、テストで作れない)は、
+/// 引数で受け取る。
+pub(crate) fn on_main_window_close_requested<R: Runtime>(window: &tauri::Window<R>, prevent_close: impl FnOnce()) {
+    prevent_close();
+    hide_to_tray(window);
 }
 
 /// メインウィンドウをトレイへ格納する。WebViewは動き続けるため、格納している間、復号済みの内容(Rust側の保留)と、
@@ -283,6 +289,13 @@ mod tests {
         hide_to_tray(&window);
 
         assert_eq!(notified.load(Ordering::SeqCst), 1, "格納したことが、ちょうど1回、知らされるはず");
+    }
+
+    // イベント名は、フロントエンド(src/lib/profile-ipc.tsのonMainWindowHiddenToTray。その名前は、profile-ipc.test.tsが固定する)と
+    // 同じ文字列でなければ、格納の通知が画面へ届かない。
+    #[test]
+    fn the_hidden_event_name_is_the_one_the_frontend_listens_to() {
+        assert_eq!(MAIN_WINDOW_HIDDEN_EVENT, "main-window-hidden-to-tray");
     }
 
     #[test]

@@ -33,6 +33,13 @@ export function isPassphraseAtRisk(phase: ExportPhase): boolean {
   return phase === "writing" || phase === "exported";
 }
 
+// 画面を閉じる操作(×・Escape・背景・キャンセル)を受け付けるか。書き込み中は、閉じると、パスフレーズを失ったまま、
+// ファイルだけが書き出されるため、受け付けない。画面の状態へ写される前の遷移(再描画より前)も含めるため、呼び出し側は、
+// 描画の状態でなく、同期的に読める正を渡す(画面が開いていないとき[null]は、閉じる対象が無いので、受け付ける)。
+export function canCloseExportDialog(state: ExportDialogState | null): boolean {
+  return state?.phase !== "writing";
+}
+
 export function canRegenerate(state: ExportDialogState): boolean {
   return state.phase === "editing";
 }

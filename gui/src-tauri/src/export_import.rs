@@ -161,9 +161,9 @@ struct PendingImports {
     /// 次に払い出す識別子。単調に増え、再利用しない(捨てられた保留の識別子が、後から払い出された
     /// 別の保留を指さないようにするため)。
     next_id: u64,
-    /// メインウィンドウのページの読み込みが始まるたびに進める世代。復号を始めた時点の世代と、結果を保留へ
-    /// 入れる時点の世代が違えば、復号している間にページが読み込み直されている(結果を受け取る画面が
-    /// もう無い)ため、その結果は保留しない(insert_if_generation)。
+    /// メインウィンドウのページの読み込みが始まるたび・トレイへ格納されるたびに進める世代。復号を始めた時点の世代と、
+    /// 結果を保留へ入れる時点の世代が違えば、復号している間にページが読み込み直された・トレイへ格納された(結果を
+    /// 受け取る画面がもう無い)ため、その結果は保留しない(insert_if_generation)。
     page_generation: u64,
     /// 保留を、挿入順(古い順)に持つ。
     entries: VecDeque<(u64, ImportPreview)>,
@@ -203,8 +203,9 @@ impl PendingImportState {
         self.insert_if_generation(generation, preview).expect("いまの世代での挿入は、必ず成功する")
     }
 
-    /// メインウィンドウのページが読み込み直されたとき: 全ての保留を破棄し、世代を進める。
-    fn reset_for_new_page(&self) {
+    /// 全ての保留を破棄し、世代を進める(メインウィンドウのページが読み込み直されたとき・トレイへ格納されたとき。
+    /// どちらも、結果を受け取る画面が、失われる)。
+    fn discard_all_and_advance_generation(&self) {
         let mut pending = self.lock();
         pending.entries.clear();
         pending.page_generation += 1;
@@ -244,7 +245,7 @@ pub(crate) fn discard_pending_imports_on_page_load(
     event: PageLoadEvent,
 ) {
     if webview_label == MAIN_WINDOW_LABEL && event == PageLoadEvent::Started {
-        pending.reset_for_new_page();
+        pending.discard_all_and_advance_generation();
     }
 }
 
@@ -259,12 +260,15 @@ pub(crate) fn discard_pending_imports_on_run_event(pending: &PendingImportState,
     }
 }
 
-/// メインウィンドウをトレイへ格納するときに、保留している全ての内容を破棄する。
+/// メインウィンドウをトレイへ格納するときに、保留している全ての内容を破棄し、世代を進める。
 ///
 /// 格納しても、WebViewは動き続ける。確認画面を開いたまま格納されると、復号済みの内容(平文)が、再表示されるまで
 /// (何時間でも)Rust側に残るため。画面へは、別途、格納したことを知らせ、確認画面を閉じさせる(tray.rsのhide_to_tray)。
+/// 世代を進めるのは、格納の前に始めた復号が、格納している間に終わっても、その結果を保留しないため(結果を受け取る
+/// 画面は、格納するときに閉じられる。画面側が、閉じた後に届いた結果を捨てる処理は、格納している間、WebViewの処理が
+/// 止まっていても、Rust側に保留を残さない、という保証にはならない)。
 pub(crate) fn discard_pending_imports_on_hide(pending: &PendingImportState) {
-    pending.discard(None);
+    pending.discard_all_and_advance_generation();
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -478,7 +482,10 @@ fn preview_import_with_hook(
     passphrase: SecretString,
     before_decrypt: impl FnOnce(),
 ) -> Result<PreviewImportResultDto, ExportImportError> {
-    preview_import_core(state, pending, source_path, before_decrypt, |data| decrypt_import_payload(data, passphrase))
+    let generation = pending.generation();
+    preview_import_core(state, pending, generation, source_path, before_decrypt, |data| {
+        decrypt_import_payload(data, passphrase)
+    })
 }
 
 /// 鍵ファイル方式の取り込み(preview_import_with_hookと同じ流れで、復号だけが、鍵ファイルによる)。鍵ファイルは、
@@ -489,21 +496,37 @@ fn preview_import_with_key_file_impl(
     source_path: &str,
     key_path: &str,
 ) -> Result<PreviewImportResultDto, ExportImportError> {
+    preview_import_with_key_file_hook(state, pending, source_path, key_path, || {})
+}
+
+/// preview_import_with_key_file_implの本体。after_generationは、ページの世代を控えた後、鍵ファイルを読む前に呼ぶ、
+/// テスト用の差し込み口(鍵ファイルの読み込みに時間がかかる間[USBメモリなど]に、ページが読み込み直される場合を再現する)。
+fn preview_import_with_key_file_hook(
+    state: &ProfileStoreState,
+    pending: &PendingImportState,
+    source_path: &str,
+    key_path: &str,
+    after_generation: impl FnOnce(),
+) -> Result<PreviewImportResultDto, ExportImportError> {
+    // 世代は、ファイルを読む前に控える(鍵ファイルの読み込みの間に読み込み直された場合も、その結果を保留しないため)。
+    let generation = pending.generation();
+    after_generation();
     let key_file_contents = read_key_file(key_path)?;
-    preview_import_core(state, pending, source_path, || {}, |data| {
+    preview_import_core(state, pending, generation, source_path, || {}, |data| {
         decrypt_import_payload_with_key_file(data, &key_file_contents)
     })
 }
 
-// 取り込みの、復号(パスフレーズ・鍵ファイルのどちらでも)の前後の流れ。decryptは、読み込んだファイルの中身を復号する。
+// 取り込みの、復号(パスフレーズ・鍵ファイルのどちらでも)の前後の流れ。generationは、呼び出し側が、ファイルを読む前に控えた、
+// ページの世代。decryptは、読み込んだファイルの中身を復号する。
 fn preview_import_core(
     state: &ProfileStoreState,
     pending: &PendingImportState,
+    generation: u64,
     source_path: &str,
     before_decrypt: impl FnOnce(),
     decrypt: impl FnOnce(&[u8]) -> Result<DecryptedPayload, ProfileStoreError>,
 ) -> Result<PreviewImportResultDto, ExportImportError> {
-    let generation = pending.generation();
     let source_path = validate_import_source_path(source_path).map_err(ExportImportError::InvalidInput)?;
     let data = read_import_file(&source_path)?;
     before_decrypt();
@@ -516,7 +539,9 @@ fn preview_import_core(
     let has_active = with_store(state, |store| store.has_active_profile()).map_err(ExportImportError::Failed)?;
     let dto = to_dto(&preview, has_active);
     let pending_id = pending.insert_if_generation(generation, preview).ok_or_else(|| {
-        ExportImportError::Failed("ページが読み込み直されたため、復号の結果を破棄しました".to_string())
+        ExportImportError::Failed(
+            "ページが読み込み直された、または、ウィンドウがトレイへ格納されたため、復号の結果を破棄しました".to_string(),
+        )
     })?;
     Ok(PreviewImportResultDto { pending_id, preview: dto, passphrase_trimmed })
 }
@@ -1353,17 +1378,90 @@ mod tests {
         }
     }
 
-    // 格納の後に届いた復号の結果は、保留できる(画面が閉じていれば、画面側が、その識別子を指定して破棄する)。
-    // 格納の破棄は、ページの世代を進めない(ページの読み込みではない)。
+    // 格納の前に始めた復号が、格納している間に終わっても、その結果は保留しない(結果を受け取る画面は、格納するときに
+    // 閉じられる)。格納は、世代を進める。
     #[test]
-    fn hiding_to_the_tray_does_not_advance_the_page_generation() {
+    fn a_result_decrypted_before_hiding_to_the_tray_is_not_kept() {
         let pending = PendingImportState::default();
         let generation = pending.generation();
 
         discard_pending_imports_on_hide(&pending);
 
-        assert_eq!(pending.generation(), generation);
+        assert!(pending.insert_if_generation(generation, sample_import_preview("元プロファイル")).is_none());
+        assert_eq!(pending_count(&pending), 0);
+    }
+
+    // 対照: 格納の後(再表示された後)に始めた復号の結果は、保留できる。
+    #[test]
+    fn a_result_decrypted_after_hiding_to_the_tray_is_kept() {
+        let pending = PendingImportState::default();
+        discard_pending_imports_on_hide(&pending);
+        let generation = pending.generation();
+
         assert!(pending.insert_if_generation(generation, sample_import_preview("元プロファイル")).is_some());
+    }
+
+    // 復号している最中にトレイへ格納されても、preview_importは、結果を保留せずに失敗する(パスフレーズ方式・鍵ファイル方式とも)。
+    #[test]
+    fn preview_import_fails_and_keeps_nothing_when_hidden_to_the_tray_while_decrypting() {
+        let file = export_profile_smx("元プロファイル");
+        let dest = EmptyDestination::new();
+        let pending = PendingImportState::default();
+
+        let result = preview_import_with_hook(
+            &dest.state,
+            &pending,
+            file.path().to_str().unwrap(),
+            passphrase(TEST_PASSPHRASE),
+            || discard_pending_imports_on_hide(&pending),
+        );
+
+        assert!(result.is_err(), "復号している最中にトレイへ格納されたのに、結果が返った");
+        assert_eq!(pending_count(&pending), 0);
+    }
+
+    // 鍵ファイルを読んでいる間に読み込み直された場合も、結果を保留しない(世代は、鍵ファイルを読む前に控える)。
+    #[test]
+    fn a_key_file_preview_fails_and_keeps_nothing_when_the_page_is_reloaded_while_reading_the_key_file() {
+        let files = export_with_key_file_files("元プロファイル");
+        let dest = EmptyDestination::new();
+        let pending = PendingImportState::default();
+
+        let result = preview_import_with_key_file_hook(
+            &dest.state,
+            &pending,
+            files.smx.to_str().unwrap(),
+            files.key.to_str().unwrap(),
+            || discard_pending_imports_on_page_load(&pending, MAIN_WINDOW_LABEL, PageLoadEvent::Started),
+        );
+
+        assert!(result.is_err(), "鍵ファイルを読んでいる間にページが読み込み直されたのに、結果が返った");
+        assert_eq!(pending_count(&pending), 0);
+    }
+
+    // ×ボタンの「閉じる要求」は、閉じずに(prevent_closeを呼び)、トレイへ格納し、保留を全て破棄する。
+    #[test]
+    fn a_close_request_of_the_main_window_hides_it_to_the_tray_and_discards_every_pending_import() {
+        use std::cell::Cell;
+        use tauri::Manager;
+
+        let app = tauri::test::mock_builder()
+            .manage(PendingImportState::default())
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("MockRuntimeのアプリを組み立てられるはず");
+        let webview =
+            tauri::WebviewWindowBuilder::new(&app, crate::tray::MAIN_WINDOW_LABEL, Default::default())
+                .build()
+                .expect("MockRuntimeのウィンドウを作れるはず");
+        let window = webview.as_ref().window();
+        let pending = app.state::<PendingImportState>();
+        fill_pending(&pending);
+        let prevented = Cell::new(0);
+
+        crate::tray::on_main_window_close_requested(&window, || prevented.set(prevented.get() + 1));
+
+        assert_eq!(prevented.get(), 1, "閉じる要求は、ちょうど1回、止められるはず");
+        assert_eq!(pending_count(&pending), 0, "格納した後に、保留が残っている");
     }
 
     // 終了以外の通知(起動・再開・イベント処理の区切り)では、破棄しない。

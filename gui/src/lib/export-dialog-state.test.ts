@@ -3,6 +3,7 @@ import {
   abortExport,
   beginExport,
   beginWriting,
+  canCloseExportDialog,
   canRegenerate,
   canStartExport,
   completeExport,
@@ -41,6 +42,21 @@ const inProgress = [
   ["保存先の選択中", choosing],
   ["書き込み中", writing],
 ] as const;
+
+describe("canCloseExportDialog", () => {
+  it.each([
+    ["編集中", editing()],
+    ["保存先の選択中", choosing()],
+    ["書き出し済み(閉じるボタンで閉じる)", exported()],
+    ["画面が開いていないとき", null],
+  ] as const)("%sは、閉じる操作を受け付ける", (_label, state) => {
+    expect(canCloseExportDialog(state)).toBe(true);
+  });
+
+  it("書き込み中は、受け付けない(パスフレーズを失ったまま、ファイルだけが書き出されるため)", () => {
+    expect(canCloseExportDialog(writing())).toBe(false);
+  });
+});
 
 describe("openExportDialog", () => {
   it("編集中から始まり、渡された開いた回の番号とパスフレーズを持つ", () => {

@@ -25,6 +25,7 @@ import {
   abortExport,
   beginExport,
   beginWriting,
+  canCloseExportDialog,
   canRegenerate,
   canStartExport,
   completeExport,
@@ -124,7 +125,7 @@ function ProfilesRoute() {
   const [invalidTagId, setInvalidTagId] = useState<string | "new" | undefined>();
   // エクスポート画面を開いた回の番号(開くたびに増やす。export-dialog-state.tsのsessionId)。
   const exportSessionCounter = useRef(0);
-  // エクスポートの進行状況(編集中→実行中→成功後)の、同期的に読める正。React 19は離散イベントの
+  // エクスポートの進行状況(編集中→保存先の選択中→書き込み中→書き出し済み)の、同期的に読める正。React 19は離散イベントの
   // 更新を再描画するまで反映しないため、同じ瞬間に届いた複数の操作(再生成の直後の実行、実行の
   // 二重押下など)が古い描画の状態を見て、画面に出ているものと違うパスフレーズで書き出したり、
   // 二重に実行したりしてしまう。遷移はこちらへ先に適用し、画面の状態(dialog)へ写す。
@@ -237,7 +238,7 @@ function ProfilesRoute() {
 
   // 鍵ファイル方式の取り込み。パスフレーズ入力と同じ流れ(復号している間の再入の防止・閉じられた画面の結果の破棄・
   // 保留の所有の記録)を使う。流れの中で、入力の値として渡すのは、鍵ファイルのパス(鍵の中身は、画面へ渡さない)。
-  const importKeyFile = useImportKeyFile(dialog.kind === "importKeyFile");
+  const importKeyFile = useImportKeyFile(dialog.kind === "importKeyFile", importBusy);
   const importKeyFileHandlers = createImportPassphraseHandlers(
     {
       target: () =>
@@ -290,6 +291,9 @@ function ProfilesRoute() {
     const action = actionOnHiddenToTray(shown.kind, exportSessionRef.current?.phase);
     if (action === "conceal") setConcealSignal((current) => current + 1);
     if (action !== "close") return;
+    // 閉じる画面の写し(dialogRef)を、再描画より先に、閉じた状態へ進める。復号の結果が、再描画の前に届いても、閉じた画面を、
+    // まだ開いているとは見ない(isStillOpen)ため。
+    dialogRef.current = { kind: "none" };
     switch (shown.kind) {
       case "export":
         exportSessionRef.current = null;
@@ -298,6 +302,10 @@ function ProfilesRoute() {
       case "importPassphrase":
         closeDialog();
         setImportPassphrase("");
+        break;
+      case "importKeyFile":
+        closeDialog();
+        importKeyFile.reset();
         break;
       case "importConfirm":
         importConfirmHandlers.onOpenChange(false);
@@ -707,10 +715,12 @@ function ProfilesRoute() {
         // (以後、この画面から参照できなくなり、閉じた後に届いた古い描画からの操作も、書き出さない。
         // JSの文字列はメモリ上で消去できないため、消えるのは参照だけである)。クリップボードの
         // 自動クリアは画面を閉じても継続する(コピーしたパスフレーズを他所に控える目的で
-        // 閉じた場合も、クリアされるべきため)。実行中・成功後に閉じる操作は、ExportModalが
-        // 受け付けない。
+        // 閉じた場合も、クリアされるべきため)。書き込み中は、閉じない(書き込みを始めた直後で、ExportModalが
+        // まだ書き込み中と描画していない間の操作も含めるため、同期的に読める正から判定する)。書き出し済みの
+        // 画面は、Escapeや背景の操作を、ExportModalが受け付けず、「閉じる」と×だけで閉じる。
         onOpenChange={(open) => {
           if (open) return;
+          if (!canCloseExportDialog(exportSessionRef.current)) return;
           exportSessionRef.current = null;
           closeDialog();
         }}
