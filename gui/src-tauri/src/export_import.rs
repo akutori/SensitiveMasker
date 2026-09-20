@@ -193,11 +193,13 @@ pub enum ImportPreviewDto {
 }
 
 /// preview_importの結果。pending_idは、保留した復号済みの内容の識別子で、commit_pending_import・
-/// clear_pending_importは、この識別子で、その保留だけを指す。
+/// clear_pending_importは、この識別子で、その保留だけを指す。passphrase_trimmedは、入力のままでは復号できず、
+/// 前後の空白・不可視文字を除いたパスフレーズで復号できたこと(確認画面で、利用者へ知らせる)。
 #[derive(Debug, serde::Serialize)]
 pub struct PreviewImportResultDto {
     pub pending_id: u64,
     pub preview: ImportPreviewDto,
+    pub passphrase_trimmed: bool,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -342,15 +344,16 @@ fn preview_import_with_hook(
     before_decrypt();
     // パスフレーズ検証(scrypt、数百ms〜数秒)はストアのロックを握らずに行う。ロック内で
     // 実行すると、他のプロファイル/タグ系コマンドがこの間ずっとブロックされてしまう。
-    let payload = decrypt_import_payload(&data, passphrase).map_err(|e| ExportImportError::Failed(e.to_string()))?;
-    let preview =
-        with_store(state, |store| store.resolve_import_preview(payload)).map_err(ExportImportError::Failed)?;
+    let decrypted = decrypt_import_payload(&data, passphrase).map_err(|e| ExportImportError::Failed(e.to_string()))?;
+    let passphrase_trimmed = decrypted.passphrase_trimmed;
+    let preview = with_store(state, |store| store.resolve_import_preview(decrypted.payload))
+        .map_err(ExportImportError::Failed)?;
     let has_active = with_store(state, |store| store.has_active_profile()).map_err(ExportImportError::Failed)?;
     let dto = to_dto(&preview, has_active);
     let pending_id = pending.insert_if_generation(generation, preview).ok_or_else(|| {
         ExportImportError::Failed("ページが読み込み直されたため、復号の結果を破棄しました".to_string())
     })?;
-    Ok(PreviewImportResultDto { pending_id, preview: dto })
+    Ok(PreviewImportResultDto { pending_id, preview: dto, passphrase_trimmed })
 }
 
 /// インポート確定後、実際にどのプロファイルがアクティブになったか(無ければNone)。
@@ -1537,9 +1540,10 @@ mod tests {
 
         let response = harness.preview(&export_profile_smx("元プロファイル"));
 
-        // フロントエンドは、この2つのキー名で応答を読む。
-        assert_eq!(sorted_keys(&response), ["pending_id", "preview"]);
+        // フロントエンドは、この3つのキー名で応答を読む。
+        assert_eq!(sorted_keys(&response), ["passphrase_trimmed", "pending_id", "preview"]);
         assert!(response["pending_id"].is_u64(), "pending_idが整数でない: {response}");
+        assert_eq!(response["passphrase_trimmed"], json!(false), "入力どおりで復号できたときは、除いていない");
         assert_eq!(
             response["preview"],
             json!({
@@ -1553,12 +1557,29 @@ mod tests {
     }
 
     #[test]
+    fn preview_import_over_ipc_reports_that_the_passphrase_was_trimmed() {
+        let harness = IpcHarness::new();
+        let file = export_profile_smx("元プロファイル");
+
+        // 貼り付けで、前後に空白・改行が混ざったパスフレーズ。入力どおりでは復号できず、除いて再試行して成功する。
+        let response = harness
+            .invoke(
+                "preview_import",
+                json!({ "sourcePath": file.path().to_str().unwrap(), "passphrase": format!("  {TEST_PASSPHRASE}\n") }),
+            )
+            .expect("前後の空白を除けば、復号できるはず");
+
+        assert_eq!(response["passphrase_trimmed"], json!(true));
+        assert_eq!(response["preview"]["name"], "元プロファイル");
+    }
+
+    #[test]
     fn preview_import_over_ipc_returns_the_all_profiles_preview() {
         let harness = IpcHarness::new();
 
         let response = harness.preview(&export_all_smx());
 
-        assert_eq!(sorted_keys(&response), ["pending_id", "preview"]);
+        assert_eq!(sorted_keys(&response), ["passphrase_trimmed", "pending_id", "preview"]);
         let preview = &response["preview"];
         assert_eq!(sorted_keys(preview), ["entries", "kind", "will_activate_profile_name"]);
         assert_eq!(preview["kind"], "all");

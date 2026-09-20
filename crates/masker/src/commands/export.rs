@@ -3,7 +3,10 @@
 use std::io::{IsTerminal, Write};
 use std::path::Path;
 
-use profile_store::{AllImportEntry, AppPaths, ExposeSecret, ImportOutcome, ImportPreview, ProfileStore, SecretString};
+use profile_store::{
+    decrypt_import_payload, AllImportEntry, AppPaths, ExposeSecret, ImportOutcome, ImportPreview, ProfileStore,
+    SecretString,
+};
 
 use crate::error::CliError;
 use crate::paths::validate_output_file;
@@ -98,6 +101,9 @@ fn prompt_yes_no(prompt: &str) -> Result<bool, CliError> {
     Ok(matches!(answer.trim(), "y" | "Y" | "yes" | "Yes" | "YES"))
 }
 
+// 入力のままでは復号できず、前後の空白・不可視文字を除いたパスフレーズで復号できたときに、標準エラー出力へ出す。
+const PASSPHRASE_TRIMMED_NOTICE: &str = "注意: パスフレーズの前後にあった空白・不可視文字を取り除いて、復号しました";
+
 pub(crate) fn import(store: &mut ProfileStore, input: &Path, yes: bool) -> Result<(), CliError> {
     // ファイルの存在確認を先に行う(存在しないパスに対して無駄にパスフレーズ入力させない)。
     std::fs::read(input).map_err(|source| CliError::IoAt { path: input.to_path_buf(), source })?;
@@ -116,7 +122,12 @@ fn import_with_passphrase(
     stdin_is_terminal: bool,
 ) -> Result<(), CliError> {
     let data = std::fs::read(input).map_err(|source| CliError::IoAt { path: input.to_path_buf(), source })?;
-    let preview = store.preview_import(&data, passphrase)?;
+    let decrypted = decrypt_import_payload(&data, passphrase)?;
+    if decrypted.passphrase_trimmed {
+        // 貼り付けなどで混ざった前後の空白・不可視文字を除いて、復号した。取り込みの結果(標準出力)とは別に、知らせる。
+        eprintln!("{PASSPHRASE_TRIMMED_NOTICE}");
+    }
+    let preview = store.resolve_import_preview(decrypted.payload)?;
 
     if let ImportPreview::All { entries, .. } = &preview {
         print_all_import_plan(entries);

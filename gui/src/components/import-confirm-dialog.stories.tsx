@@ -1,10 +1,11 @@
 import { useState } from "react";
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { expect, fn, screen, userEvent } from "storybook/test";
+import { expect, fn, screen, userEvent, waitFor } from "storybook/test";
 import { Button } from "@/components/ui/button";
 import type { ImportRuleDto } from "@/lib/profile-ipc";
 import {
   ImportConfirmDialog,
+  PASSPHRASE_TRIMMED_NOTICE,
   type ImportPreviewRow,
 } from "./import-confirm-dialog";
 
@@ -142,6 +143,30 @@ export const OpenByDefault: Story = {
     onOpenChange: () => {},
     onConfirm: () => {},
     rows: MULTIPLE_ROWS,
+  },
+  // 入力のままで復号できたときは、空白を除いたことの通知を出さない。
+  play: async () => {
+    await screen.findByText("インポート内容の確認");
+    await expect(screen.queryByText(PASSPHRASE_TRIMMED_NOTICE)).toBeNull();
+  },
+};
+
+// 入力のままでは復号できず、前後の空白・不可視文字を除いて復号できたときは、その旨を、確認画面で知らせる。
+export const PassphraseTrimmed: Story = {
+  args: {
+    open: true,
+    onOpenChange: () => {},
+    onConfirm: () => {},
+    rows: SINGLE_ROW,
+    passphraseTrimmed: true,
+  },
+  play: async () => {
+    const notice = await screen.findByText(PASSPHRASE_TRIMMED_NOTICE);
+    // ダイアログは、開くときにフェードインするため、見えるようになるまで待つ。
+    await waitFor(() => expect(notice).toBeVisible());
+    // 通知は、確認画面の説明の一部として、読み上げの対象になる(説明とは別の領域にしない)。
+    const description = screen.getByText(/取り込まれるルールの内容を確認してから/);
+    await expect(description).toContainElement(screen.getByText(PASSPHRASE_TRIMMED_NOTICE));
   },
 };
 

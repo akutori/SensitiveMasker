@@ -153,6 +153,8 @@ export type ImportPreviewDto =
 export interface ImportPreviewResult {
   pendingId: number;
   preview: ImportPreviewDto;
+  // 入力のままでは復号できず、前後の空白・不可視文字を除いたパスフレーズで復号できた(確認画面で、利用者へ知らせる)。
+  passphraseTrimmed: boolean;
 }
 
 // 保留の識別子は、Rust側のu64。JavaScriptの数値として正確に扱える、0以上の安全な整数だけを有効とする。
@@ -170,16 +172,16 @@ function assertPendingId(value: unknown): asserts value is number {
 export async function previewImport(sourcePath: string, passphrase: string): Promise<ImportPreviewResult> {
   // 応答の形は、型引数で断定できるだけで、Rust側との取り決めがずれると、識別子が欠ける。識別子の無い保留を
   // 画面へ渡さないよう、実行時に検証する。
-  const response = await invoke<{ pending_id: unknown; preview: ImportPreviewDto } | null | undefined>(
-    "preview_import",
-    { sourcePath, passphrase }
-  );
+  const response = await invoke<
+    { pending_id: unknown; preview: ImportPreviewDto; passphrase_trimmed?: unknown } | null | undefined
+  >("preview_import", { sourcePath, passphrase });
   const pendingId = response?.pending_id;
   if (!response || !isPendingId(pendingId)) {
     throw new Error(`preview_import returned an invalid pending_id: ${String(pendingId)}`);
   }
   recordPendingImportIdForE2e(pendingId);
-  return { pendingId, preview: response.preview };
+  // passphrase_trimmedは、知らせるだけの印のため、無い・真偽値でないときは、falseとして扱う(確認画面へ進む流れは止めない)。
+  return { pendingId, preview: response.preview, passphraseTrimmed: response.passphrase_trimmed === true };
 }
 
 export interface CommitImportResultDto {

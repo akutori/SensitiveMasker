@@ -38,8 +38,24 @@ pub fn encrypt_for_export(plaintext: &[u8], passphrase: SecretString) -> Result<
     age::encrypt(&recipient, plaintext).map_err(|_| ExportError::EncryptionFailed)
 }
 
+/// 復号の結果。`passphrase_trimmed`は、入力のままでは復号できず、前後の空白・不可視文字を除いたパスフレーズで
+/// 復号できたことを表す(貼り付けで混ざった文字を、利用者へ知らせるため)。
+pub struct DecryptedImport {
+    pub plaintext: Vec<u8>,
+    pub passphrase_trimmed: bool,
+}
+
 pub fn decrypt_import(ciphertext: &[u8], passphrase: SecretString) -> Result<Vec<u8>, ExportError> {
     decrypt_with_whitespace_fallback(ciphertext, passphrase, MAX_WORK_FACTOR_LOG_N)
+}
+
+/// `decrypt_import`と同じ復号で、空白を除いて再試行して成功したかも返す。
+pub fn decrypt_import_reporting_trim(
+    ciphertext: &[u8],
+    passphrase: SecretString,
+) -> Result<DecryptedImport, ExportError> {
+    decrypt_with_whitespace_fallback_reporting(ciphertext, passphrase, MAX_WORK_FACTOR_LOG_N)
+        .map(|(plaintext, passphrase_trimmed)| DecryptedImport { plaintext, passphrase_trimmed })
 }
 
 // 貼り付けで混入しうる、パスフレーズの前後の空白と不可視文字(ゼロ幅スペース・BOM等)。
@@ -67,6 +83,15 @@ fn decrypt_with_whitespace_fallback(
     passphrase: SecretString,
     max_log_n: u8,
 ) -> Result<Vec<u8>, ExportError> {
+    decrypt_with_whitespace_fallback_reporting(ciphertext, passphrase, max_log_n).map(|(plaintext, _)| plaintext)
+}
+
+// `decrypt_with_whitespace_fallback`の本体。復号した内容と、空白を除いて再試行して成功したか(true)を返す。
+fn decrypt_with_whitespace_fallback_reporting(
+    ciphertext: &[u8],
+    passphrase: SecretString,
+    max_log_n: u8,
+) -> Result<(Vec<u8>, bool), ExportError> {
     // 最初の試行がパスフレーズを消費するため、再試行用の値は先に作る。再試行の候補が無い
     // (通常の)場合は作らず、機微な値のコピーを増やさない。
     let fallback = retry_candidate(passphrase.expose_secret())
@@ -75,8 +100,9 @@ fn decrypt_with_whitespace_fallback(
     match (decrypt_import_with_max_work_factor(ciphertext, passphrase, max_log_n), fallback) {
         (Err(ExportError::DecryptionFailed), Some(fallback_passphrase)) => {
             decrypt_import_with_max_work_factor(ciphertext, fallback_passphrase, max_log_n)
+                .map(|plaintext| (plaintext, true))
         }
-        (result, _) => result,
+        (result, _) => result.map(|plaintext| (plaintext, false)),
     }
 }
 
@@ -246,6 +272,27 @@ mod tests {
             let result = decrypt_import(&encrypted, passphrase(pasted));
             assert_eq!(result.unwrap(), b"secret", "入力: {pasted:?}");
         }
+    }
+
+    #[test]
+    fn the_report_says_the_passphrase_was_trimmed_only_when_the_retry_was_needed() {
+        let encrypted = encrypt_for_export(b"secret", passphrase("correct-horse")).unwrap();
+
+        let exact = decrypt_import_reporting_trim(&encrypted, passphrase("correct-horse")).unwrap();
+        assert!(!exact.passphrase_trimmed, "入力どおりで復号できたときは、除いていない");
+
+        let padded = decrypt_import_reporting_trim(&encrypted, passphrase(" correct-horse\n")).unwrap();
+        assert!(padded.passphrase_trimmed, "空白を除いて再試行して復号できたときは、除いたと報告する");
+        assert_eq!(padded.plaintext, b"secret");
+    }
+
+    #[test]
+    fn the_report_says_nothing_was_trimmed_when_the_passphrase_itself_has_whitespace() {
+        let encrypted = encrypt_for_export(b"secret", passphrase(" spaced ")).unwrap();
+
+        let as_typed = decrypt_import_reporting_trim(&encrypted, passphrase(" spaced ")).unwrap();
+
+        assert!(!as_typed.passphrase_trimmed, "前後に空白を含むパスフレーズは、入力どおりで復号でき、除いていない");
     }
 
     #[test]

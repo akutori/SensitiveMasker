@@ -29,7 +29,27 @@ describe("インポートの保留のIPC", () => {
       sourcePath: "C:/dummy/export.smx",
       passphrase: "dummy-passphrase-0001",
     });
-    expect(result).toEqual({ pendingId: 12, preview: DUMMY_PREVIEW });
+    expect(result).toEqual({ pendingId: 12, preview: DUMMY_PREVIEW, passphraseTrimmed: false });
+  });
+
+  it("previewImportは、応答のpassphrase_trimmed(前後の空白を除いて復号した)を、passphraseTrimmedとして返す", async () => {
+    tauriCore.invoke.mockResolvedValue({ pending_id: 12, preview: DUMMY_PREVIEW, passphrase_trimmed: true });
+
+    const result = await previewImport("C:/dummy/export.smx", "dummy-passphrase-0001");
+
+    expect(result.passphraseTrimmed).toBe(true);
+  });
+
+  it.each([
+    ["falseのとき", { pending_id: 12, preview: DUMMY_PREVIEW, passphrase_trimmed: false }],
+    ["無いとき(取り決めがずれても、確認画面へ進む流れは止めない。知らせないだけ)", { pending_id: 12, preview: DUMMY_PREVIEW }],
+    ["真偽値でないとき", { pending_id: 12, preview: DUMMY_PREVIEW, passphrase_trimmed: "true" }],
+  ])("previewImportは、passphrase_trimmedが%s、passphraseTrimmedをfalseにする", async (_label, response) => {
+    tauriCore.invoke.mockResolvedValue(response);
+
+    const result = await previewImport("C:/dummy/export.smx", "dummy-passphrase-0001");
+
+    expect(result.passphraseTrimmed).toBe(false);
   });
 
   it("previewImportは、失敗(復号できないなど)を、そのまま伝える", async () => {

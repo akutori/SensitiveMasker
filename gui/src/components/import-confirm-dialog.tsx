@@ -30,7 +30,12 @@ export interface ImportConfirmDialogProps {
   onOpenChange: (open: boolean) => void;
   rows: ImportPreviewRow[];
   onConfirm: () => void;
+  // 入力のままでは復号できず、前後の空白・不可視文字を除いたパスフレーズで復号できた。
+  passphraseTrimmed?: boolean;
 }
+
+// 前後の空白・不可視文字を除いて復号したことを、確認画面で知らせる文(E2Eも、この文で確かめる)。
+export const PASSPHRASE_TRIMMED_NOTICE = "パスフレーズの前後にあった空白・不可視文字を取り除いて、復号しました。";
 
 function modeAndValue(rule: ImportRuleDto) {
   const value = rule.mode === "fixed" ? rule.fixed_value : rule.prefix;
@@ -85,6 +90,7 @@ export function ImportConfirmDialog({
   onOpenChange,
   rows,
   onConfirm,
+  passphraseTrimmed = false,
 }: ImportConfirmDialogProps) {
   return (
     <AlertDialog open={open} onOpenChange={onOpenChange}>
@@ -96,6 +102,7 @@ export function ImportConfirmDialog({
           <AlertDialogTitle>インポート内容の確認</AlertDialogTitle>
           <AlertDialogDescription>
             取り込まれるルールの内容を確認してから、インポートを実行するか選択してください。
+            {passphraseTrimmed && <span className="mt-1 block">{PASSPHRASE_TRIMMED_NOTICE}</span>}
           </AlertDialogDescription>
         </AlertDialogHeader>
 

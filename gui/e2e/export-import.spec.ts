@@ -284,6 +284,9 @@ async function focusIsInsideDialog(): Promise<boolean> {
 // 同じ領域に通知が入る(領域ごと後から現れると、スクリーンリーダーに読み上げられないことがある)。
 const EXPORT_NOTICE_TEXT = "二度と表示できません";
 
+// インポートの確認画面が、前後の空白・不可視文字を除いて復号したことを知らせる文(src/components/import-confirm-dialog.tsx)。
+const TRIMMED_NOTICE_TEXT = "パスフレーズの前後にあった空白・不可視文字を取り除いて、復号しました";
+
 // `await $(...)`の結果の型(wdioの型は、awaitした結果もChainablePromiseElementとして扱う)。
 type DialogElement = Awaited<ReturnType<typeof $>>;
 
@@ -1172,7 +1175,7 @@ describe("エクスポートの実行(ファイルダイアログの差し替え
     await returnToMainScreen();
   });
 
-  it("貼り付けで前後に空白が混ざったパスフレーズでも、インポートの確認画面へ進める", async () => {
+  it("貼り付けで前後に空白が混ざったパスフレーズでも、インポートの確認画面へ進め、空白を除いたことが知らされる(入力どおりなら、知らされない)", async () => {
     await completeInitialSetup();
     await createProfileViaIpc("E2E空白許容確認");
     const roundTripPath = path.join(exportDir, "whitespace.smx");
@@ -1200,9 +1203,36 @@ describe("エクスポートの実行(ファイルダイアログの差し替え
     const confirmDialog = await $('[role="alertdialog"]');
     await confirmDialog.waitForExist({ timeout: 15000 });
     expect(await confirmDialog.getText()).toContain("インポート内容の確認");
+    // 前後の空白を除いて復号したことが、確認画面で知らされる。
+    expect(await confirmDialog.getText()).toContain(TRIMMED_NOTICE_TEXT);
     await (await confirmDialog.$("button=キャンセル")).click();
     await confirmDialog.waitForExist({ reverse: true, timeout: 10000 });
+
+    // 入力どおり(空白を足さない)で復号できたときは、知らされない。
+    await (await $("button=インポート")).click();
+    const exactDialog = await $('[role="dialog"]');
+    await exactDialog.waitForExist({ timeout: 10000 });
+    await (await exactDialog.$("input")).setValue(passphrase);
+    await (await exactDialog.$("button=OK")).click();
+    const exactConfirm = await $('[role="alertdialog"]');
+    await exactConfirm.waitForExist({ timeout: 15000 });
+    expect(await exactConfirm.getText()).toContain("インポート内容の確認");
+    expect(await exactConfirm.getText()).not.toContain(TRIMMED_NOTICE_TEXT);
+    await (await exactConfirm.$("button=キャンセル")).click();
+    await exactConfirm.waitForExist({ reverse: true, timeout: 10000 });
+
+    // メイン画面のインポートでも、同じく知らされる(メイン画面とプロファイル管理画面は、別々に確認画面を持つ)。
     await returnToMainScreen();
+    await (await $("button=インポート")).click();
+    const mainDialog = await $('[role="dialog"]');
+    await mainDialog.waitForExist({ timeout: 10000 });
+    await (await mainDialog.$("input")).setValue(padded);
+    await (await mainDialog.$("button=OK")).click();
+    const mainConfirm = await $('[role="alertdialog"]');
+    await mainConfirm.waitForExist({ timeout: 15000 });
+    expect(await mainConfirm.getText()).toContain(TRIMMED_NOTICE_TEXT);
+    await (await mainConfirm.$("button=キャンセル")).click();
+    await mainConfirm.waitForExist({ reverse: true, timeout: 10000 });
   });
 
   it("復号している間は、OKを押せず、入力も変えられず、その理由が示され、結果が届くと確認画面へ進む", async () => {

@@ -279,8 +279,8 @@ impl ProfileStore {
     /// ロックを他のコマンドと共有していて、かつパスフレーズ検証(scrypt、数百ms〜数秒)を
     /// その間ブロックしたくない場合は、2つを分けて呼ぶこと。
     pub fn preview_import(&self, data: &[u8], passphrase: SecretString) -> Result<ImportPreview, ProfileStoreError> {
-        let payload = decrypt_import_payload(data, passphrase)?;
-        self.resolve_import_preview(payload)
+        let decrypted = decrypt_import_payload(data, passphrase)?;
+        self.resolve_import_preview(decrypted.payload)
     }
 
     /// `preview_import`のうち、既に復号済みのペイロードから既存プロファイルとの名前衝突を
@@ -667,10 +667,20 @@ fn tags_for_profile_id(conn: &Connection, profile_id: i64) -> Result<Vec<String>
 /// ストアのロックを握らずにこれを呼べる。パスフレーズ検証のscrypt処理は数百ms〜数秒
 /// かかりうるため、ロックを共有する他の操作(GUIの他のTauriコマンド等)を無関係に
 /// 巻き込んで待たせないようにするための分離。
-pub fn decrypt_import_payload(data: &[u8], passphrase: SecretString) -> Result<ExportPayload, ProfileStoreError> {
-    let json = Zeroizing::new(export::decrypt_import(data, passphrase)?);
+pub fn decrypt_import_payload(data: &[u8], passphrase: SecretString) -> Result<DecryptedPayload, ProfileStoreError> {
+    let decrypted = export::decrypt_import_reporting_trim(data, passphrase)?;
+    let json = Zeroizing::new(decrypted.plaintext);
     check_import_size_limits(&json)?;
-    serde_json::from_slice(&json).map_err(|e| ProfileStoreError::CorruptProfileData(e.to_string()))
+    let payload =
+        serde_json::from_slice(&json).map_err(|e| ProfileStoreError::CorruptProfileData(e.to_string()))?;
+    Ok(DecryptedPayload { payload, passphrase_trimmed: decrypted.passphrase_trimmed })
+}
+
+/// `decrypt_import_payload`の結果。`passphrase_trimmed`は、入力のままでは復号できず、前後の空白・不可視文字を
+/// 除いたパスフレーズで復号できたこと(貼り付けで混ざった文字を、利用者へ知らせるための情報)。
+pub struct DecryptedPayload {
+    pub payload: ExportPayload,
+    pub passphrase_trimmed: bool,
 }
 
 fn check_format_version(found: u32) -> Result<(), ProfileStoreError> {
@@ -1291,6 +1301,23 @@ mod tests {
 
         assert_eq!(outcome, ImportOutcome::Single { name: "work".to_string(), activated: true });
         assert_eq!(import_preview_wipes(), before + 1, "確定した後にも、保留していた内容が消去されるはず");
+    }
+
+    #[test]
+    fn decrypt_import_payload_reports_whether_the_passphrase_was_trimmed() {
+        let (_dir, paths) = temp_paths();
+        init_at(&paths).unwrap();
+        let mut store = ProfileStore::open_at(&paths).unwrap();
+        store.create_profile(&sample_profile("work")).unwrap();
+        let exported = store.export_profile("work", passphrase("pw")).unwrap();
+
+        let exact = decrypt_import_payload(&exported, passphrase("pw")).unwrap();
+        assert!(!exact.passphrase_trimmed);
+        assert!(matches!(exact.payload, ExportPayload::Single { .. }));
+
+        let padded = decrypt_import_payload(&exported, passphrase("  pw ")).unwrap();
+        assert!(padded.passphrase_trimmed);
+        assert!(matches!(padded.payload, ExportPayload::Single { .. }));
     }
 
     #[test]

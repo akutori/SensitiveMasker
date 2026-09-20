@@ -85,7 +85,7 @@ type DialogState =
   | { kind: "tagManagement" }
   | { kind: "export"; target: string; profileId: string | null; session: ExportDialogState }
   | { kind: "importPassphrase"; session: number; sourcePath: string; fileName: string }
-  | { kind: "importConfirm"; rows: ImportPreviewRow[] }
+  | { kind: "importConfirm"; rows: ImportPreviewRow[]; passphraseTrimmed: boolean }
   | { kind: "envImportSelect"; candidates: EnvCandidate[] }
   | { kind: "envImportName"; selectedRules: Omit<RuleListItem, "id">[] };
 
@@ -187,7 +187,11 @@ function ProfilesRoute() {
         return mounted.current && shown.kind === "importPassphrase" && shown.session === session;
       },
       showConfirm: (result) => {
-        setDialog({ kind: "importConfirm", rows: toImportPreviewRows(result.preview) });
+        setDialog({
+          kind: "importConfirm",
+          rows: toImportPreviewRows(result.preview),
+          passphraseTrimmed: result.passphraseTrimmed,
+        });
         // 復号は完了済みでこの先パスフレーズ自体は不要になるため、state上に残さない。
         setImportPassphrase("");
       },
@@ -551,6 +555,7 @@ function ProfilesRoute() {
         open={dialog.kind === "importConfirm"}
         onOpenChange={importConfirmHandlers.onOpenChange}
         rows={dialog.kind === "importConfirm" ? dialog.rows : []}
+        passphraseTrimmed={dialog.kind === "importConfirm" ? dialog.passphraseTrimmed : false}
         onConfirm={importConfirmHandlers.onConfirm}
       />
 
