@@ -1,0 +1,5 @@
+[package]
+name = "wipe-check"
+version.workspace = true
+edition.workspace = true
+publish = false

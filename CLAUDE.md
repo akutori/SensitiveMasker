@@ -22,6 +22,8 @@
 - **masker**(CLI): `clap`
 - **masker-mcp**: `rmcp`(公式Rust SDK, stdioトランスポート)、`tokio`、`rustix`(Unixのタイムアウト時に、
   プロセスグループへのSIGKILLをシステムコールで直接送る。外部の`kill`コマンドは使わない)
+- **wipe-check**(テスト専用。masking-core・profile-storeのdev-dependencyのみ): メモリを消去してから解放したかを、
+  解放の直前の中身で確かめる(`GlobalAlloc`のラッパー)
 - **gui**: Tauri v2。フロントエンドはReact 19 + TypeScript + Vite + TanStack Router + Tailwind CSS v4 +
   shadcn/ui(Radix)、パッケージマネージャーは常にbun。Tauriプラグイン: `dialog`(ファイル選択)、
   `clipboard-manager`+`arboard`(クリップボード)、`notification`(トレイのエラー通知)、
@@ -47,6 +49,7 @@ SensitiveMasker/
     profile-store/         # SQLite, 暗号化, 鍵ファイル管理, export/import
     masker/                 # CLIエントリポイント(バイナリ名 masker)
     masker-mcp/              # MCPサーバー(run_masked_commandツール)
+    wipe-check/               # テスト専用: 消去してから解放したかの確認(dev-dependency)
   gui/                      # Tauriアプリ
     src/                     # React(コンポーネント・ルート・状態管理)
     src-tauri/                # Tauriコマンド・トレイ・クリップボード連携
@@ -99,6 +102,8 @@ SensitiveMasker/
 
 - **masking-core**: TDD(Red-Green-Refactor)。肯定テストと否定テストを対にする
 - **profile-store**: 実ファイルI/O・実DBを使った結合テスト中心(モックしない)
+- **メモリの消去(zeroize)**: 値が論理的に空になったかだけでは、`clear()`や`= None`(中身を上書きせずに解放する)でも
+  通ってしまうため、`wipe-check`で、追跡した文字列が、解放される直前に全て0であることを確かめる
 - **gui**: Component-Driven Development(Storybookで個別コンポーネントを検証してから画面に組み込む)。
   主要フローは`gui/e2e/`のWebDriverベースE2Eテストで検証する
   - 画面(コンポーネント・操作の流れ)を変えたら、対応するStorybookのstory(playテスト)とE2Eを同じ変更で更新する

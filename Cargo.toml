@@ -5,6 +5,7 @@ members = [
     "crates/profile-store",
     "crates/masker",
     "crates/masker-mcp",
+    "crates/wipe-check",
     "gui/src-tauri",
 ]
 

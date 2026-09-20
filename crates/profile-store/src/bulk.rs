@@ -25,6 +25,14 @@ impl Zeroize for ExportedProfile {
     }
 }
 
+/// 復号したペイロードのプロファイルを、どの経路で捨てても(名前の重複などのエラーで、確認画面へ進まずに捨てる場合を含む)、
+/// 内容が消去されるようにする。(Dropを持つため、フィールドをムーブして取り出す書き方はできない。借用で使う。)
+impl Drop for ExportedProfile {
+    fn drop(&mut self) {
+        self.zeroize();
+    }
+}
+
 // kindタグによるserdeの内部タグ付きenumにより、復号後のJSONの中身だけで
 // 単一/全体を自動判別できる(手動での形状判定が不要)。
 #[derive(Debug, Clone, Serialize, Deserialize)]

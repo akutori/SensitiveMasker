@@ -301,6 +301,8 @@ impl ProfileStore {
                 Ok(ImportPreview::Single { name, exported: profile })
             }
             ExportPayload::All { format_version, active_profile_name, profiles } => {
+                // エラーで抜けるときも、名前を消去する(成功したときは、保留する内容へ引き渡す)。
+                let mut active_profile_name = Zeroizing::new(active_profile_name);
                 check_format_version(format_version)?;
 
                 // 正規のexport_allでは`profiles.name`のUNIQUE制約によりあり得ないが、
@@ -330,7 +332,7 @@ impl ProfileStore {
                     })
                     .collect();
 
-                Ok(ImportPreview::All { active_profile_name, entries, exported: profiles })
+                Ok(ImportPreview::All { active_profile_name: active_profile_name.take(), entries, exported: profiles })
             }
         }
     }
@@ -356,15 +358,15 @@ impl ProfileStore {
             }
             ImportPreview::All { active_profile_name, entries, exported } => {
                 // 暗号化はself.keyの借用で完結させ、トランザクション(self.connの可変借用)開始前に
-                // 済ませておく(同時に借用しないための構成)。resolved_name/tags/is_favoriteを
-                // 1件ずつ平たいタプルに詰め、参照の入れ子を作らないようにする。
-                struct PreparedEntry {
-                    resolved_name: String,
+                // 済ませておく(同時に借用しないための構成)。resolved_name/tags/is_favoriteは、previewから
+                // 借用する(複製は、previewと違い、消去されないため、作らない)。
+                struct PreparedEntry<'a> {
+                    resolved_name: &'a str,
                     encrypted: crypto::Encrypted,
                     is_favorite: bool,
-                    tags: Vec<String>,
+                    tags: &'a [String],
                 }
-                let prepared: Vec<PreparedEntry> = entries
+                let prepared: Vec<PreparedEntry<'_>> = entries
                     .iter()
                     .zip(exported.iter())
                     .map(|(entry, exported)| {
@@ -373,27 +375,22 @@ impl ProfileStore {
                         // された場合、ファイル内の元の名前のままシリアライズすると、
                         // 暗号文の自己申告とAAD/DB上の名前が食い違う状態が生まれ、元プロファイル
                         // 削除後に、信頼している名前がインポート由来のルール集合を指すようになりうる。
-                        let renamed_profile = RuleProfile::new(
-                            entry.resolved_name.clone(),
-                            exported.profile.description().map(str::to_string),
-                            exported.profile.rules().to_vec(),
-                        )
-                        .map_err(|e| ProfileStoreError::InvalidProfileName(e.to_string()))?;
+                        let renamed_profile = renamed_profile_for_import(&entry.resolved_name, exported)?;
                         let json = Zeroizing::new(
-                            serde_json::to_vec(&renamed_profile).expect("RuleProfileのシリアライズは失敗しない"),
+                            serde_json::to_vec(&*renamed_profile).expect("RuleProfileのシリアライズは失敗しない"),
                         );
                         Ok(PreparedEntry {
-                            resolved_name: entry.resolved_name.clone(),
+                            resolved_name: &entry.resolved_name,
                             encrypted: crypto::encrypt(&self.key, &json, entry.resolved_name.as_bytes()),
                             is_favorite: exported.is_favorite,
-                            tags: exported.tags.clone(),
+                            tags: &exported.tags,
                         })
                     })
-                    .collect::<Result<Vec<PreparedEntry>, ProfileStoreError>>()?;
+                    .collect::<Result<Vec<PreparedEntry<'_>>, ProfileStoreError>>()?;
 
                 let tx = self.conn.transaction()?;
                 for p in &prepared {
-                    insert_profile_row(&tx, &p.resolved_name, &p.encrypted, p.is_favorite, &p.tags)?;
+                    insert_profile_row(&tx, p.resolved_name, &p.encrypted, p.is_favorite, p.tags)?;
                 }
 
                 // アクティブプロファイルの扱い: 取り込み先に既にアクティブなプロファイルが
@@ -683,6 +680,21 @@ pub struct DecryptedPayload {
     pub passphrase_trimmed: bool,
 }
 
+/// 全体インポートで、名前衝突の解決後の名前を持つプロファイルを作る。ルールの複製(平文)を持つため、
+/// 消去する型(`Zeroizing`)で返し、使い終えたときに消去させる。
+fn renamed_profile_for_import(
+    resolved_name: &str,
+    exported: &ExportedProfile,
+) -> Result<Zeroizing<RuleProfile>, ProfileStoreError> {
+    RuleProfile::new(
+        resolved_name,
+        exported.profile.description().map(str::to_string),
+        exported.profile.rules().to_vec(),
+    )
+    .map(Zeroizing::new)
+    .map_err(|e| ProfileStoreError::InvalidProfileName(e.to_string()))
+}
+
 fn check_format_version(found: u32) -> Result<(), ProfileStoreError> {
     if found != bulk::CURRENT_FORMAT_VERSION {
         return Err(ProfileStoreError::UnsupportedFormatVersion { found, supported: bulk::CURRENT_FORMAT_VERSION });
@@ -854,6 +866,10 @@ mod tests {
     use super::*;
     use masking_core::{Mode, PatternType, Rule};
     use secrecy::ExposeSecret;
+
+    // 消去してから解放したかを、解放の直前の中身で確かめる(wipe_check)。
+    #[global_allocator]
+    static WIPE_CHECK_ALLOCATOR: wipe_check::WipeCheckAllocator = wipe_check::WipeCheckAllocator;
 
     fn temp_paths() -> (tempfile::TempDir, AppPaths) {
         let dir = tempfile::tempdir().unwrap();
@@ -1301,6 +1317,226 @@ mod tests {
 
         assert_eq!(outcome, ImportOutcome::Single { name: "work".to_string(), activated: true });
         assert_eq!(import_preview_wipes(), before + 1, "確定した後にも、保留していた内容が消去されるはず");
+    }
+
+    fn empty_store() -> (tempfile::TempDir, ProfileStore) {
+        let (dir, paths) = temp_paths();
+        init_at(&paths).unwrap();
+        let store = ProfileStore::open_at(&paths).unwrap();
+        (dir, store)
+    }
+
+    // 全ての種類の文字列(名前・説明・パターン・固定値・接頭辞・タグ)を持つプロファイル。
+    fn profile_with_every_text_field(name: &str) -> ExportedProfile {
+        let fixed = Rule::new(
+            "fixed-rule",
+            PatternType::Literal,
+            "fixed-secret-pattern",
+            Mode::Fixed,
+            Some("fixed-secret-value".to_string()),
+            Some("secret-prefix".to_string()),
+            true,
+            Some("fixed-rule-description".to_string()),
+        )
+        .unwrap();
+        let sequential = Rule::new(
+            "sequential-rule",
+            PatternType::Regex,
+            r"secret-\d+",
+            Mode::Sequential,
+            None,
+            Some("__MASK_SECRET_".to_string()),
+            true,
+            None,
+        )
+        .unwrap();
+        ExportedProfile {
+            is_favorite: false,
+            tags: vec!["secret-tag-a".to_string(), "secret-tag-b".to_string()],
+            profile: RuleProfile::new(name, Some("profile-description".to_string()), vec![fixed, sequential]).unwrap(),
+        }
+    }
+
+    // profile_with_every_text_fieldの文字列のうち、プロファイル(名前・説明、2つのルールの各欄)の分と、タグの分。
+    const PROFILE_TEXTS: usize = 10;
+    const TAG_TEXTS: usize = 2;
+
+    fn track_profile_texts(watch: &mut wipe_check::Watch, profile: &RuleProfile) {
+        watch.track(profile.profile_name());
+        watch.track_opt(profile.description());
+        for rule in profile.rules() {
+            watch.track(rule.name());
+            watch.track(rule.pattern());
+            watch.track_opt(rule.fixed_value());
+            watch.track_opt(rule.prefix());
+            watch.track_opt(rule.description());
+        }
+    }
+
+    fn track_exported_profile(watch: &mut wipe_check::Watch, exported: &ExportedProfile) {
+        track_profile_texts(watch, &exported.profile);
+        for tag in &exported.tags {
+            watch.track(tag);
+        }
+    }
+
+    fn track_import_preview(watch: &mut wipe_check::Watch, preview: &ImportPreview) {
+        match preview {
+            ImportPreview::Single { name, exported } => {
+                watch.track(name);
+                track_exported_profile(watch, exported);
+            }
+            ImportPreview::All { active_profile_name, entries, exported } => {
+                watch.track_opt(active_profile_name.as_deref());
+                for entry in entries {
+                    watch.track(&entry.original_name);
+                    watch.track(&entry.resolved_name);
+                }
+                for profile in exported {
+                    track_exported_profile(watch, profile);
+                }
+            }
+        }
+    }
+
+    fn single_payload(name: &str) -> ExportPayload {
+        ExportPayload::Single { format_version: bulk::CURRENT_FORMAT_VERSION, profile: profile_with_every_text_field(name) }
+    }
+
+    fn all_payload(names: &[&str], active_profile_name: Option<&str>) -> ExportPayload {
+        ExportPayload::All {
+            format_version: bulk::CURRENT_FORMAT_VERSION,
+            active_profile_name: active_profile_name.map(str::to_string),
+            profiles: names.iter().map(|name| profile_with_every_text_field(name)).collect(),
+        }
+    }
+
+    fn track_payload(watch: &mut wipe_check::Watch, payload: &ExportPayload) {
+        match payload {
+            ExportPayload::Single { profile, .. } => track_exported_profile(watch, profile),
+            ExportPayload::All { active_profile_name, profiles, .. } => {
+                watch.track_opt(active_profile_name.as_deref());
+                for profile in profiles {
+                    track_exported_profile(watch, profile);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn dropping_an_exported_profile_erases_every_text_before_freeing_it() {
+        let exported = profile_with_every_text_field("work");
+        let mut watch = wipe_check::Watch::new();
+        track_exported_profile(&mut watch, &exported);
+        assert_eq!(watch.tracked_count(), PROFILE_TEXTS + TAG_TEXTS, "追跡する文字列を、取りこぼしている");
+
+        drop(exported);
+
+        watch.assert_all_wiped_when_freed();
+    }
+
+    // 確認画面へ進まずに、エラーで捨てる経路でも、復号したペイロードの内容は、消去されてから解放される。
+    #[test]
+    fn an_error_while_resolving_an_import_erases_the_decrypted_payload_before_freeing_it() {
+        let (_dir, mut store) = empty_store();
+        store.create_profile(&sample_profile("existing")).unwrap();
+
+        let unsupported = |payload: ExportPayload| match payload {
+            ExportPayload::Single { profile, .. } => {
+                ExportPayload::Single { format_version: bulk::CURRENT_FORMAT_VERSION + 1, profile }
+            }
+            ExportPayload::All { active_profile_name, profiles, .. } => ExportPayload::All {
+                format_version: bulk::CURRENT_FORMAT_VERSION + 1,
+                active_profile_name,
+                profiles,
+            },
+        };
+        let cases: Vec<(&str, ExportPayload, usize)> = vec![
+            ("既存の名前(単一)", single_payload("existing"), PROFILE_TEXTS + TAG_TEXTS),
+            ("未対応のバージョン(単一)", unsupported(single_payload("new")), PROFILE_TEXTS + TAG_TEXTS),
+            ("ファイル内の名前の重複(全体)", all_payload(&["dup", "dup"], Some("active-secret-name")), 2 * (PROFILE_TEXTS + TAG_TEXTS) + 1),
+            ("未対応のバージョン(全体)", unsupported(all_payload(&["a", "b"], Some("active-secret-name"))), 2 * (PROFILE_TEXTS + TAG_TEXTS) + 1),
+        ];
+
+        for (label, payload, expected_tracked) in cases {
+            let mut watch = wipe_check::Watch::new();
+            track_payload(&mut watch, &payload);
+            assert_eq!(watch.tracked_count(), expected_tracked, "{label}: 追跡する文字列を、取りこぼしている");
+
+            let result = store.resolve_import_preview(payload);
+
+            assert!(result.is_err(), "{label}: エラーになるはず");
+            watch.assert_all_wiped_when_freed();
+        }
+    }
+
+    // 対照: 確認画面へ進む(成功する)と、内容は、保留する内容へ引き渡され、捨てるまで、解放されない。
+    #[test]
+    fn a_successful_resolve_hands_the_payload_over_to_the_preview_which_erases_it_when_dropped() {
+        let (_dir, store) = empty_store();
+        let mut watch = wipe_check::Watch::new();
+        let payload = all_payload(&["a", "b"], Some("a"));
+        track_payload(&mut watch, &payload);
+
+        let preview = store.resolve_import_preview(payload).unwrap();
+
+        let still_alive = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| watch.assert_all_wiped_when_freed()));
+        assert!(still_alive.is_err(), "保留している間は、内容は、まだ解放されていないはず");
+        drop(preview);
+        watch.assert_all_wiped_when_freed();
+    }
+
+    #[test]
+    fn dropping_an_import_preview_erases_every_text_before_freeing_it() {
+        let (_dir, store) = empty_store();
+        let previews = [
+            ("単一", store.resolve_import_preview(single_payload("single")).unwrap()),
+            ("全体", store.resolve_import_preview(all_payload(&["a", "b"], Some("a"))).unwrap()),
+        ];
+
+        for (label, preview) in previews {
+            let mut watch = wipe_check::Watch::new();
+            track_import_preview(&mut watch, &preview);
+            assert!(watch.tracked_count() > PROFILE_TEXTS, "{label}: 追跡する文字列を、取りこぼしている");
+
+            drop(preview);
+
+            watch.assert_all_wiped_when_freed();
+        }
+    }
+
+    #[test]
+    fn committing_an_import_erases_every_text_of_the_preview_before_freeing_it() {
+        let (_dir, mut store) = empty_store();
+        let previews = [
+            store.resolve_import_preview(single_payload("single")).unwrap(),
+            store.resolve_import_preview(all_payload(&["a", "b"], Some("a"))).unwrap(),
+        ];
+
+        for preview in previews {
+            let mut watch = wipe_check::Watch::new();
+            track_import_preview(&mut watch, &preview);
+
+            store.commit_import(preview).unwrap();
+
+            watch.assert_all_wiped_when_freed();
+        }
+    }
+
+    // 名前を差し替えたプロファイル(ルールの複製を含む)は、`Zeroizing`で持ち、捨てるときに、消去される。
+    #[test]
+    fn a_renamed_profile_for_import_is_erased_before_freeing_it() {
+        let exported = profile_with_every_text_field("original");
+
+        let renamed: Zeroizing<RuleProfile> = renamed_profile_for_import("original (インポート)", &exported).unwrap();
+
+        assert_eq!(renamed.profile_name(), "original (インポート)");
+        assert_eq!(renamed.rules(), exported.profile.rules());
+        let mut watch = wipe_check::Watch::new();
+        track_profile_texts(&mut watch, &renamed);
+        assert_eq!(watch.tracked_count(), PROFILE_TEXTS, "追跡する文字列を、取りこぼしている");
+        drop(renamed);
+        watch.assert_all_wiped_when_freed();
     }
 
     #[test]

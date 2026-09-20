@@ -315,6 +315,10 @@ impl From<RuleProfile> for RuleProfileDto {
 mod tests {
     use super::*;
 
+    // 消去してから解放したかを、解放の直前の中身で確かめる(wipe_check)。
+    #[global_allocator]
+    static WIPE_CHECK_ALLOCATOR: wipe_check::WipeCheckAllocator = wipe_check::WipeCheckAllocator;
+
     #[test]
     fn zeroize_clears_every_text_field_of_a_fixed_rule() {
         let mut rule = Rule::new(
@@ -371,6 +375,65 @@ mod tests {
         assert_eq!(profile.profile_name(), "");
         assert_eq!(profile.description(), None);
         assert!(profile.rules().is_empty());
+    }
+
+    // 全ての文字列の欄(名前・パターン・固定値・接頭辞・説明)を持つルール。
+    fn rule_with_every_text_field() -> Rule {
+        Rule::new(
+            "rule-name",
+            PatternType::Literal,
+            "secret-pattern",
+            Mode::Fixed,
+            Some("secret-fixed-value".to_string()),
+            Some("secret-prefix".to_string()),
+            true,
+            Some("rule-description".to_string()),
+        )
+        .unwrap()
+    }
+
+    fn track_rule_texts(watch: &mut wipe_check::Watch, rule: &Rule) {
+        watch.track(rule.name());
+        watch.track(rule.pattern());
+        watch.track_opt(rule.fixed_value());
+        watch.track_opt(rule.prefix());
+        watch.track_opt(rule.description());
+    }
+
+    #[test]
+    fn zeroizing_a_rule_overwrites_every_text_before_it_is_freed() {
+        let mut rule = rule_with_every_text_field();
+        let mut watch = wipe_check::Watch::new();
+        track_rule_texts(&mut watch, &rule);
+        assert_eq!(watch.tracked_count(), 5, "追跡する文字列を、取りこぼしている");
+
+        rule.zeroize();
+        drop(rule);
+
+        watch.assert_all_wiped_when_freed();
+    }
+
+    #[test]
+    fn zeroizing_a_profile_overwrites_its_texts_and_every_rule_before_they_are_freed() {
+        let mut profile = RuleProfile::new(
+            "profile-name",
+            Some("profile-description".to_string()),
+            vec![rule_with_every_text_field(), valid_sequential_rule().unwrap()],
+        )
+        .unwrap();
+        let mut watch = wipe_check::Watch::new();
+        watch.track(profile.profile_name());
+        watch.track_opt(profile.description());
+        for rule in profile.rules() {
+            track_rule_texts(&mut watch, rule);
+        }
+        // プロファイルの名前・説明(2)、全ての欄を持つルール(5)、連番のルールの名前・パターン・接頭辞(3)。
+        assert_eq!(watch.tracked_count(), 10, "追跡する文字列を、取りこぼしている");
+
+        profile.zeroize();
+        drop(profile);
+
+        watch.assert_all_wiped_when_freed();
     }
 
     fn valid_fixed_rule() -> Result<Rule, RuleError> {

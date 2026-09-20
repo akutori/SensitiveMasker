@@ -3316,6 +3316,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.20",
+ "wipe-check",
  "zeroize",
 ]
 
@@ -4266,6 +4267,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 2.0.20",
+ "wipe-check",
  "zeroize",
 ]
 
@@ -7221,6 +7223,10 @@ dependencies = [
  "cfg-if",
  "windows-sys 0.59.0",
 ]
+
+[[package]]
+name = "wipe-check"
+version = "0.0.4"
 
 [[package]]
 name = "wit-bindgen"
