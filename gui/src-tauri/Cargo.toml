@@ -1,6 +1,6 @@
 [package]
 name = "gui"
-version = "0.0.3"
+version = "0.0.4"
 description = "A Tauri App"
 authors = ["you"]
 edition.workspace = true
@@ -23,8 +23,8 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2.11", features = ["tray-icon"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-masking-core = { version = "0.0.3", path = "../../crates/masking-core" }
-profile-store = { version = "0.0.3", path = "../../crates/profile-store" }
+masking-core = { version = "0.0.4", path = "../../crates/masking-core" }
+profile-store = { version = "0.0.4", path = "../../crates/profile-store" }
 # e2e-testing feature専用。認証無しのWebDriverプロトコルサーバーを起動する実装のため、
 # 配布用ビルドに絶対に含めない(optional依存にしてデフォルトのコンパイル対象から外す)。
 tauri-plugin-wdio = { version = "1.4.0", optional = true }
