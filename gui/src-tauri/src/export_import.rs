@@ -5,7 +5,7 @@ use std::sync::{Mutex, MutexGuard};
 use masking_core::{Mode, PatternType, Rule, RuleProfile};
 use profile_store::{decrypt_import_payload, AllImportEntry, AppPaths, ImportPreview, SecretString};
 use tauri::webview::PageLoadEvent;
-use tauri::{Emitter, Manager};
+use tauri::{Emitter, Manager, RunEvent};
 
 use crate::profiles::{resolve_paths, with_store, ProfileStoreState};
 use crate::tray::MAIN_WINDOW_LABEL;
@@ -74,7 +74,8 @@ const MAX_PENDING_IMPORTS: usize = 4;
 
 /// preview_importが復号した内容(ImportPreview。ルール本体を含む)そのものを、IPCで往復させないための保持先。
 /// commit_pending_import・clear_pending_importが呼ばれるか、メインウィンドウのページの読み込みが始まる
-/// (discard_pending_imports_on_page_load)までの間だけメモリ上に置く。
+/// (discard_pending_imports_on_page_load)か、アプリが終了する(discard_pending_imports_on_run_event)までの間だけ
+/// メモリ上に置く。
 ///
 /// 復号のたびに識別子を払い出して保持し、確定・破棄は、その識別子で、その保留だけを指す。
 /// 画面ごとに復号は独立して走るため、復号が重なっても、互いの保留を取り違えたり消したりしない。
@@ -171,6 +172,17 @@ pub(crate) fn discard_pending_imports_on_page_load(
 ) {
     if webview_label == MAIN_WINDOW_LABEL && event == PageLoadEvent::Started {
         pending.reset_for_new_page();
+    }
+}
+
+/// アプリの終了の通知(RunEvent::Exit)で、保留している全ての内容を破棄する。
+///
+/// Tauriは、終了するとき、管理している状態(このPendingImportStateなど)をdropせずに、プロセスを終える。そのため、
+/// dropによる消去に任せると、確認されないまま残っていた復号済みの内容(平文)が、消去されずに終了してしまう。
+/// 終了の通知以外(取り消されうる終了の要求など)では、何もしない。
+pub(crate) fn discard_pending_imports_on_run_event(pending: &PendingImportState, event: &RunEvent) {
+    if matches!(event, RunEvent::Exit) {
+        pending.discard(None);
     }
 }
 
@@ -1117,6 +1129,33 @@ mod tests {
         for id in ids {
             assert!(pending.take(id).is_some(), "別のウェブビューの読み込みで、保留(識別子{id})が消えている");
         }
+    }
+
+    // アプリの終了の通知では、Tauriが管理している状態をdropしないため、全ての保留を明示的に破棄する。
+    #[test]
+    fn the_exit_event_discards_every_pending_import() {
+        let pending = PendingImportState::default();
+        let ids = fill_pending(&pending);
+
+        discard_pending_imports_on_run_event(&pending, &RunEvent::Exit);
+
+        assert_eq!(pending_count(&pending), 0);
+        for id in ids {
+            assert!(pending.take(id).is_none(), "終了の通知の後に、保留(識別子{id})が残っている");
+        }
+    }
+
+    // 終了以外の通知(起動・再開・イベント処理の区切り)では、破棄しない。
+    #[test]
+    fn run_events_other_than_exit_keep_every_pending_import() {
+        let pending = PendingImportState::default();
+        fill_pending(&pending);
+
+        for event in [RunEvent::Ready, RunEvent::Resumed, RunEvent::MainEventsCleared] {
+            discard_pending_imports_on_run_event(&pending, &event);
+        }
+
+        assert_eq!(pending_count(&pending), MAX_PENDING_IMPORTS);
     }
 
     // 保留が無いときは、何も起きない(その後の保留は、通常どおり払い出し、確定できる)。

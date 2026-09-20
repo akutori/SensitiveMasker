@@ -88,6 +88,14 @@ pub fn run() {
             text_file_io::write_text_file,
             env_import::preview_env_import,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            // クリップボードの後始末(clipboard::clear_pending_on_exit)は、ここではなく、トレイの「終了」が、終了する前に
+            // 行う(終了の通知の時点では、クリップボードのプラグインが、自身のクリップボードを手放していて、操作できない)。
+            export_import::discard_pending_imports_on_run_event(
+                &app.state::<export_import::PendingImportState>(),
+                &event,
+            );
+        });
 }

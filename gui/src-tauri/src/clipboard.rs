@@ -81,9 +81,10 @@ fn write_to_os_clipboard<R: Runtime>(_app: &AppHandle<R>, text: &str) -> Result<
         .map_err(|_| CLIPBOARD_ERROR.to_string())
 }
 
+// &strのまま渡し、こちらでは複製を作らない(プラグインの内部にできる複製は、アプリから消去できない)。
 #[cfg(not(windows))]
 fn write_to_os_clipboard<R: Runtime>(app: &AppHandle<R>, text: &str) -> Result<(), String> {
-    app.clipboard().write_text(text.to_string()).map_err(|_| CLIPBOARD_ERROR.to_string())
+    app.clipboard().write_text(text).map_err(|_| CLIPBOARD_ERROR.to_string())
 }
 
 /// clear_clipboard_if_matchesの後、pending追跡をクリアしてよいかの判定(純粋関数)。
@@ -100,16 +101,16 @@ fn should_forget_pending(outcome: ClipboardClearOutcome, pending: Option<&str>, 
 fn clear_clipboard_if_matches_impl<R: Runtime>(
     app: &AppHandle<R>,
     state: &ClipboardState,
-    expected: &str,
+    expected: &Zeroizing<String>,
 ) -> Result<ClipboardClearOutcome, String> {
     let mut pending = state.0.lock().unwrap_or_else(|e| e.into_inner());
     // 読み取った内容は、パスフレーズそのものでありうるため、比較の後に消去する。
     let current = app.clipboard().read_text().ok().map(Zeroizing::new);
-    let outcome = decide_outcome(current.as_ref().map(|text| text.as_str()), expected);
+    let outcome = decide_outcome(current.as_ref().map(|text| text.as_str()), expected.as_str());
     if outcome == ClipboardClearOutcome::Cleared {
         app.clipboard().write_text("").map_err(|_| CLIPBOARD_ERROR.to_string())?;
     }
-    if should_forget_pending(outcome, pending.as_ref().map(|text| text.as_str()), expected) {
+    if should_forget_pending(outcome, pending.as_ref().map(|text| text.as_str()), expected.as_str()) {
         *pending = None;
     }
     Ok(outcome)
@@ -167,7 +168,7 @@ pub async fn clear_clipboard_if_matches(
     expected: String,
 ) -> Result<ClipboardClearOutcome, String> {
     let expected = Zeroizing::new(expected);
-    clear_clipboard_if_matches_impl(&app, &state, expected.as_str())
+    clear_clipboard_if_matches_impl(&app, &state, &expected)
 }
 
 /// トレイメニューの「終了」からの終了直前に呼ぶ。JS側のsetTimeoutはプロセス終了と
@@ -176,9 +177,11 @@ pub async fn clear_clipboard_if_matches(
 /// ごく普通の操作フローで発生しうる)。追跡している値があれば、終了直前に一度だけ
 /// クリアを試みる(失敗しても終了自体は妨げない)。
 pub fn clear_pending_on_exit<R: Runtime>(app: &AppHandle<R>, state: &ClipboardState) {
-    let pending = state.0.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    // 追跡している値は、取り出して使う(複製を作らない。取り出した値は、この関数を抜けるときに消去される)。
+    // 終了の直前で、再試行の機会は無いため、追跡を残す必要は無い。
+    let pending = state.0.lock().unwrap_or_else(|e| e.into_inner()).take();
     if let Some(expected) = pending {
-        let _ = clear_clipboard_if_matches_impl(app, state, expected.as_str());
+        let _ = clear_clipboard_if_matches_impl(app, state, &expected);
     }
 }
 
