@@ -62,3 +62,33 @@ jobs:
       # Cargo.lockのとおりに解決できることも確かめる(--locked)。
       - name: Rust tests
         run: cargo test --workspace --locked
+
+  # Windows・macOSでも、Rustのテストを通す(そのOSでだけ動くテスト、Windowsのデバッグビルドでだけ動く
+  # tauri::testのテスト、macOSでのUnix向けの処理を含む)。フロントエンドの検査は、上のjob(Ubuntu)で行う。
+  rust-tests:
+    name: Rust tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: install bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: install frontend dependencies
+        working-directory: gui
+        run: bun install --frozen-lockfile
+
+      # gui/src-tauriのコンパイルは、ビルド済みのdistが存在することを要求するため、Rustのテストより前に行う。
+      - name: build frontend
+        working-directory: gui
+        run: bun run build
+
+      - name: Rust tests
+        run: cargo test --workspace --locked
