@@ -9,7 +9,7 @@ mod key;
 mod paths;
 
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use bulk::ExportedProfile;
 use masking_core::RuleProfile;
@@ -18,6 +18,8 @@ use secrecy::SecretBox;
 use zeroize::{Zeroize, Zeroizing};
 
 pub use bulk::ExportPayload;
+pub use export::{detect_import_method, ImportMethod, KeyFileExport, KEY_FILE_EXTENSION};
+pub use key::FileProtection;
 pub use paths::{normalize_and_reject_special_forms, AppPaths, PathError};
 // masker/gui側がexport_profile/import_profileにパスフレーズを渡す際、profile-storeが
 // 実際に使っているsecrecyと同一の型を参照できるようにする(独自にsecrecy依存を追加させない)。
@@ -239,15 +241,37 @@ impl ProfileStore {
     /// プロファイル(お気に入り・タグを含む)をパスフレーズで再暗号化したバイト列を返す
     /// (ローカル鍵を経由しない)。呼び出し側がこれをファイルに書き出す。
     pub fn export_profile(&self, name: &str, passphrase: SecretString) -> Result<Vec<u8>, ProfileStoreError> {
+        let json = self.single_export_json(name)?;
+        Ok(export::encrypt_for_export(&json, passphrase)?)
+    }
+
+    /// `export_profile`の、鍵ファイル方式。新しい鍵を生成し、その鍵宛てに暗号化する(鍵は、返り値の`key_file_contents`で
+    /// 渡す。呼び出し側が、鍵ファイルとして書き出す)。
+    pub fn export_profile_with_key_file(&self, name: &str) -> Result<KeyFileExport, ProfileStoreError> {
+        let json = self.single_export_json(name)?;
+        Ok(export::encrypt_for_export_with_new_key(&json)?)
+    }
+
+    fn single_export_json(&self, name: &str) -> Result<Zeroizing<Vec<u8>>, ProfileStoreError> {
         let exported = self.read_exported_profile(name)?;
         let payload = ExportPayload::Single { format_version: bulk::CURRENT_FORMAT_VERSION, profile: exported };
-        let json = Zeroizing::new(serde_json::to_vec(&payload).expect("ExportPayloadのシリアライズは失敗しない"));
-        Ok(export::encrypt_for_export(&json, passphrase)?)
+        Ok(Zeroizing::new(serde_json::to_vec(&payload).expect("ExportPayloadのシリアライズは失敗しない")))
     }
 
     /// 全プロファイル+タグ+お気に入り+アクティブプロファイル名をパスフレーズで
     /// 再暗号化したバイト列を返す(PC移行用)。
     pub fn export_all(&self, passphrase: SecretString) -> Result<Vec<u8>, ProfileStoreError> {
+        let json = self.all_export_json()?;
+        Ok(export::encrypt_for_export(&json, passphrase)?)
+    }
+
+    /// `export_all`の、鍵ファイル方式(`export_profile_with_key_file`と同じ)。
+    pub fn export_all_with_key_file(&self) -> Result<KeyFileExport, ProfileStoreError> {
+        let json = self.all_export_json()?;
+        Ok(export::encrypt_for_export_with_new_key(&json)?)
+    }
+
+    fn all_export_json(&self) -> Result<Zeroizing<Vec<u8>>, ProfileStoreError> {
         let names: Vec<String> = self
             .conn
             .prepare("SELECT name FROM profiles ORDER BY name")?
@@ -263,8 +287,7 @@ impl ProfileStore {
             active_profile_name,
             profiles,
         };
-        let json = Zeroizing::new(serde_json::to_vec(&payload).expect("ExportPayloadのシリアライズは失敗しない"));
-        Ok(export::encrypt_for_export(&json, passphrase)?)
+        Ok(Zeroizing::new(serde_json::to_vec(&payload).expect("ExportPayloadのシリアライズは失敗しない")))
     }
 
     /// `export_profile`/`export_all`が生成したバイト列を復号し、書き込み内容を計算する
@@ -666,11 +689,31 @@ fn tags_for_profile_id(conn: &Connection, profile_id: i64) -> Result<Vec<String>
 /// 巻き込んで待たせないようにするための分離。
 pub fn decrypt_import_payload(data: &[u8], passphrase: SecretString) -> Result<DecryptedPayload, ProfileStoreError> {
     let decrypted = export::decrypt_import_reporting_trim(data, passphrase)?;
-    let json = Zeroizing::new(decrypted.plaintext);
+    payload_from_plaintext(decrypted.plaintext, decrypted.passphrase_trimmed)
+}
+
+/// `decrypt_import_payload`の、鍵ファイル方式(鍵ファイルの中身で復号する。DBには一切アクセスしない)。空白を除いての
+/// 再試行は無いため、`passphrase_trimmed`は、常にfalse。
+pub fn decrypt_import_payload_with_key_file(
+    data: &[u8],
+    key_file_contents: &SecretString,
+) -> Result<DecryptedPayload, ProfileStoreError> {
+    let plaintext = export::decrypt_import_with_key_file(data, key_file_contents)?;
+    payload_from_plaintext(plaintext, false)
+}
+
+// 復号した平文のJSONを、ペイロードへ読み取る(規模の検査を、型付きのデシリアライズの前に行う)。平文は、使い終えたときに消去する。
+fn payload_from_plaintext(plaintext: Vec<u8>, passphrase_trimmed: bool) -> Result<DecryptedPayload, ProfileStoreError> {
+    let json = Zeroizing::new(plaintext);
     check_import_size_limits(&json)?;
     let payload =
         serde_json::from_slice(&json).map_err(|e| ProfileStoreError::CorruptProfileData(e.to_string()))?;
-    Ok(DecryptedPayload { payload, passphrase_trimmed: decrypted.passphrase_trimmed })
+    Ok(DecryptedPayload { payload, passphrase_trimmed })
+}
+
+/// 鍵ファイルを書き出す(所有ユーザーだけの権限にする。制限できない保管先では、書き込みは成功として、その旨を返す)。
+pub fn write_key_file(path: &Path, contents: &SecretString) -> Result<FileProtection, ProfileStoreError> {
+    Ok(key::write_owner_only_file(path, contents.expose_secret().as_bytes())?)
 }
 
 /// `decrypt_import_payload`の結果。`passphrase_trimmed`は、入力のままでは復号できず、前後の空白・不可視文字を
@@ -1537,6 +1580,94 @@ mod tests {
         assert_eq!(watch.tracked_count(), PROFILE_TEXTS, "追跡する文字列を、取りこぼしている");
         drop(renamed);
         watch.assert_all_wiped_when_freed();
+    }
+
+    #[test]
+    fn a_key_file_export_of_a_profile_round_trips_into_a_different_store() {
+        let (_dir_a, mut store_a) = empty_store();
+        store_a.create_profile(&sample_profile("work")).unwrap();
+        let exported = store_a.export_profile_with_key_file("work").unwrap();
+
+        let (_dir_b, mut store_b) = empty_store();
+        assert_eq!(detect_import_method(&exported.ciphertext).unwrap(), ImportMethod::KeyFile);
+        let decrypted =
+            decrypt_import_payload_with_key_file(&exported.ciphertext, &exported.key_file_contents).unwrap();
+        assert!(!decrypted.passphrase_trimmed);
+        let preview = store_b.resolve_import_preview(decrypted.payload).unwrap();
+        store_b.commit_import(preview).unwrap();
+
+        assert_eq!(store_b.get_profile("work").unwrap().rules().len(), 1);
+    }
+
+    #[test]
+    fn a_key_file_export_of_all_profiles_round_trips_into_a_different_store() {
+        let (_dir_a, mut store_a) = empty_store();
+        store_a.create_profile(&sample_profile("work")).unwrap();
+        store_a.create_profile(&sample_profile("home")).unwrap();
+        let exported = store_a.export_all_with_key_file().unwrap();
+
+        let (_dir_b, mut store_b) = empty_store();
+        let decrypted =
+            decrypt_import_payload_with_key_file(&exported.ciphertext, &exported.key_file_contents).unwrap();
+        let preview = store_b.resolve_import_preview(decrypted.payload).unwrap();
+        store_b.commit_import(preview).unwrap();
+
+        let names: Vec<String> = store_b.list_profiles().unwrap().into_iter().map(|p| p.name).collect();
+        assert_eq!(names.len(), 2);
+        assert!(names.contains(&"work".to_string()) && names.contains(&"home".to_string()));
+    }
+
+    #[test]
+    fn a_key_file_export_keeps_the_favorite_and_tags_like_the_passphrase_export() {
+        let (_dir_a, mut store_a) = empty_store();
+        store_a.create_profile(&sample_profile("work")).unwrap();
+        store_a.conn.execute("UPDATE profiles SET is_favorite = 1 WHERE name = 'work'", []).unwrap();
+        let exported = store_a.export_profile_with_key_file("work").unwrap();
+
+        let decrypted =
+            decrypt_import_payload_with_key_file(&exported.ciphertext, &exported.key_file_contents).unwrap();
+
+        let ExportPayload::Single { profile, .. } = &decrypted.payload else { panic!("Singleを期待") };
+        assert!(profile.is_favorite);
+    }
+
+    #[test]
+    fn the_passphrase_path_refuses_a_key_file_export_and_says_a_key_file_is_needed() {
+        let (_dir, mut store) = empty_store();
+        store.create_profile(&sample_profile("work")).unwrap();
+        let exported = store.export_profile_with_key_file("work").unwrap();
+
+        let error = decrypt_import_payload(&exported.ciphertext, passphrase("pw"))
+            .err()
+            .expect("パスフレーズでは、復号できないはず");
+
+        assert!(error.to_string().contains("鍵ファイル"), "鍵ファイルが必要なことを知らせるはず: {error}");
+    }
+
+    #[test]
+    fn a_key_file_that_does_not_match_the_export_is_rejected() {
+        let (_dir, mut store) = empty_store();
+        store.create_profile(&sample_profile("work")).unwrap();
+        let exported = store.export_profile_with_key_file("work").unwrap();
+        let other = store.export_profile_with_key_file("work").unwrap();
+
+        let result = decrypt_import_payload_with_key_file(&exported.ciphertext, &other.key_file_contents);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn write_key_file_writes_the_key_file_contents_only_the_owner_can_read() {
+        let (_dir, mut store) = empty_store();
+        store.create_profile(&sample_profile("work")).unwrap();
+        let exported = store.export_profile_with_key_file("work").unwrap();
+        let folder = tempfile::tempdir().unwrap();
+        let path = folder.path().join("export.smxkey");
+
+        let protection = write_key_file(&path, &exported.key_file_contents).unwrap();
+
+        assert_eq!(protection, FileProtection::OwnerOnly);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), exported.key_file_contents.expose_secret());
     }
 
     #[test]

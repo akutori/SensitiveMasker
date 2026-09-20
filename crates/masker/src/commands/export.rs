@@ -243,6 +243,25 @@ mod tests {
         assert!(matches!(err, CliError::Store(profile_store::ProfileStoreError::Export(_))));
     }
 
+    // GUIの「鍵ファイル」で書き出したファイルは、CLIでは取り込めない。「パスフレーズが誤っている」ではなく、鍵ファイルが必要な
+    // ことを知らせる(プロファイルは、作られない)。
+    #[test]
+    fn importing_a_key_file_export_fails_with_a_message_that_a_key_file_is_needed() {
+        let (_dir_a, _app_paths_a, mut store_a) = temp_store();
+        create(&mut store_a, "work");
+        let exported = store_a.export_profile_with_key_file("work").unwrap();
+        let export_dir = tempfile::tempdir().unwrap();
+        let export_path = export_dir.path().join("work.smx");
+        std::fs::write(&export_path, &exported.ciphertext).unwrap();
+
+        let (_dir_b, _app_paths_b, mut store_b) = temp_store();
+        let err = import_with_passphrase(&mut store_b, &export_path, passphrase("pw"), true, false)
+            .expect_err("パスフレーズでは、取り込めないはず");
+
+        assert!(err.to_string().contains("鍵ファイル"), "鍵ファイルが必要なことを知らせるはず: {err}");
+        assert!(store_b.list_profiles().unwrap().is_empty(), "プロファイルは、作られないはず");
+    }
+
     #[test]
     fn importing_a_missing_file_fails_cleanly() {
         let (_dir, _app_paths, mut store) = temp_store();

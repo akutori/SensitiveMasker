@@ -3,7 +3,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
 use masking_core::{Mode, PatternType, Rule, RuleProfile};
-use profile_store::{decrypt_import_payload, AllImportEntry, AppPaths, ImportPreview, SecretString};
+use profile_store::{
+    decrypt_import_payload, decrypt_import_payload_with_key_file, write_key_file, AllImportEntry, AppPaths, DecryptedPayload,
+    FileProtection, ImportMethod, ImportPreview, ProfileStoreError, SecretString, KEY_FILE_EXTENSION,
+};
 use tauri::webview::PageLoadEvent;
 use tauri::{Emitter, Manager, RunEvent};
 
@@ -40,8 +43,12 @@ impl std::fmt::Display for ExportImportError {
     }
 }
 
+fn has_extension(path: &Path, extension: &str) -> bool {
+    path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case(extension))
+}
+
 fn has_smx_extension(path: &Path) -> bool {
-    path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("smx"))
+    has_extension(path, "smx")
 }
 
 // パス検証本体(正規化・特殊形式拒否・アプリのデータフォルダ除外)はprofile_store側で
@@ -50,9 +57,24 @@ fn has_smx_extension(path: &Path) -> bool {
 // (テストが、実際のデータフォルダの有無に依存しないようにする。text_file_io.rsのwrite_text_file_impl
 // と同じ方針)。
 fn validate_export_dest_path(dest_path: &str, app_paths: Result<AppPaths, String>) -> Result<PathBuf, String> {
+    validate_dest_path(dest_path, app_paths, "smx", "保存先には拡張子.smxを指定してください")
+}
+
+// 鍵ファイルの保存先の検証。エクスポートしたファイルと同じ規則(アプリのデータフォルダの内側には保存しない)で、
+// 拡張子だけが違う。
+fn validate_key_file_dest_path(key_dest_path: &str, app_paths: Result<AppPaths, String>) -> Result<PathBuf, String> {
+    validate_dest_path(key_dest_path, app_paths, KEY_FILE_EXTENSION, "鍵ファイルの保存先には拡張子.smxkeyを指定してください")
+}
+
+fn validate_dest_path(
+    dest_path: &str,
+    app_paths: Result<AppPaths, String>,
+    extension: &str,
+    wrong_extension_message: &str,
+) -> Result<PathBuf, String> {
     let path = profile_store::normalize_and_reject_special_forms(dest_path).map_err(|e| e.to_string())?;
-    if !has_smx_extension(&path) {
-        return Err("保存先には拡張子.smxを指定してください".to_string());
+    if !has_extension(&path, extension) {
+        return Err(wrong_extension_message.to_string());
     }
     let app_paths = app_paths?;
     let dest_parent = path.parent().ok_or_else(|| GENERIC_IO_ERROR.to_string())?;
@@ -66,6 +88,57 @@ fn validate_import_source_path(source_path: &str) -> Result<PathBuf, String> {
         return Err("拡張子が.smxのファイルを選択してください".to_string());
     }
     Ok(path)
+}
+
+/// 鍵ファイル(秘密鍵1つとコメントだけの、小さなテキスト)の大きさの上限。これを超えるファイルは、鍵ファイルではない。
+const MAX_KEY_FILE_BYTES: u64 = 4096;
+
+/// 復号に使う鍵ファイルを読む。拡張子・大きさ・文字コードを、読む前後に検証する(秘密鍵は、JavaScriptへ渡さない)。
+fn read_key_file(key_path: &str) -> Result<SecretString, ExportImportError> {
+    let path = profile_store::normalize_and_reject_special_forms(key_path)
+        .map_err(|e| ExportImportError::InvalidInput(e.to_string()))?;
+    if !has_extension(&path, KEY_FILE_EXTENSION) {
+        return Err(ExportImportError::InvalidInput("拡張子が.smxkeyのファイルを選択してください".to_string()));
+    }
+    let metadata = std::fs::metadata(&path).map_err(|_| ExportImportError::Failed(GENERIC_IO_ERROR.to_string()))?;
+    if metadata.len() > MAX_KEY_FILE_BYTES {
+        return Err(ExportImportError::InvalidInput("鍵ファイルのサイズが大きすぎます".to_string()));
+    }
+    let contents = std::fs::read_to_string(&path).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::InvalidData {
+            ExportImportError::InvalidInput("鍵ファイルの形式が正しくありません".to_string())
+        } else {
+            ExportImportError::Failed(GENERIC_IO_ERROR.to_string())
+        }
+    })?;
+    Ok(SecretString::from(contents))
+}
+
+/// 取り込むファイルの中身を読む。大きすぎるファイルは、読む前に拒否する(メモリ枯渇・ハングを避けるため)。
+fn read_import_file(source_path: &Path) -> Result<Vec<u8>, ExportImportError> {
+    let metadata = std::fs::metadata(source_path).map_err(|_| ExportImportError::Failed(GENERIC_IO_ERROR.to_string()))?;
+    if metadata.len() > MAX_IMPORT_FILE_BYTES {
+        return Err(ExportImportError::InvalidInput("ファイルサイズが大きすぎます".to_string()));
+    }
+    std::fs::read(source_path).map_err(|_| ExportImportError::Failed(GENERIC_IO_ERROR.to_string()))
+}
+
+/// エクスポートしたファイルの、復号の方式(ファイルの先頭にある、平文のヘッダーから判別する)。
+#[derive(Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImportMethodDto {
+    Passphrase,
+    KeyFile,
+}
+
+fn detect_import_method_impl(source_path: &str) -> Result<ImportMethodDto, ExportImportError> {
+    let source_path = validate_import_source_path(source_path).map_err(ExportImportError::InvalidInput)?;
+    let data = read_import_file(&source_path)?;
+    match profile_store::detect_import_method(&data) {
+        Ok(ImportMethod::Passphrase) => Ok(ImportMethodDto::Passphrase),
+        Ok(ImportMethod::KeyFile) => Ok(ImportMethodDto::KeyFile),
+        Err(e) => Err(ExportImportError::Failed(e.to_string())),
+    }
 }
 
 /// 保留として同時に保持する復号済みの内容の件数の上限。復号済みの内容(平文)が、プロセス内に
@@ -330,6 +403,58 @@ fn export_all_to_file_impl(
     std::fs::write(&dest_path, bytes).map_err(|_| ExportImportError::Failed(GENERIC_IO_ERROR.to_string()))
 }
 
+/// 鍵ファイル付きのエクスポートの結果。`key_file_restricted`は、鍵ファイルを、所有ユーザーだけの権限にできたか
+/// (FAT/exFATのUSBメモリなど、ファイルの権限を持たない保管先では、できない。画面が、利用者へ知らせる)。
+#[derive(Debug, serde::Serialize)]
+pub struct ExportWithKeyFileResultDto {
+    pub key_file_restricted: bool,
+}
+
+// 鍵ファイル方式: 新しい鍵を生成し、その鍵宛てに暗号化して、エクスポートしたファイルと、鍵ファイルを書き出す。
+// 鍵は、JavaScriptへ渡さない(生成も保存も、Rustが行う)。
+// 先に鍵ファイルを書き、次にエクスポートしたファイルを書く。後者の書き込みに失敗したら、鍵ファイルを消す
+// (対応するエクスポートしたファイルが無い、鍵ファイルだけが残らないようにするため)。どちらの保存先も、書く前に検証する。
+fn export_with_key_file_impl(
+    state: &ProfileStoreState,
+    app_paths: Result<AppPaths, String>,
+    dest_path: &str,
+    key_dest_path: &str,
+    export: impl FnOnce(&mut profile_store::ProfileStore) -> Result<profile_store::KeyFileExport, ProfileStoreError>,
+) -> Result<ExportWithKeyFileResultDto, ExportImportError> {
+    let dest_path = validate_export_dest_path(dest_path, app_paths.clone()).map_err(ExportImportError::InvalidInput)?;
+    let key_dest_path =
+        validate_key_file_dest_path(key_dest_path, app_paths).map_err(ExportImportError::InvalidInput)?;
+    let exported = with_store(state, export).map_err(ExportImportError::Failed)?;
+    let protection = write_key_file(&key_dest_path, &exported.key_file_contents)
+        .map_err(|_| ExportImportError::Failed(GENERIC_IO_ERROR.to_string()))?;
+    if std::fs::write(&dest_path, &exported.ciphertext).is_err() {
+        let _ = std::fs::remove_file(&key_dest_path);
+        return Err(ExportImportError::Failed(GENERIC_IO_ERROR.to_string()));
+    }
+    Ok(ExportWithKeyFileResultDto { key_file_restricted: protection == FileProtection::OwnerOnly })
+}
+
+fn export_profile_with_key_file_impl(
+    state: &ProfileStoreState,
+    app_paths: Result<AppPaths, String>,
+    name: &str,
+    dest_path: &str,
+    key_dest_path: &str,
+) -> Result<ExportWithKeyFileResultDto, ExportImportError> {
+    export_with_key_file_impl(state, app_paths, dest_path, key_dest_path, |store| {
+        store.export_profile_with_key_file(name)
+    })
+}
+
+fn export_all_with_key_file_impl(
+    state: &ProfileStoreState,
+    app_paths: Result<AppPaths, String>,
+    dest_path: &str,
+    key_dest_path: &str,
+) -> Result<ExportWithKeyFileResultDto, ExportImportError> {
+    export_with_key_file_impl(state, app_paths, dest_path, key_dest_path, |store| store.export_all_with_key_file())
+}
+
 fn preview_import_impl(
     state: &ProfileStoreState,
     pending: &PendingImportState,
@@ -353,18 +478,38 @@ fn preview_import_with_hook(
     passphrase: SecretString,
     before_decrypt: impl FnOnce(),
 ) -> Result<PreviewImportResultDto, ExportImportError> {
+    preview_import_core(state, pending, source_path, before_decrypt, |data| decrypt_import_payload(data, passphrase))
+}
+
+/// 鍵ファイル方式の取り込み(preview_import_with_hookと同じ流れで、復号だけが、鍵ファイルによる)。鍵ファイルは、
+/// 復号を始める前に読んで検証する。
+fn preview_import_with_key_file_impl(
+    state: &ProfileStoreState,
+    pending: &PendingImportState,
+    source_path: &str,
+    key_path: &str,
+) -> Result<PreviewImportResultDto, ExportImportError> {
+    let key_file_contents = read_key_file(key_path)?;
+    preview_import_core(state, pending, source_path, || {}, |data| {
+        decrypt_import_payload_with_key_file(data, &key_file_contents)
+    })
+}
+
+// 取り込みの、復号(パスフレーズ・鍵ファイルのどちらでも)の前後の流れ。decryptは、読み込んだファイルの中身を復号する。
+fn preview_import_core(
+    state: &ProfileStoreState,
+    pending: &PendingImportState,
+    source_path: &str,
+    before_decrypt: impl FnOnce(),
+    decrypt: impl FnOnce(&[u8]) -> Result<DecryptedPayload, ProfileStoreError>,
+) -> Result<PreviewImportResultDto, ExportImportError> {
     let generation = pending.generation();
     let source_path = validate_import_source_path(source_path).map_err(ExportImportError::InvalidInput)?;
-    let metadata = std::fs::metadata(&source_path)
-        .map_err(|_| ExportImportError::Failed(GENERIC_IO_ERROR.to_string()))?;
-    if metadata.len() > MAX_IMPORT_FILE_BYTES {
-        return Err(ExportImportError::InvalidInput("ファイルサイズが大きすぎます".to_string()));
-    }
-    let data = std::fs::read(&source_path).map_err(|_| ExportImportError::Failed(GENERIC_IO_ERROR.to_string()))?;
+    let data = read_import_file(&source_path)?;
     before_decrypt();
     // パスフレーズ検証(scrypt、数百ms〜数秒)はストアのロックを握らずに行う。ロック内で
     // 実行すると、他のプロファイル/タグ系コマンドがこの間ずっとブロックされてしまう。
-    let decrypted = decrypt_import_payload(&data, passphrase).map_err(|e| ExportImportError::Failed(e.to_string()))?;
+    let decrypted = decrypt(&data).map_err(|e| ExportImportError::Failed(e.to_string()))?;
     let passphrase_trimmed = decrypted.passphrase_trimmed;
     let preview = with_store(state, |store| store.resolve_import_preview(decrypted.payload))
         .map_err(ExportImportError::Failed)?;
@@ -420,6 +565,47 @@ pub async fn export_all_to_file(
     dest_path: String,
 ) -> Result<(), ExportImportError> {
     export_all_to_file_impl(&state, resolve_paths(), passphrase, &dest_path)
+}
+
+#[tauri::command]
+pub async fn export_profile_with_key_file(
+    state: tauri::State<'_, ProfileStoreState>,
+    name: String,
+    dest_path: String,
+    key_dest_path: String,
+) -> Result<ExportWithKeyFileResultDto, ExportImportError> {
+    export_profile_with_key_file_impl(&state, resolve_paths(), &name, &dest_path, &key_dest_path)
+}
+
+#[tauri::command]
+pub async fn export_all_with_key_file(
+    state: tauri::State<'_, ProfileStoreState>,
+    dest_path: String,
+    key_dest_path: String,
+) -> Result<ExportWithKeyFileResultDto, ExportImportError> {
+    export_all_with_key_file_impl(&state, resolve_paths(), &dest_path, &key_dest_path)
+}
+
+/// エクスポートしたファイルの、復号の方式を判別する(ファイルの先頭の平文ヘッダーだけで判別するため、鍵もパスフレーズも要らない)。
+#[tauri::command]
+pub async fn detect_import_method(source_path: String) -> Result<ImportMethodDto, ExportImportError> {
+    detect_import_method_impl(&source_path)
+}
+
+/// preview_importの、鍵ファイル方式(鍵ファイルのパスを受け取り、鍵は、Rustが読む)。
+#[tauri::command]
+pub async fn preview_import_with_key_file<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    source_path: String,
+    key_path: String,
+) -> Result<PreviewImportResultDto, ExportImportError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<ProfileStoreState>();
+        let pending = app.state::<PendingImportState>();
+        preview_import_with_key_file_impl(&state, &pending, &source_path, &key_path)
+    })
+    .await
+    .map_err(|_| ExportImportError::Failed(GENERIC_IO_ERROR.to_string()))?
 }
 
 // preview_import・commit_pending_importは、AppHandleのランタイムを型引数(R)で受け取る。実アプリ(Wry)と、
@@ -1513,7 +1699,13 @@ mod tests {
             let app = tauri::test::mock_builder()
                 .manage(state)
                 .manage(PendingImportState::default())
-                .invoke_handler(tauri::generate_handler![preview_import, commit_pending_import, clear_pending_import])
+                .invoke_handler(tauri::generate_handler![
+                    preview_import,
+                    commit_pending_import,
+                    clear_pending_import,
+                    detect_import_method,
+                    preview_import_with_key_file
+                ])
                 .build(tauri::test::mock_context(tauri::test::noop_assets()))
                 .expect("MockRuntimeのアプリを組み立てられるはず");
             let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
@@ -1571,6 +1763,280 @@ mod tests {
             let pending = self.app.state::<PendingImportState>();
             pending_count(&pending)
         }
+    }
+
+    /// プロファイルを、鍵ファイル方式で書き出した、.smxのファイルと、.smxkeyの鍵ファイル。フォルダごと返す(消えないように)。
+    struct KeyFileExportFiles {
+        _dir: tempfile::TempDir,
+        smx: PathBuf,
+        key: PathBuf,
+    }
+
+    fn export_with_key_file_files(profile_name: &str) -> KeyFileExportFiles {
+        let source_dir = tempfile::tempdir().unwrap();
+        let source_state =
+            ProfileStoreState::with_store_for_test(init_store_with_one_profile(source_dir.path(), profile_name));
+        let dir = tempfile::tempdir().unwrap();
+        let smx = dir.path().join("export.smx");
+        let key = dir.path().join("export.smxkey");
+        export_profile_with_key_file_impl(
+            &source_state,
+            Ok(AppPaths::at(source_dir.path())),
+            profile_name,
+            smx.to_str().unwrap(),
+            key.to_str().unwrap(),
+        )
+        .expect("鍵ファイル付きのエクスポートは成功するはず");
+        KeyFileExportFiles { _dir: dir, smx, key }
+    }
+
+    #[test]
+    fn detect_import_method_tells_passphrase_files_from_key_files() {
+        let passphrase_file = export_profile_smx("元プロファイル");
+        let key_files = export_with_key_file_files("元プロファイル");
+
+        assert_eq!(detect_import_method_impl(passphrase_file.path().to_str().unwrap()).unwrap(), ImportMethodDto::Passphrase);
+        assert_eq!(detect_import_method_impl(key_files.smx.to_str().unwrap()).unwrap(), ImportMethodDto::KeyFile);
+    }
+
+    #[test]
+    fn detect_import_method_rejects_the_wrong_extension_and_files_that_are_not_exports() {
+        let dir = tempfile::tempdir().unwrap();
+        let wrong_extension = dir.path().join("export.txt");
+        std::fs::write(&wrong_extension, b"anything").unwrap();
+        let not_an_export = dir.path().join("plain.smx");
+        std::fs::write(&not_an_export, b"not an age file at all").unwrap();
+
+        let err = detect_import_method_impl(wrong_extension.to_str().unwrap()).expect_err("拡張子が違う");
+        assert!(matches!(err, ExportImportError::InvalidInput(_)));
+        let err = detect_import_method_impl(not_an_export.to_str().unwrap()).expect_err("エクスポートしたファイルではない");
+        assert!(matches!(err, ExportImportError::Failed(_)));
+    }
+
+    #[test]
+    fn a_key_file_export_writes_both_files_and_the_key_file_opens_the_export() {
+        let files = export_with_key_file_files("元プロファイル");
+
+        let key = read_key_file(files.key.to_str().unwrap()).unwrap();
+        let data = std::fs::read(&files.smx).unwrap();
+        let decrypted = decrypt_import_payload_with_key_file(&data, &key).expect("鍵ファイルで復号できるはず");
+        assert!(matches!(decrypted.payload, profile_store::ExportPayload::Single { .. }));
+        assert!(std::fs::read_to_string(&files.key).unwrap().contains("AGE-SECRET-KEY-1"));
+    }
+
+    #[test]
+    fn a_key_file_export_of_all_profiles_writes_both_files() {
+        let source_dir = tempfile::tempdir().unwrap();
+        let source_state = ProfileStoreState::with_store_for_test(init_store_with_two_profiles(source_dir.path()));
+        let dir = tempfile::tempdir().unwrap();
+        let smx = dir.path().join("all.smx");
+        let key = dir.path().join("all.smxkey");
+
+        let result = export_all_with_key_file_impl(
+            &source_state,
+            Ok(AppPaths::at(source_dir.path())),
+            smx.to_str().unwrap(),
+            key.to_str().unwrap(),
+        )
+        .expect("全体の鍵ファイル付きのエクスポートは成功するはず");
+
+        assert!(result.key_file_restricted, "既定の一時フォルダ(NTFS・ext4など)では、権限を制限できるはず");
+        let data = std::fs::read(&smx).unwrap();
+        let decrypted = decrypt_import_payload_with_key_file(&data, &read_key_file(key.to_str().unwrap()).unwrap()).unwrap();
+        assert!(matches!(decrypted.payload, profile_store::ExportPayload::All { .. }));
+    }
+
+    // どちらかの保存先が不正なら、何も書かない(鍵ファイルだけ・エクスポートしたファイルだけが、残らない)。
+    #[test]
+    fn a_key_file_export_with_an_invalid_destination_writes_nothing() {
+        let source_dir = tempfile::tempdir().unwrap();
+        let state = ProfileStoreState::with_store_for_test(init_store_with_one_profile(source_dir.path(), "元プロファイル"));
+        let out = tempfile::tempdir().unwrap();
+        let good_smx = out.path().join("export.smx");
+        let good_key = out.path().join("export.smxkey");
+        let inside_data_dir = source_dir.path().join("sneaky.smxkey");
+        let cases = [
+            ("鍵ファイルの拡張子が違う", good_smx.clone(), out.path().join("export.txt")),
+            ("エクスポートしたファイルの拡張子が違う", out.path().join("export.txt"), good_key.clone()),
+            ("鍵ファイルの保存先が、アプリのデータフォルダの内側", good_smx.clone(), inside_data_dir),
+        ];
+
+        for (label, smx, key) in cases {
+            let err = export_profile_with_key_file_impl(
+                &state,
+                Ok(AppPaths::at(source_dir.path())),
+                "元プロファイル",
+                smx.to_str().unwrap(),
+                key.to_str().unwrap(),
+            )
+            .expect_err(label);
+            assert!(matches!(err, ExportImportError::InvalidInput(_)), "{label}: 事前検証で拒否されるはず");
+            assert!(!good_smx.exists() && !good_key.exists(), "{label}: 何も書かれていないはず");
+        }
+    }
+
+    // エクスポートしたファイルを書けなかったときは、対応するファイルの無い、鍵ファイルを残さない。
+    #[test]
+    fn a_key_file_export_removes_the_key_file_when_the_export_file_cannot_be_written() {
+        let source_dir = tempfile::tempdir().unwrap();
+        let state = ProfileStoreState::with_store_for_test(init_store_with_one_profile(source_dir.path(), "元プロファイル"));
+        let out = tempfile::tempdir().unwrap();
+        // 拡張子は.smxだが、実体はフォルダ(検証は通り、書き込みだけが失敗する)。
+        let smx_that_is_a_folder = out.path().join("export.smx");
+        std::fs::create_dir(&smx_that_is_a_folder).unwrap();
+        let key = out.path().join("export.smxkey");
+
+        let err = export_profile_with_key_file_impl(
+            &state,
+            Ok(AppPaths::at(source_dir.path())),
+            "元プロファイル",
+            smx_that_is_a_folder.to_str().unwrap(),
+            key.to_str().unwrap(),
+        )
+        .expect_err("書き込めないため、失敗するはず");
+
+        assert!(matches!(err, ExportImportError::Failed(_)));
+        assert!(!key.exists(), "鍵ファイルだけが残っている");
+    }
+
+    #[test]
+    fn a_key_file_export_of_a_missing_profile_writes_nothing() {
+        let source_dir = tempfile::tempdir().unwrap();
+        let state = ProfileStoreState::with_store_for_test(init_store_with_one_profile(source_dir.path(), "元プロファイル"));
+        let out = tempfile::tempdir().unwrap();
+        let smx = out.path().join("export.smx");
+        let key = out.path().join("export.smxkey");
+
+        let err = export_profile_with_key_file_impl(
+            &state,
+            Ok(AppPaths::at(source_dir.path())),
+            "存在しないプロファイル",
+            smx.to_str().unwrap(),
+            key.to_str().unwrap(),
+        )
+        .expect_err("プロファイルが無いため、失敗するはず");
+
+        assert!(matches!(err, ExportImportError::Failed(_)));
+        assert!(!smx.exists() && !key.exists());
+    }
+
+    #[test]
+    fn a_key_file_import_previews_and_commits_into_a_different_store() {
+        let files = export_with_key_file_files("元プロファイル");
+        let dest = EmptyDestination::new();
+        let pending = PendingImportState::default();
+
+        let result = preview_import_with_key_file_impl(
+            &dest.state,
+            &pending,
+            files.smx.to_str().unwrap(),
+            files.key.to_str().unwrap(),
+        )
+        .expect("正しい鍵ファイルなら、確認画面へ進めるはず");
+
+        assert!(!result.passphrase_trimmed, "鍵ファイルには、空白を除く再試行が無い");
+        assert_eq!(pending_count(&pending), 1);
+        commit_pending_import_impl(&dest.state, &pending, result.pending_id).expect("確定できるはず");
+        let names: Vec<String> =
+            with_store(&dest.state, |s| s.list_profiles()).unwrap().into_iter().map(|p| p.name).collect();
+        assert_eq!(names, vec!["元プロファイル".to_string()]);
+    }
+
+    #[test]
+    fn a_key_file_import_is_rejected_for_a_wrong_key_a_wrong_extension_a_huge_file_or_bytes_that_are_not_text() {
+        let files = export_with_key_file_files("元プロファイル");
+        let other = export_with_key_file_files("別のプロファイル");
+        let dir = tempfile::tempdir().unwrap();
+        let wrong_extension = dir.path().join("key.txt");
+        std::fs::copy(&files.key, &wrong_extension).unwrap();
+        let huge = dir.path().join("huge.smxkey");
+        std::fs::write(&huge, vec![b'#'; (MAX_KEY_FILE_BYTES + 1) as usize]).unwrap();
+        let not_text = dir.path().join("binary.smxkey");
+        std::fs::write(&not_text, [0xff, 0xfe, 0xfd]).unwrap();
+        let dest = EmptyDestination::new();
+        let pending = PendingImportState::default();
+
+        let cases: [(&str, &PathBuf, bool); 4] = [
+            ("別のエクスポートの鍵ファイル", &other.key, false),
+            ("拡張子が違う", &wrong_extension, true),
+            ("大きすぎる", &huge, true),
+            ("文字として読めない", &not_text, true),
+        ];
+        for (label, key, invalid_input) in cases {
+            let err = preview_import_with_key_file_impl(
+                &dest.state,
+                &pending,
+                files.smx.to_str().unwrap(),
+                key.to_str().unwrap(),
+            )
+            .expect_err(label);
+            assert_eq!(matches!(err, ExportImportError::InvalidInput(_)), invalid_input, "{label}: {err}");
+            assert_eq!(pending_count(&pending), 0, "{label}: 失敗した取り込みは、保留を残さない");
+        }
+    }
+
+    #[test]
+    fn the_wrong_key_file_error_says_the_key_file_does_not_match() {
+        let files = export_with_key_file_files("元プロファイル");
+        let other = export_with_key_file_files("別のプロファイル");
+        let dest = EmptyDestination::new();
+        let pending = PendingImportState::default();
+
+        let err = preview_import_with_key_file_impl(
+            &dest.state,
+            &pending,
+            files.smx.to_str().unwrap(),
+            other.key.to_str().unwrap(),
+        )
+        .expect_err("別の鍵ファイルでは、復号できないはず");
+
+        assert!(err.message().contains("この鍵ファイルでは復号できません"), "{err}");
+    }
+
+    // パスフレーズの取り込みに、鍵ファイル方式のファイルを渡すと、鍵ファイルが必要なことを知らせる。
+    #[test]
+    fn the_passphrase_import_says_a_key_file_is_needed_for_a_key_file_export() {
+        let files = export_with_key_file_files("元プロファイル");
+        let dest = EmptyDestination::new();
+        let pending = PendingImportState::default();
+
+        let err = preview_import_impl(&dest.state, &pending, files.smx.to_str().unwrap(), passphrase(TEST_PASSPHRASE))
+            .expect_err("パスフレーズでは、復号できないはず");
+
+        assert!(err.message().contains("鍵ファイル"), "{err}");
+    }
+
+    // 以下は、鍵ファイル方式のIPCの境界(引数・応答のキー名)を固定する。
+    #[test]
+    fn detect_import_method_over_ipc_takes_source_path_and_answers_snake_case() {
+        let harness = IpcHarness::new();
+        let passphrase_file = export_profile_smx("元プロファイル");
+        let key_files = export_with_key_file_files("元プロファイル");
+
+        let passphrase_answer =
+            harness.invoke("detect_import_method", json!({ "sourcePath": passphrase_file.path().to_str().unwrap() }));
+        let key_answer = harness.invoke("detect_import_method", json!({ "sourcePath": key_files.smx.to_str().unwrap() }));
+
+        assert_eq!(passphrase_answer, Ok(json!("passphrase")));
+        assert_eq!(key_answer, Ok(json!("key_file")));
+    }
+
+    #[test]
+    fn preview_import_with_key_file_over_ipc_takes_source_path_and_key_path_and_answers_like_preview_import() {
+        let harness = IpcHarness::new();
+        let files = export_with_key_file_files("元プロファイル");
+
+        let answer = harness
+            .invoke(
+                "preview_import_with_key_file",
+                json!({ "sourcePath": files.smx.to_str().unwrap(), "keyPath": files.key.to_str().unwrap() }),
+            )
+            .expect("正しい鍵ファイルでの取り込みは成功するはず");
+
+        assert_eq!(sorted_keys(&answer), vec!["passphrase_trimmed", "pending_id", "preview"]);
+        assert!(answer["pending_id"].is_u64());
+        assert_eq!(answer["passphrase_trimmed"], json!(false));
+        assert_eq!(harness.pending_count(), 1);
     }
 
     /// 2件のプロファイル(プロファイルA・B)を、全体エクスポートした、.smxのファイル。

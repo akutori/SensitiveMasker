@@ -5,6 +5,7 @@
 //! 復号できる形(age -p相当)に再暗号化する。
 
 use age::scrypt::{Identity, Recipient};
+use age::x25519;
 use secrecy::{ExposeSecret, SecretString};
 
 // ageのscrypt::Identity::set_max_work_factorの上限。ageクレート自身のドキュメントが
@@ -28,6 +29,42 @@ pub enum ExportError {
          (必要なワークファクタ: 2^{required}、このマシンでの許容上限: 2^{allowed_max})"
     )]
     ExcessiveWork { required: u8, allowed_max: u8 },
+    #[error("エクスポートしたファイルとして読み取れません(別のファイルか、データが破損しています)")]
+    NotAnExportFile,
+    #[error(
+        "このファイルは、鍵ファイルで暗号化されています。パスフレーズでは復号できません\
+         (GUIの「インポート」で、鍵ファイルを指定してください)"
+    )]
+    KeyFileRequired,
+    #[error("鍵ファイルの形式が正しくありません(エクスポート時に保存した、拡張子が.smxkeyのファイルを指定してください)")]
+    InvalidKeyFile,
+    #[error("この鍵ファイルでは復号できません(エクスポート時に保存した、別の鍵ファイルを指定してください)")]
+    KeyFileDoesNotMatch,
+    #[error("復号に失敗しました(データが破損しています)")]
+    CorruptedData,
+}
+
+/// 鍵ファイルの拡張子(ドットを含まない)。
+pub const KEY_FILE_EXTENSION: &str = "smxkey";
+
+// 鍵ファイルの先頭に付ける、利用者向けのコメント(復号に使うのは、コメントでない行だけ)。
+const KEY_FILE_HEADER: &str = "# SensitiveMasker export key file\n\
+     # Keep this file safe. Without it, the exported file cannot be decrypted.\n";
+
+/// エクスポートしたファイルの、復号の方式。ファイルの先頭にある、平文のヘッダーから分かる(鍵を必要としない)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImportMethod {
+    /// パスフレーズで復号する。
+    Passphrase,
+    /// 鍵ファイルで復号する。
+    KeyFile,
+}
+
+/// 鍵ファイル方式の暗号化の結果。`key_file_contents`は、復号に使う鍵ファイルの中身(秘密鍵を含む)で、
+/// 呼び出し側が、鍵ファイルとして書き出す。
+pub struct KeyFileExport {
+    pub ciphertext: Vec<u8>,
+    pub key_file_contents: SecretString,
 }
 
 pub fn encrypt_for_export(plaintext: &[u8], passphrase: SecretString) -> Result<Vec<u8>, ExportError> {
@@ -36,6 +73,52 @@ pub fn encrypt_for_export(plaintext: &[u8], passphrase: SecretString) -> Result<
     }
     let recipient = Recipient::new(passphrase);
     age::encrypt(&recipient, plaintext).map_err(|_| ExportError::EncryptionFailed)
+}
+
+/// 暗号化されたファイルの、復号の方式を判別する。パスフレーズ用(scrypt)のヘッダーなら`Passphrase`、それ以外は`KeyFile`。
+/// ageのファイルとして読み取れない場合は、エラーにする。
+pub fn detect_import_method(ciphertext: &[u8]) -> Result<ImportMethod, ExportError> {
+    let decryptor = age::Decryptor::new(ciphertext).map_err(|_| ExportError::NotAnExportFile)?;
+    Ok(if decryptor.is_scrypt() { ImportMethod::Passphrase } else { ImportMethod::KeyFile })
+}
+
+/// 鍵ファイル方式: 新しい鍵(age x25519)を生成し、その公開鍵宛てに暗号化する。生成した鍵は、鍵ファイルの中身として
+/// 返す(呼び出し側が書き出す。この関数は、鍵を、他へ残さない)。
+pub fn encrypt_for_export_with_new_key(plaintext: &[u8]) -> Result<KeyFileExport, ExportError> {
+    let identity = x25519::Identity::generate();
+    let ciphertext =
+        age::encrypt(&identity.to_public(), plaintext).map_err(|_| ExportError::EncryptionFailed)?;
+    let secret_key = identity.to_string();
+    let secret_key = secret_key.expose_secret();
+    // 秘密鍵は、事前に確保した領域へ、1回で書く(伸長で、消去されない旧バッファを残さないため)。
+    let mut contents = String::with_capacity(KEY_FILE_HEADER.len() + secret_key.len() + 1);
+    contents.push_str(KEY_FILE_HEADER);
+    contents.push_str(secret_key);
+    contents.push('\n');
+    Ok(KeyFileExport { ciphertext, key_file_contents: SecretString::from(contents) })
+}
+
+// 鍵ファイルの中身から、秘密鍵を読み取る。空行と、#で始まるコメント行は、読み飛ばす(ageの鍵ファイルと同じ形式)。
+fn parse_key_file(contents: &str) -> Result<x25519::Identity, ExportError> {
+    let line = contents
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && !line.starts_with('#'))
+        .ok_or(ExportError::InvalidKeyFile)?;
+    line.parse::<x25519::Identity>().map_err(|_| ExportError::InvalidKeyFile)
+}
+
+/// 鍵ファイルの中身で、鍵ファイル方式で暗号化されたファイルを復号する。
+pub fn decrypt_import_with_key_file(
+    ciphertext: &[u8],
+    key_file_contents: &SecretString,
+) -> Result<Vec<u8>, ExportError> {
+    let identity = parse_key_file(key_file_contents.expose_secret())?;
+    match age::decrypt(&identity, ciphertext) {
+        Ok(plaintext) => Ok(plaintext),
+        Err(age::DecryptError::NoMatchingKeys) => Err(ExportError::KeyFileDoesNotMatch),
+        Err(_) => Err(ExportError::CorruptedData),
+    }
 }
 
 /// 復号の結果。`passphrase_trimmed`は、入力のままでは復号できず、前後の空白・不可視文字を除いたパスフレーズで
@@ -56,6 +139,11 @@ pub fn decrypt_import_reporting_trim(
     ciphertext: &[u8],
     passphrase: SecretString,
 ) -> Result<DecryptedImport, ExportError> {
+    // 鍵ファイルで暗号化されたファイルは、パスフレーズでは復号できない。「パスフレーズが誤っている」とは別に、知らせる
+    // (ageのファイルとして読み取れない場合は、ここでは何もせず、下の復号の失敗に任せる)。
+    if matches!(detect_import_method(ciphertext), Ok(ImportMethod::KeyFile)) {
+        return Err(ExportError::KeyFileRequired);
+    }
     decrypt_with_whitespace_fallback_reporting(ciphertext, passphrase, MAX_WORK_FACTOR_LOG_N)
         .map(|(plaintext, passphrase_trimmed)| DecryptedImport { plaintext, passphrase_trimmed })
 }
@@ -142,6 +230,118 @@ mod tests {
 
     fn passphrase(s: &str) -> SecretString {
         SecretString::from(s.to_owned())
+    }
+
+    const KEY_FILE_PLAINTEXT: &[u8] = b"{\"profile_name\":\"p\",\"rules\":[]}";
+
+    #[test]
+    fn a_key_file_export_round_trips_with_the_saved_key_file() {
+        let exported = encrypt_for_export_with_new_key(KEY_FILE_PLAINTEXT).unwrap();
+
+        let decrypted = decrypt_import_with_key_file(&exported.ciphertext, &exported.key_file_contents).unwrap();
+
+        assert_eq!(decrypted, KEY_FILE_PLAINTEXT);
+    }
+
+    #[test]
+    fn each_key_file_export_generates_a_new_key() {
+        let first = encrypt_for_export_with_new_key(KEY_FILE_PLAINTEXT).unwrap();
+        let second = encrypt_for_export_with_new_key(KEY_FILE_PLAINTEXT).unwrap();
+
+        assert_ne!(first.key_file_contents.expose_secret(), second.key_file_contents.expose_secret());
+        assert_ne!(first.ciphertext, second.ciphertext);
+    }
+
+    #[test]
+    fn the_key_file_is_a_comment_header_and_one_secret_key_line() {
+        let exported = encrypt_for_export_with_new_key(KEY_FILE_PLAINTEXT).unwrap();
+        let contents = exported.key_file_contents.expose_secret();
+
+        let comments: Vec<&str> = contents.lines().filter(|line| line.starts_with('#')).collect();
+        let keys: Vec<&str> = contents.lines().filter(|line| !line.starts_with('#')).collect();
+        assert_eq!(comments.len(), 2, "コメントは、2行のはず: {contents}");
+        assert_eq!(keys.len(), 1, "秘密鍵の行は、1行のはず");
+        assert!(keys[0].starts_with("AGE-SECRET-KEY-1"), "ageの秘密鍵の形式のはず");
+        assert!(contents.ends_with('\n'));
+    }
+
+    #[test]
+    fn a_key_file_from_another_export_cannot_decrypt() {
+        let exported = encrypt_for_export_with_new_key(KEY_FILE_PLAINTEXT).unwrap();
+        let other = encrypt_for_export_with_new_key(KEY_FILE_PLAINTEXT).unwrap();
+
+        let result = decrypt_import_with_key_file(&exported.ciphertext, &other.key_file_contents);
+
+        assert!(matches!(result, Err(ExportError::KeyFileDoesNotMatch)));
+    }
+
+    #[test]
+    fn a_key_file_survives_windows_newlines_blank_lines_and_extra_comments() {
+        let exported = encrypt_for_export_with_new_key(KEY_FILE_PLAINTEXT).unwrap();
+        let secret_line = exported.key_file_contents.expose_secret().lines().last().unwrap().to_string();
+        let edited = SecretString::from(format!("\r\n# extra comment\r\n\r\n  {secret_line}  \r\n\r\n# trailing\r\n"));
+
+        let decrypted = decrypt_import_with_key_file(&exported.ciphertext, &edited).unwrap();
+
+        assert_eq!(decrypted, KEY_FILE_PLAINTEXT);
+    }
+
+    #[test]
+    fn text_that_is_not_a_key_file_is_rejected() {
+        let exported = encrypt_for_export_with_new_key(KEY_FILE_PLAINTEXT).unwrap();
+        for contents in ["", "\n\n", "# only a comment\n", "correct-horse-battery-staple", "AGE-SECRET-KEY-1INVALID"] {
+            let result = decrypt_import_with_key_file(&exported.ciphertext, &SecretString::from(contents.to_owned()));
+            assert!(matches!(result, Err(ExportError::InvalidKeyFile)), "「{contents}」は、鍵ファイルとして拒否されるはず");
+        }
+    }
+
+    #[test]
+    fn a_tampered_key_file_export_fails_as_corrupted_data() {
+        let exported = encrypt_for_export_with_new_key(KEY_FILE_PLAINTEXT).unwrap();
+        let mut tampered = exported.ciphertext.clone();
+        let last = tampered.len() - 1;
+        tampered[last] ^= 0x01;
+
+        let result = decrypt_import_with_key_file(&tampered, &exported.key_file_contents);
+
+        assert!(matches!(result, Err(ExportError::CorruptedData)));
+    }
+
+    #[test]
+    fn detect_import_method_tells_passphrase_files_from_key_files() {
+        let with_passphrase = encrypt_for_export(KEY_FILE_PLAINTEXT, passphrase("correct-horse")).unwrap();
+        let with_key = encrypt_for_export_with_new_key(KEY_FILE_PLAINTEXT).unwrap();
+
+        assert_eq!(detect_import_method(&with_passphrase).unwrap(), ImportMethod::Passphrase);
+        assert_eq!(detect_import_method(&with_key.ciphertext).unwrap(), ImportMethod::KeyFile);
+    }
+
+    #[test]
+    fn detect_import_method_rejects_data_that_is_not_an_age_file() {
+        for data in [&b""[..], &b"not an age file at all"[..], &b"age-encryption.org/v1\n"[..]] {
+            assert!(matches!(detect_import_method(data), Err(ExportError::NotAnExportFile)));
+        }
+    }
+
+    #[test]
+    fn a_passphrase_cannot_open_a_key_file_export_and_the_error_says_a_key_file_is_needed() {
+        let with_key = encrypt_for_export_with_new_key(KEY_FILE_PLAINTEXT).unwrap();
+
+        let result = decrypt_import_reporting_trim(&with_key.ciphertext, passphrase("correct-horse"));
+
+        let error = result.err().expect("パスフレーズでは、復号できないはず");
+        assert!(matches!(error, ExportError::KeyFileRequired));
+        assert!(error.to_string().contains("鍵ファイル"));
+    }
+
+    #[test]
+    fn a_key_file_cannot_open_a_passphrase_export() {
+        let with_passphrase = encrypt_for_export(KEY_FILE_PLAINTEXT, passphrase("correct-horse")).unwrap();
+        let some_key = encrypt_for_export_with_new_key(KEY_FILE_PLAINTEXT).unwrap();
+
+        let result = decrypt_import_with_key_file(&with_passphrase, &some_key.key_file_contents);
+
+        assert!(matches!(result, Err(ExportError::KeyFileDoesNotMatch)));
     }
 
     #[test]

@@ -67,6 +67,40 @@ pub fn load_key(key_path: &Path) -> Result<SecretBox<[u8; KEY_LEN]>, KeyError> {
     Ok(SecretBox::new(key))
 }
 
+/// 書き出したファイルの権限の状態。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileProtection {
+    /// 所有ユーザーだけが読み書きできる。
+    OwnerOnly,
+    /// 権限を制限できなかった(FAT/exFATのUSBメモリなど、ファイルの権限を持たないファイルシステムの場合がある)。
+    NotRestricted,
+}
+
+/// 利用者が指定した場所へ、秘密を含むファイル(エクスポートの鍵ファイルなど)を書き、所有ユーザーだけの権限にする。
+/// 権限を制限できなくても、書き込み自体は成功として、その旨を返す(保管先が、権限を持たないファイルシステムの場合が
+/// ありうるため。呼び出し側が、利用者へ知らせる)。既に有るファイルは、内容を置き換え、権限も制限し直す。
+pub fn write_owner_only_file(path: &Path, contents: &[u8]) -> Result<FileProtection, KeyError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let mut file =
+            fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(path)?;
+        // 既に有るファイルには、作成時のモードが効かないため、明示する(内容を書く前に、権限を絞る)。
+        let restricted = file.set_permissions(fs::Permissions::from_mode(0o600)).is_ok();
+        file.write_all(contents)?;
+        Ok(if restricted { FileProtection::OwnerOnly } else { FileProtection::NotRestricted })
+    }
+    #[cfg(windows)]
+    {
+        fs::write(path, contents)?;
+        Ok(if restrict_to_current_user(path).is_ok() {
+            FileProtection::OwnerOnly
+        } else {
+            FileProtection::NotRestricted
+        })
+    }
+}
+
 /// Unixでは作成時点でモードを指定できるため、「書き込み後に権限を絞る」窓が生じない。
 #[cfg(unix)]
 fn create_restricted_file(path: &Path, key: &[u8; KEY_LEN]) -> Result<(), KeyError> {
@@ -221,6 +255,48 @@ mod tests {
         assert!(stdout.contains(&username), "現在のユーザーへの許可が無い: {stdout}");
         assert!(!stdout.contains("SYSTEM"), "SYSTEMの明示のエントリが残っている: {stdout}");
         assert!(!stdout.contains("Administrators"), "Administratorsの明示のエントリが残っている: {stdout}");
+    }
+
+    #[test]
+    fn write_owner_only_file_writes_the_contents_and_replaces_an_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("secret.smxkey");
+        std::fs::write(&path, b"old contents that are longer than the new ones").unwrap();
+
+        let protection = write_owner_only_file(&path, b"new").unwrap();
+
+        assert_eq!(std::fs::read(&path).unwrap(), b"new");
+        assert_eq!(protection, FileProtection::OwnerOnly);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn write_owner_only_file_restricts_an_existing_permissive_file_to_the_owner_on_unix() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("secret.smxkey");
+        std::fs::write(&path, b"old").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        write_owner_only_file(&path, b"new").unwrap();
+
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn write_owner_only_file_grants_only_the_current_user_on_windows() {
+        use std::process::Command;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("secret.smxkey");
+
+        write_owner_only_file(&path, b"secret").unwrap();
+
+        let output = Command::new(icacls_path().unwrap()).arg(&path).output().unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains(&std::env::var("USERNAME").unwrap()), "現在のユーザーへの許可が無い: {stdout}");
+        assert!(!stdout.contains("SYSTEM"), "SYSTEMへの許可が残っている: {stdout}");
+        assert!(!stdout.contains("Administrators"), "Administratorsへの許可が残っている: {stdout}");
     }
 
     #[test]
