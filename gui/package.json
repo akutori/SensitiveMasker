@@ -71,6 +71,10 @@
     "edgedriver"
   ],
   "overrides": {
-    "dompurify": "^3.4.15"
+    "dompurify": "^3.4.15",
+    "@puppeteer/browsers": "^3.2.2",
+    "deepmerge-ts": "^8.0.2",
+    "diff": "^8.0.4",
+    "serialize-javascript": "^7.1.1"
   }
 }
