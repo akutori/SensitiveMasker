@@ -13,6 +13,8 @@ import type { RuleListItem } from "@/components/rule-edit-screen";
 import { useAppState, SMX_FILE_FILTERS, toImportPreviewRows } from "@/lib/app-state";
 import { isExportImportError } from "@/lib/profile-ipc";
 import { openFileDialog, saveFileDialog } from "@/lib/file-dialog";
+import { actionOnHiddenToTray } from "@/lib/hidden-to-tray";
+import { useOnHiddenToTray } from "@/lib/use-on-hidden-to-tray";
 import {
   abortExport,
   beginExport,
@@ -118,6 +120,8 @@ function ProfilesRoute() {
   // 二重押下など)が古い描画の状態を見て、画面に出ているものと違うパスフレーズで書き出したり、
   // 二重に実行したりしてしまう。遷移はこちらへ先に適用し、画面の状態(dialog)へ写す。
   const exportSessionRef = useRef<ExportDialogState | null>(null);
+  // ウィンドウがトレイへ格納されるたびに進める。書き出し済みのエクスポート画面が、パスフレーズの表示を伏せ字へ戻す合図。
+  const [concealSignal, setConcealSignal] = useState(0);
   // パスフレーズ入力画面で、復号している間だけtrue(理由はimport-passphrase-handlers.ts)。
   const importDecrypting = useRef(false);
   // この画面が所有する保留(復号の結果として、Rust側に保留された内容)の識別子。確認画面の確定・破棄・離脱は、
@@ -229,6 +233,31 @@ function ProfilesRoute() {
       exportSessionRef.current = null;
     };
   }, []);
+
+  // ウィンドウがトレイへ格納されたとき(Rust側が知らせる)。格納したまま長時間置かれると、パスフレーズ・復号済みの内容・
+  // .envの値を持つ画面が、その間、画面と状態に残り続けるため、画面ごとの扱い(actionOnHiddenToTray)に従って、閉じる・
+  // 伏せ字へ戻す。エクスポートの局面は、同期的に読める正(exportSessionRef)から読む(再描画より前に進んでいることがある)。
+  useOnHiddenToTray(() => {
+    const shown = dialogRef.current;
+    const action = actionOnHiddenToTray(shown.kind, exportSessionRef.current?.phase);
+    if (action === "conceal") setConcealSignal((current) => current + 1);
+    if (action !== "close") return;
+    switch (shown.kind) {
+      case "export":
+        exportSessionRef.current = null;
+        closeDialog();
+        break;
+      case "importPassphrase":
+        closeDialog();
+        setImportPassphrase("");
+        break;
+      case "importConfirm":
+        importConfirmHandlers.onOpenChange(false);
+        break;
+      default:
+        closeDialog();
+    }
+  });
 
   // 書き出し中・書き出し済みの画面は、履歴の移動(マウスの戻るボタンなど)でこの画面ごと消えると、
   // パスフレーズを失うため、移動を止める(Escapeや背景の操作を受け付けないのと同じ理由)。
@@ -539,6 +568,7 @@ function ProfilesRoute() {
           transitionExportSession((current) => regeneratePassphrase(current, generatePassphrase()));
         }}
         onExport={exportToFile}
+        concealSignal={concealSignal}
       />
 
       <ImportPassphraseDialog

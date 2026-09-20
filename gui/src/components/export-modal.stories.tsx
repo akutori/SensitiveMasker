@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState, type ComponentProps } from "react";
 import type { Meta, StoryObj } from "@storybook/react-vite";
 import { expect, fn, screen, userEvent, waitFor } from "storybook/test";
 import { Button } from "@/components/ui/button";
@@ -69,6 +69,17 @@ function DemoTrigger(props: { target: string; label: string; openByDefault?: boo
       />
     </>
   );
+}
+
+// トレイへの格納の通知(実際は、Rustのイベントを受けた画面が、concealSignalを進める)を、windowのイベントで模擬する。
+function HiddenToTrayDemo(props: ComponentProps<typeof ExportModal>) {
+  const [signal, setSignal] = useState(0);
+  useEffect(() => {
+    const onHidden = () => setSignal((current) => current + 1);
+    window.addEventListener("demo-hidden-to-tray", onHidden);
+    return () => window.removeEventListener("demo-hidden-to-tray", onHidden);
+  }, []);
+  return <ExportModal {...props} concealSignal={signal} />;
 }
 
 // ダイアログの外側(暗くした背景)を押す操作。
@@ -263,6 +274,37 @@ export const Exported: Story = {
     await userEvent.click(screen.getByRole("button", { name: "閉じる" }));
     await expect(args.onOpenChange).toHaveBeenCalledTimes(2);
     await expect(args.onOpenChange).toHaveBeenLastCalledWith(false);
+  },
+};
+
+// ウィンドウをトレイへ格納したとき(呼び出し元が、concealSignalを進めたとき)は、表示していたパスフレーズを、
+// 伏せ字へ戻す。画面は閉じず、パスフレーズも残る(書き出し済みの、唯一の表示を、失わないため)。
+export const ConcealedWhenHiddenToTray: Story = {
+  args: {
+    open: true,
+    onOpenChange: fn(),
+    target: "SIP監視用",
+    passphrase: INITIAL_PASSPHRASE,
+    status: "exported",
+    clipboardBusy: false,
+    onCopy: () => {},
+    onRegenerate: () => {},
+    onExport: () => {},
+  },
+  render: (args) => <HiddenToTrayDemo {...args} />,
+  play: async ({ args }) => {
+    const input = await screen.findByLabelText(PASSPHRASE_LABEL);
+    await userEvent.click(screen.getByRole("button", { name: "パスフレーズを表示" }));
+    await expect(input).toHaveAttribute("type", "text");
+
+    window.dispatchEvent(new Event("demo-hidden-to-tray"));
+
+    await waitFor(() => expect(input).toHaveAttribute("type", "password"));
+    await expect(input).toHaveValue(INITIAL_PASSPHRASE);
+    await expect(args.onOpenChange).not.toHaveBeenCalled();
+    // 格納の通知が無ければ、表示のままにできる(対照)。
+    await userEvent.click(screen.getByRole("button", { name: "パスフレーズを表示" }));
+    await expect(input).toHaveAttribute("type", "text");
   },
 };
 

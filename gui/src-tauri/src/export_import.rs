@@ -186,6 +186,14 @@ pub(crate) fn discard_pending_imports_on_run_event(pending: &PendingImportState,
     }
 }
 
+/// メインウィンドウをトレイへ格納するときに、保留している全ての内容を破棄する。
+///
+/// 格納しても、WebViewは動き続ける。確認画面を開いたまま格納されると、復号済みの内容(平文)が、再表示されるまで
+/// (何時間でも)Rust側に残るため。画面へは、別途、格納したことを知らせ、確認画面を閉じさせる(tray.rsのhide_to_tray)。
+pub(crate) fn discard_pending_imports_on_hide(pending: &PendingImportState) {
+    pending.discard(None);
+}
+
 #[derive(Debug, serde::Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ImportPreviewDto {
@@ -1143,6 +1151,33 @@ mod tests {
         for id in ids {
             assert!(pending.take(id).is_none(), "終了の通知の後に、保留(識別子{id})が残っている");
         }
+    }
+
+    // トレイへ格納するときは、確認画面を開いたままでも、復号済みの内容が、格納している間に残らないよう、全ての保留を破棄する。
+    #[test]
+    fn hiding_to_the_tray_discards_every_pending_import() {
+        let pending = PendingImportState::default();
+        let ids = fill_pending(&pending);
+
+        discard_pending_imports_on_hide(&pending);
+
+        assert_eq!(pending_count(&pending), 0);
+        for id in ids {
+            assert!(pending.take(id).is_none(), "トレイへ格納した後に、保留(識別子{id})が残っている");
+        }
+    }
+
+    // 格納の後に届いた復号の結果は、保留できる(画面が閉じていれば、画面側が、その識別子を指定して破棄する)。
+    // 格納の破棄は、ページの世代を進めない(ページの読み込みではない)。
+    #[test]
+    fn hiding_to_the_tray_does_not_advance_the_page_generation() {
+        let pending = PendingImportState::default();
+        let generation = pending.generation();
+
+        discard_pending_imports_on_hide(&pending);
+
+        assert_eq!(pending.generation(), generation);
+        assert!(pending.insert_if_generation(generation, sample_import_preview("元プロファイル")).is_some());
     }
 
     // 終了以外の通知(起動・再開・イベント処理の区切り)では、破棄しない。

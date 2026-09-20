@@ -10,11 +10,13 @@ import { ImportPassphraseDialog } from "@/components/import-passphrase-dialog";
 import { ImportConfirmDialog, type ImportPreviewRow } from "@/components/import-confirm-dialog";
 import { useAppState, SMX_FILE_FILTERS, toImportPreviewRows } from "@/lib/app-state";
 import { createImportConfirmHandlers } from "@/lib/import-confirm-handlers";
+import { actionOnHiddenToTray } from "@/lib/hidden-to-tray";
 import { createImportPassphraseHandlers } from "@/lib/import-passphrase-handlers";
 import { isExportImportError } from "@/lib/profile-ipc";
 import { openFileDialog, saveFileDialog } from "@/lib/file-dialog";
 import { maskText } from "@/lib/masking-ipc";
 import { readTextFile, writeTextFile } from "@/lib/text-file-ipc";
+import { useOnHiddenToTray } from "@/lib/use-on-hidden-to-tray";
 
 export const Route = createFileRoute("/")({
   component: MainRoute,
@@ -141,6 +143,24 @@ function MainRoute() {
       importConfirmHandlers.onLeave();
     };
   }, []);
+
+  // ウィンドウがトレイへ格納されたとき(Rust側が知らせる)。インポートのパスフレーズ入力・確認画面は、格納している間、
+  // パスフレーズ・復号済みの内容を残さないよう、閉じる(画面ごとの扱いはactionOnHiddenToTray)。
+  useOnHiddenToTray(() => {
+    const shown = dialogRef.current;
+    if (actionOnHiddenToTray(shown.kind) !== "close") return;
+    switch (shown.kind) {
+      case "importPassphrase":
+        closeDialog();
+        setPassphrase("");
+        break;
+      case "importConfirm":
+        importConfirmHandlers.onOpenChange(false);
+        break;
+      default:
+        closeDialog();
+    }
+  });
 
   const confirmNewProfileName = async () => {
     if (profiles.some((p) => p.name === draftName)) {

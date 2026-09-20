@@ -216,6 +216,12 @@ export function onTagsChanged(handler: () => void): Promise<() => void> {
   return listen("tags-changed", handler);
 }
 
+// Rust側が、メインウィンドウをトレイへ格納した(×ボタン)ときに知らせるイベント。格納している間、パスフレーズなどを
+// 持つ画面を残さないために使う。イベント名は、Rust側(tray.rs)のMAIN_WINDOW_HIDDEN_EVENTと同じにする。
+export function onMainWindowHiddenToTray(handler: () => void): Promise<() => void> {
+  return listen("main-window-hidden-to-tray", handler);
+}
+
 export interface ActiveProfileRulesWeakenedPayload {
   profileName: string;
   weakenedRuleNames: string[];

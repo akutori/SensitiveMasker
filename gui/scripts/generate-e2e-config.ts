@@ -43,7 +43,14 @@ const e2eConfig = {
         {
           identifier: "e2e",
           windows: ["main"],
-          permissions: ["wdio:default", "wdio-webdriver:default"],
+          // core:window:allow-close/allow-show: E2Eが、×ボタンと同じ「ウィンドウを閉じる要求」(トレイへの格納)を
+          // 送り、格納したウィンドウを、後で表示し直すため。配布用のcapabilities(default)には含めない。
+          permissions: [
+            "wdio:default",
+            "wdio-webdriver:default",
+            "core:window:allow-close",
+            "core:window:allow-show",
+          ],
         },
       ],
     },

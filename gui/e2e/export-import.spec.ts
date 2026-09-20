@@ -8,6 +8,9 @@
 // インポートの保留(Rust側の、復号済みの内容)は、識別子を指定して確定・破棄する。画面の外から確定を直接呼んで
 // 保留が残っていないことを確かめられるよう、E2Eビルドは、アプリが受け取った識別子を、受け取った順に、
 // window.__e2ePendingImportIdsへ残す(gui/src/lib/e2e-pending-import.ts)。
+// ウィンドウを閉じる要求(×ボタンと同じ。アプリは、終了せず、トレイへ格納する)は、E2E専用の権限
+// (scripts/generate-e2e-config.tsが足す)で、ページから送る。WebDriverの「ウィンドウを閉じる」は、ウィンドウを
+// 破棄してしまうため、使えない。
 // バックエンドのexport/import本体のロジック(暗号化・復号・往復・エラー系)は
 // gui/src-tauri/src/export_import.rsの実ファイル・実DBを使ったテストでも検証している。
 
@@ -345,6 +348,8 @@ async function bestEffort(step: () => Promise<unknown>) {
 // 連鎖させない。成功したテストでは何も起きない。手順は互いに独立に行い、1つの失敗で残りを飛ばさない
 // (メイン画面へ戻れないと、次のテストは「初期設定画面もメイン画面も表示されなかった」という別の症状で落ちる)。
 afterEach(async () => {
+  // 格納したまま、次のテストへ進まない。
+  await bestEffort(() => showMainWindowAgain());
   await bestEffort(() =>
     browser.tauri.execute(() => {
       const w = window as unknown as {
@@ -455,6 +460,41 @@ async function openImportConfirmDialog(passphrase: string) {
   await (await importDialog.$("input")).setValue(passphrase);
   await (await importDialog.$("button=OK")).click();
   await (await $('[role="alertdialog"]')).waitForExist({ timeout: 15000 });
+}
+
+// browser.tauri.executeが渡すオブジェクトは、windowのAPIを持たないため、ページのwindow.__TAURI__(E2Eビルドは、
+// withGlobalTauriを有効にしている)から使う。関数の中身は、ページで実行される文字列になるため、外側の変数は使えない
+// (型は、実行前に消える)。
+type PageWithTauriWindow = {
+  __TAURI__: {
+    window: {
+      getCurrentWindow(): { close(): Promise<void>; show(): Promise<void>; isVisible(): Promise<boolean> };
+    };
+  };
+};
+
+// ×ボタンと同じ「ウィンドウを閉じる要求」を、アプリへ送る。アプリは、終了せず、トレイへ格納する。
+async function hideMainWindowToTray() {
+  await browser.tauri.execute(() =>
+    (window as unknown as PageWithTauriWindow).__TAURI__.window.getCurrentWindow().close()
+  );
+  await browser.waitUntil(async () => !(await mainWindowIsVisible()), {
+    timeout: 10000,
+    timeoutMsg: "ウィンドウが、トレイへ格納されなかった",
+  });
+}
+
+async function mainWindowIsVisible(): Promise<boolean> {
+  return browser.tauri.execute(() =>
+    (window as unknown as PageWithTauriWindow).__TAURI__.window.getCurrentWindow().isVisible()
+  );
+}
+
+// 格納したウィンドウを、表示し直す(トレイの「開く」と同じ効果)。
+async function showMainWindowAgain() {
+  await browser.tauri.execute(() =>
+    (window as unknown as PageWithTauriWindow).__TAURI__.window.getCurrentWindow().show()
+  );
 }
 
 // 読み込んだファイルに、UTF-8として読めないバイト列があったときの警告(トースト)。
@@ -1910,5 +1950,203 @@ describe("エクスポートの実行(ファイルダイアログの差し替え
     );
     expect(await listProfileNames()).not.toContain(profileName);
     await clearPendingImportDirectly(nextId);
+  });
+
+  // ウィンドウを×で閉じると、アプリは終了せず、トレイへ格納される。WebViewは動き続けるため、パスフレーズ・復号済みの
+  // 内容を持つ画面は、格納している間、残らないように、閉じる。
+  it("トレイへ格納すると、ウィンドウは隠れ、表示し直すと、また表示される", async () => {
+    await completeInitialSetup();
+    expect(await mainWindowIsVisible()).toBe(true);
+
+    await hideMainWindowToTray();
+    expect(await mainWindowIsVisible()).toBe(false);
+
+    await showMainWindowAgain();
+    expect(await mainWindowIsVisible()).toBe(true);
+  });
+
+  it("トレイへ格納すると、開いていたインポートの確認画面が閉じ、復号済みの内容(Rust側の保留)は破棄される", async () => {
+    await completeInitialSetup();
+    const profileName = "E2E格納時確認画面確認";
+    const passphrase = await exportAndDeleteProfile(profileName, path.join(exportDir, "hide-with-confirm.smx"));
+    await openImportConfirmDialog(passphrase);
+
+    await hideMainWindowToTray();
+
+    await $('[role="alertdialog"]').waitForExist({ reverse: true, timeout: 10000 });
+    await showMainWindowAgain();
+    expect(await $('[role="alertdialog"]').isExisting()).toBe(false);
+    expect(await commitLastReceivedPendingImportError()).toBe(NO_PENDING_IMPORT_MESSAGE);
+    expect(await listProfileNames()).not.toContain(profileName);
+    await returnToMainScreen();
+  });
+
+  it("メイン画面でも、トレイへ格納すると、開いていたインポートの確認画面が閉じ、復号済みの内容は破棄される", async () => {
+    await completeInitialSetup();
+    const profileName = "E2Eメイン画面格納時確認画面確認";
+    const passphrase = await exportAndDeleteProfile(profileName, path.join(exportDir, "hide-with-confirm-main.smx"));
+    await returnToMainScreen();
+    await openImportConfirmDialog(passphrase);
+
+    await hideMainWindowToTray();
+
+    await $('[role="alertdialog"]').waitForExist({ reverse: true, timeout: 10000 });
+    await showMainWindowAgain();
+    expect(await $('[role="alertdialog"]').isExisting()).toBe(false);
+    expect(await commitLastReceivedPendingImportError()).toBe(NO_PENDING_IMPORT_MESSAGE);
+    expect(await listProfileNames()).not.toContain(profileName);
+  });
+
+  // 画面が持たない保留(この画面が確認画面へ進めなかった復号の結果など)は、画面を閉じても消えない。Rust側が、格納するときに、
+  // 全ての保留を破棄していることを、確認画面を介さない保留で確かめる。
+  it("トレイへ格納すると、画面が所有していない保留(復号済みの内容)も、Rust側で破棄される", async () => {
+    await completeInitialSetup();
+    const profileName = "E2E格納時保留破棄確認";
+    const smxPath = path.join(exportDir, "hide-with-ownerless-pending.smx");
+    const passphrase = await exportAndDeleteProfile(profileName, smxPath);
+    const pendingId = await previewPendingImportViaIpc(smxPath, passphrase);
+
+    await hideMainWindowToTray();
+    await showMainWindowAgain();
+
+    expect(await commitPendingImportError(pendingId)).toBe(NO_PENDING_IMPORT_MESSAGE);
+    expect(await listProfileNames()).not.toContain(profileName);
+    await returnToMainScreen();
+  });
+
+  it("トレイへ格納すると、開いていたインポートのパスフレーズ入力画面が閉じ、入力していたパスフレーズは残らない", async () => {
+    await completeInitialSetup();
+    await setE2eFileDialogPaths({ open: path.join(exportDir, "hide-with-typed-passphrase.smx") });
+    await openProfileManagement();
+    await (await $("button=インポート")).click();
+    const importDialog = await $('[role="dialog"]');
+    await importDialog.waitForExist({ timeout: 10000 });
+    await (await importDialog.$("input")).setValue("dummy-typed-passphrase");
+
+    await hideMainWindowToTray();
+
+    await importDialog.waitForExist({ reverse: true, timeout: 10000 });
+    await showMainWindowAgain();
+    // 開き直した入力欄は、空である。
+    await (await $("button=インポート")).click();
+    const reopened = await $('[role="dialog"]');
+    await reopened.waitForExist({ timeout: 10000 });
+    expect(await (await reopened.$("input")).getValue()).toBe("");
+    await (await reopened.$("button=キャンセル")).click();
+    await reopened.waitForExist({ reverse: true, timeout: 10000 });
+    await returnToMainScreen();
+  });
+
+  it("トレイへ格納すると、編集中のエクスポート画面が閉じ、表示し直して開くと、別のパスフレーズになる", async () => {
+    await completeInitialSetup();
+    const profileName = "E2E格納時エクスポート編集中確認";
+    await createProfileViaIpc(profileName);
+    const dialog = await openExportDialogFor(profileName);
+    const passphrase = await (await dialog.$("input[readonly]")).getValue();
+
+    await hideMainWindowToTray();
+
+    await dialog.waitForExist({ reverse: true, timeout: 10000 });
+    await showMainWindowAgain();
+    const reopened = await openExportDialogFromRow(profileName);
+    expect(await (await reopened.$("input[readonly]")).getValue()).not.toBe(passphrase);
+    await (await reopened.$("button=キャンセル")).click();
+    await reopened.waitForExist({ reverse: true, timeout: 10000 });
+    await returnToMainScreen();
+  });
+
+  it("保存先の選択中に、トレイへ格納すると、エクスポート画面が閉じ、その選択が決着しても、書き出されない", async () => {
+    await completeInitialSetup();
+    const profileName = "E2E格納時エクスポート選択中確認";
+    await createProfileViaIpc(profileName);
+    const dialog = await openExportDialogFor(profileName);
+    const exportButton = await dialog.$("button=エクスポート");
+    await holdSaveDialog();
+    await exportButton.click();
+    await waitForDialogText(dialog, "保存先を選択しています");
+
+    await hideMainWindowToTray();
+
+    await dialog.waitForExist({ reverse: true, timeout: 10000 });
+    const target = path.join(exportDir, "hidden-while-choosing.smx");
+    await settleSaveDialog({ path: target });
+    await browser.pause(1500);
+    expect(fs.existsSync(target)).toBe(false);
+    await showMainWindowAgain();
+    await returnToMainScreen();
+  });
+
+  it("書き込み中に、トレイへ格納しても、エクスポート画面は閉じず、書き込みが終わると、書き出し済みになる", async () => {
+    await completeInitialSetup();
+    const profileName = "E2E格納時エクスポート書き込み中確認";
+    await createProfileViaIpc(profileName);
+    const dialog = await openExportDialogFor(profileName);
+    const passphrase = await (await dialog.$("input[readonly]")).getValue();
+    const target = path.join(exportDir, "hidden-while-writing.smx");
+    await setE2eFileDialogPaths({ save: target });
+    await holdExportWrite();
+    await (await dialog.$("button=エクスポート")).click();
+    await waitForDialogText(dialog, "書き込んでいます");
+
+    await hideMainWindowToTray();
+    // 格納の通知が、画面へ届いて処理される時間を置いてから、画面が残っていることを確かめる。
+    await browser.pause(1000);
+    expect(await dialog.isExisting()).toBe(true);
+    await waitForDialogText(dialog, "書き込んでいます");
+
+    await releaseExportWrite();
+    await waitForExportNotice(dialog);
+    expect(await (await dialog.$("input[readonly]")).getValue()).toBe(passphrase);
+    expect(fs.existsSync(target)).toBe(true);
+    await showMainWindowAgain();
+    await (await dialog.$("button=閉じる")).click();
+    await dialog.waitForExist({ reverse: true, timeout: 10000 });
+    await returnToMainScreen();
+  });
+
+  it("書き出し済みのエクスポート画面は、トレイへ格納しても閉じず、表示していたパスフレーズが、伏せ字へ戻る", async () => {
+    await completeInitialSetup();
+    const profileName = "E2E格納時エクスポート済み確認";
+    await createProfileViaIpc(profileName);
+    await setE2eFileDialogPaths({ save: path.join(exportDir, "hidden-after-export.smx") });
+    const dialog = await openExportDialogFor(profileName);
+    const passphraseInput = await dialog.$("input[readonly]");
+    const passphrase = await passphraseInput.getValue();
+    await (await dialog.$("button=エクスポート")).click();
+    await waitForExportNotice(dialog);
+    await (await dialog.$('button[aria-label="パスフレーズを表示"]')).click();
+    expect(await passphraseInput.getAttribute("type")).toBe("text");
+
+    await hideMainWindowToTray();
+
+    await browser.waitUntil(async () => (await passphraseInput.getAttribute("type")) === "password", {
+      timeout: 10000,
+      timeoutMsg: "トレイへ格納しても、パスフレーズの表示が伏せ字へ戻らなかった",
+    });
+    // 閉じない: 書き出したファイルを復号するための、唯一のパスフレーズを、失わない。
+    expect(await dialog.isExisting()).toBe(true);
+    expect(await passphraseInput.getValue()).toBe(passphrase);
+    await showMainWindowAgain();
+    await (await dialog.$("button=閉じる")).click();
+    await dialog.waitForExist({ reverse: true, timeout: 10000 });
+    await returnToMainScreen();
+  });
+
+  // 対照: パスフレーズなどを持たない画面まで、閉じてはならない。
+  it("トレイへ格納しても、パスフレーズなどを持たない画面(プロファイルの新規作成)は、閉じない", async () => {
+    await completeInitialSetup();
+    await openProfileManagement();
+    await (await $("button*=新規プロファイル")).click();
+    const dialog = await $('[role="dialog"]');
+    await dialog.waitForExist({ timeout: 10000 });
+
+    await hideMainWindowToTray();
+    await browser.pause(1000);
+
+    expect(await dialog.isExisting()).toBe(true);
+    await showMainWindowAgain();
+    await (await dialog.$("button=キャンセル")).click();
+    await dialog.waitForExist({ reverse: true, timeout: 10000 });
+    await returnToMainScreen();
   });
 });

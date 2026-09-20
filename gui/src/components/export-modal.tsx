@@ -34,6 +34,9 @@ export interface ExportModalProps {
   onCopy: () => void;
   onRegenerate: () => void;
   onExport: () => void;
+  // この値が変わるたびに、パスフレーズの表示を伏せ字へ戻す(画面は閉じない)。ウィンドウをトレイへ格納したときに、
+  // 格納している間、パスフレーズを画面に残さないため。
+  concealSignal?: number;
 }
 
 export function ExportModal({
@@ -46,6 +49,7 @@ export function ExportModal({
   onCopy,
   onRegenerate,
   onExport,
+  concealSignal = 0,
 }: ExportModalProps) {
   const inputId = useId();
   const passphraseInputRef = useRef<HTMLInputElement>(null);
@@ -79,6 +83,11 @@ export function ExportModal({
   useLayoutEffect(() => {
     if (exported) setRevealed(false);
   }, [exported]);
+
+  // 呼び出し元から合図があったとき(concealSignalが変わったとき)も、伏せ字へ戻す。
+  useLayoutEffect(() => {
+    setRevealed(false);
+  }, [concealSignal]);
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>

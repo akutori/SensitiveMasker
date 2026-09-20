@@ -4,7 +4,13 @@ const tauriCore = vi.hoisted(() => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => tauriCore);
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn() }));
 
-import { clearPendingImport, commitPendingImport, previewImport } from "./profile-ipc";
+import { listen } from "@tauri-apps/api/event";
+import {
+  clearPendingImport,
+  commitPendingImport,
+  onMainWindowHiddenToTray,
+  previewImport,
+} from "./profile-ipc";
 
 const DUMMY_PREVIEW = {
   kind: "single",
@@ -75,6 +81,20 @@ describe("インポートの保留のIPC", () => {
     await clearPendingImport(12);
 
     expect(tauriCore.invoke).toHaveBeenCalledWith("clear_pending_import", { pendingId: 12 });
+  });
+});
+
+// Rust側(tray.rsのMAIN_WINDOW_HIDDEN_EVENT)が、メインウィンドウのトレイへの格納を知らせるイベントの名前を固定する。
+describe("トレイへの格納の通知", () => {
+  it("onMainWindowHiddenToTrayは、Rust側が知らせるイベント名を購読し、購読の解除を返す", async () => {
+    const unlisten = vi.fn();
+    vi.mocked(listen).mockResolvedValue(unlisten);
+    const handler = vi.fn();
+
+    const stop = await onMainWindowHiddenToTray(handler);
+
+    expect(listen).toHaveBeenCalledWith("main-window-hidden-to-tray", handler);
+    expect(stop).toBe(unlisten);
   });
 });
 

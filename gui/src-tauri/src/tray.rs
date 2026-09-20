@@ -10,6 +10,9 @@ use tauri_plugin_notification::NotificationExt as _;
 use crate::profiles::{with_store, ProfileStoreState};
 
 pub(crate) const MAIN_WINDOW_LABEL: &str = "main";
+/// メインウィンドウをトレイへ格納したことを、画面(WebView)へ知らせるイベント。フロントエンドの
+/// `onMainWindowHiddenToTray`(src/lib/profile-ipc.ts)と同じ名前にする。
+const MAIN_WINDOW_HIDDEN_EVENT: &str = "main-window-hidden-to-tray";
 const TRAY_ID: &str = "main-tray";
 const OPEN_ID: &str = "open";
 const QUIT_ID: &str = "quit";
@@ -223,8 +226,18 @@ pub fn handle_window_event<R: Runtime>(window: &tauri::Window<R>, event: &Window
     }
     if let WindowEvent::CloseRequested { api, .. } = event {
         api.prevent_close();
-        let _ = window.hide();
+        hide_to_tray(window);
     }
+}
+
+/// メインウィンドウをトレイへ格納する。WebViewは動き続けるため、格納している間、復号済みの内容(Rust側の保留)と、
+/// パスフレーズなどを持つ画面が残り続けないよう、保留を全て破棄し、画面へ知らせる(画面側が、それらを持つ画面を
+/// 閉じる。扱いはフロントエンドのactionOnHiddenToTray)。
+fn hide_to_tray<R: Runtime>(window: &tauri::Window<R>) {
+    let app = window.app_handle();
+    crate::export_import::discard_pending_imports_on_hide(&app.state::<crate::export_import::PendingImportState>());
+    let _ = window.hide();
+    let _ = app.emit_to(MAIN_WINDOW_LABEL, MAIN_WINDOW_HIDDEN_EVENT, ());
 }
 
 #[cfg(test)]
@@ -242,6 +255,34 @@ mod tests {
             updated_at: String::new(),
             tags: Vec::new(),
         }
+    }
+
+    // hide自体は、MockRuntimeでは何もしない(可視かどうかも、常にtrue)ため、ウィンドウが実際に隠れることは、
+    // E2E(gui/e2e/export-import.spec.ts)で確かめる。ここでは、画面へ知らせるイベントが、メインウィンドウ宛てに
+    // 発行されることを、メインウィンドウで受けて確かめる(他のウィンドウ宛てなら、届かない)。
+    #[test]
+    fn hiding_to_the_tray_notifies_the_main_window() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use tauri::Listener;
+
+        let app = tauri::test::mock_builder()
+            .manage(crate::export_import::PendingImportState::default())
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("MockRuntimeのアプリを組み立てられるはず");
+        let webview = tauri::WebviewWindowBuilder::new(&app, MAIN_WINDOW_LABEL, Default::default())
+            .build()
+            .expect("MockRuntimeのウィンドウを作れるはず");
+        let window = webview.as_ref().window();
+        let notified = Arc::new(AtomicUsize::new(0));
+        let seen = notified.clone();
+        webview.listen(MAIN_WINDOW_HIDDEN_EVENT, move |_| {
+            seen.fetch_add(1, Ordering::SeqCst);
+        });
+
+        hide_to_tray(&window);
+
+        assert_eq!(notified.load(Ordering::SeqCst), 1, "格納したことが、ちょうど1回、知らされるはず");
     }
 
     #[test]
