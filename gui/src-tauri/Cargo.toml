@@ -45,6 +45,9 @@ zeroize = "1"
 tauri-plugin-notification = "2"
 # トレイメニューの「自動起動」チェックボックス項目用の公式プラグイン。
 tauri-plugin-autostart = "2"
+# 「複数起動を許可」設定ファイル(instance_settings)の保存先解決用。profile-storeと同じ
+# バージョンを使い、同じくbundle identifier配下(dirs::data_dir())を指す。
+dirs = "7.0.0"
 
 [target.'cfg(windows)'.dependencies]
 # WebView2既定のブラウザアクセラレータキー(Ctrl+F/F3等)を無効化するために直接使う。
@@ -52,6 +55,11 @@ tauri-plugin-autostart = "2"
 # 合わせてここも更新する。
 webview2-com = "0.38"
 windows-core = "0.61"
+
+[target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]
+# デスクトップのみ対応のプラグイン(mobileではビルド対象に含めない)。トレイメニューの
+# 「複数起動を許可」がOFF(既定)のときだけlib.rsからBuilderの最初のプラグインとして登録する。
+tauri-plugin-single-instance = "2.4.5"
 
 [features]
 # 依存自体をデフォルトから外すためのfeature。有効化してもlib.rs側でさらに

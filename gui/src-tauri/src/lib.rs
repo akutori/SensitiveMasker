@@ -1,6 +1,7 @@
 mod clipboard;
 mod env_import;
 mod export_import;
+mod instance_settings;
 mod masking;
 mod profiles;
 mod text_file_io;
@@ -13,7 +14,30 @@ use tauri::Manager;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     #[allow(unused_mut)]
-    let mut builder = tauri::Builder::default()
+    let mut builder = tauri::Builder::default();
+
+    // Single Instanceプラグインは最初に登録しないと正しく機能しない(公式ドキュメントの制約)。
+    // トレイメニューの「複数起動を許可」がOFF(既定)の場合のみ登録し、2つ目のプロセスが
+    // 起動されたら1つ目のウィンドウを前面に出す(2つ目自身はプラグインが自動的に終了させる)。
+    // mobileではCargo.toml側で依存自体がビルド対象に含まれないため#[cfg(desktop)]で囲む。
+    // e2e-testing featureでは常に登録しない: このプラグインのOS側の識別(Windowsの名前付き
+    // ミューテックス・LinuxのD-Bus名・macOSのソケットパス)はtauri.conf.jsonのidentifier由来で
+    // E2E用configでも変わらない。開発機で実ユーザーのインスタンスが常駐している間にE2Eを
+    // 起動すると、識別が衝突し、E2E側は新規ウィンドウを作らず実インスタンスへフォーカスを
+    // 譲って即終了してしまう(WebDriverのアタッチ先が無くなる)。
+    #[cfg(all(desktop, not(feature = "e2e-testing")))]
+    {
+        let allow_multiple_instances = instance_settings::InstanceSettingsPath::resolve()
+            .map(|settings| settings.allow_multiple_instances())
+            .unwrap_or(false);
+        if !allow_multiple_instances {
+            builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+                tray::show_main_window(app);
+            }));
+        }
+    }
+
+    builder = builder
         .plugin(tauri_plugin_dialog::init())
         // フロントエンドからはこのプラグイン自身のコマンド(plugin:clipboard-manager|*)を
         // 一切invokeしない(clipboard::write_clipboard_text/clear_clipboard_if_matchesの

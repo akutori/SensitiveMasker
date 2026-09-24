@@ -18,6 +18,7 @@ const OPEN_ID: &str = "open";
 const QUIT_ID: &str = "quit";
 const MASK_CLIPBOARD_ID: &str = "mask_clipboard";
 const TOGGLE_AUTOSTART_ID: &str = "toggle_autostart";
+const TOGGLE_ALLOW_MULTIPLE_INSTANCES_ID: &str = "toggle_allow_multiple_instances";
 const PROFILE_MENU_ID_PREFIX: &str = "profile:";
 
 /// トレイアイコン+メニューを構築する(モックアップ「9_常駐トレイメニュー」の
@@ -99,11 +100,22 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
         .checked(autostart_enabled)
         .build(app)?;
 
+    // 未解決(OSデータディレクトリを特定できない)場合もfalse(単一起動)扱いにする。
+    // instance_settings::InstanceSettingsPath::allow_multiple_instancesと同じfail-safe defaults。
+    let allow_multiple_instances = crate::instance_settings::InstanceSettingsPath::resolve()
+        .map(|settings| settings.allow_multiple_instances())
+        .unwrap_or(false);
+    let allow_multiple_instances_item =
+        CheckMenuItemBuilder::with_id(TOGGLE_ALLOW_MULTIPLE_INSTANCES_ID, "複数起動を許可")
+            .checked(allow_multiple_instances)
+            .build(app)?;
+
     MenuBuilder::new(app)
         .text(OPEN_ID, "開く")
         .text(MASK_CLIPBOARD_ID, "クリップボードをマスク")
         .item(&profile_submenu)
         .item(&autostart_item)
+        .item(&allow_multiple_instances_item)
         .separator()
         .text(QUIT_ID, "終了")
         .build()
@@ -134,6 +146,7 @@ fn handle_menu_event<R: Runtime>(app: &AppHandle<R>, event: MenuEvent) {
         }
         MASK_CLIPBOARD_ID => mask_clipboard(app),
         TOGGLE_AUTOSTART_ID => toggle_autostart(app),
+        TOGGLE_ALLOW_MULTIPLE_INSTANCES_ID => toggle_allow_multiple_instances(app),
         _ => {}
     }
 }
@@ -160,6 +173,37 @@ fn toggle_autostart<R: Runtime>(app: &AppHandle<R>) {
         notify_error(app, "自動起動の設定を変更できませんでした");
     }
     refresh_menu(app);
+}
+
+/// 「複数起動を許可」をトグルする。single-instanceプラグインの登録可否は起動時(lib.rs::run)に
+/// 一度だけ決まり実行中には変えられないため、自動起動と異なりこのプロセスの挙動には即反映されない
+/// (次回起動から反映)。誤解を防ぐため、その旨を通知する。オフにする方向は、既に起動中の他の
+/// プロセス(オンだった間に起動されたもの)までは統合しないため、その旨も併せて示す。
+fn toggle_allow_multiple_instances<R: Runtime>(app: &AppHandle<R>) {
+    let Some(settings) = crate::instance_settings::InstanceSettingsPath::resolve() else {
+        notify(app, "設定を保存する場所を特定できませんでした");
+        return;
+    };
+    match toggle_allow_multiple_instances_setting(&settings) {
+        Ok(true) => notify(app, "「複数起動を許可」をオンにしました。次回起動から反映されます。"),
+        Ok(false) => notify(
+            app,
+            "「複数起動を許可」をオフにしました。次回起動から単一起動になります。既に起動中の他のプロセスは終了しません(個別に終了してください)。",
+        ),
+        Err(_) => notify_error(app, "設定を変更できませんでした"),
+    }
+    refresh_menu(app);
+}
+
+/// 現在の設定を読んで反転させ、保存する(パスを引数で受け取り、実OSのデータディレクトリに
+/// 依存せずテストできるようにする)。戻り値は反転後の新しい値(呼び出し側が、オンにしたのか
+/// オフにしたのかで通知文言を出し分けるため)。
+fn toggle_allow_multiple_instances_setting(
+    settings: &crate::instance_settings::InstanceSettingsPath,
+) -> std::io::Result<bool> {
+    let new_value = !settings.allow_multiple_instances();
+    settings.set_allow_multiple_instances(new_value)?;
+    Ok(new_value)
 }
 
 /// アクティブプロファイルでクリップボードの内容をマスクし、結果をクリップボードへ
@@ -204,10 +248,16 @@ fn mask_clipboard<R: Runtime>(app: &AppHandle<R>) {
 }
 
 fn notify_error<R: Runtime>(app: &AppHandle<R>, message: &str) {
+    notify(app, message);
+}
+
+/// エラーに限らない一般の通知(「複数起動を許可」トグル時の反映タイミングの案内等)。
+fn notify<R: Runtime>(app: &AppHandle<R>, message: &str) {
     let _ = app.notification().builder().title("SensitiveMasker").body(message).show();
 }
 
-fn show_main_window<R: Runtime>(app: &AppHandle<R>) {
+/// lib.rs::runがsingle-instanceプラグインのコールバック(2つ目のプロセス起動を検知した時)からも呼ぶ。
+pub(crate) fn show_main_window<R: Runtime>(app: &AppHandle<R>) {
     let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) else {
         return;
     };
@@ -313,5 +363,29 @@ mod tests {
     fn find_active_profile_finds_the_one_active_profile_among_others() {
         let profiles = vec![summary("a", false), summary("b", true), summary("c", false)];
         assert_eq!(find_active_profile(&profiles).map(|p| p.name.as_str()), Some("b"));
+    }
+
+    #[test]
+    fn toggling_allow_multiple_instances_flips_false_to_true() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = crate::instance_settings::InstanceSettingsPath::at(dir.path());
+
+        let new_value = toggle_allow_multiple_instances_setting(&settings).expect("トグルに成功するはず");
+
+        assert!(new_value, "戻り値は反転後の新しい値(true)のはず");
+        assert!(settings.allow_multiple_instances(), "既定(false)からの1回目のトグルはtrueになるはず");
+    }
+
+    #[test]
+    fn toggling_allow_multiple_instances_flips_true_back_to_false() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = crate::instance_settings::InstanceSettingsPath::at(dir.path());
+        settings.set_allow_multiple_instances(true).unwrap();
+
+        let new_value = toggle_allow_multiple_instances_setting(&settings).expect("トグルに成功するはず");
+
+        assert!(!new_value, "戻り値は反転後の新しい値(false)のはず");
+
+        assert!(!settings.allow_multiple_instances(), "trueからの2回目のトグルはfalseに戻るはず");
     }
 }
