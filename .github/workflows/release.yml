@@ -67,16 +67,18 @@ jobs:
       - name: build masker / masker-mcp
         run: cargo build --release -p masker -p masker-mcp
 
+      # 拡張子の無い実行ファイル名が、同じリリースページに並ぶGUIインストーラー(SensitiveMasker_*)と
+      # 混同されないよう、CLIであることを示す接尾辞を付ける。
       - name: package CLI binaries
         shell: bash
         run: |
           mkdir -p dist-cli
           if [ "${{ matrix.platform }}" = "windows-latest" ]; then
-            cp target/release/masker.exe "dist-cli/masker-${{ matrix.cli-suffix }}.exe"
-            cp target/release/masker-mcp.exe "dist-cli/masker-mcp-${{ matrix.cli-suffix }}.exe"
+            cp target/release/masker.exe "dist-cli/masker-cli-${{ matrix.cli-suffix }}.exe"
+            cp target/release/masker-mcp.exe "dist-cli/masker-mcp-cli-${{ matrix.cli-suffix }}.exe"
           else
-            cp target/release/masker "dist-cli/masker-${{ matrix.cli-suffix }}"
-            cp target/release/masker-mcp "dist-cli/masker-mcp-${{ matrix.cli-suffix }}"
+            cp target/release/masker "dist-cli/masker-cli-${{ matrix.cli-suffix }}"
+            cp target/release/masker-mcp "dist-cli/masker-mcp-cli-${{ matrix.cli-suffix }}"
           fi
 
       # GUIインストーラーにmasker/masker-mcpを同梱する(externalBin)ためのsidecar配置。
@@ -123,7 +125,18 @@ jobs:
           projectPath: gui
           tagName: ${{ github.ref_name }}
           releaseName: 'SensitiveMasker ${{ github.ref_name }}'
-          releaseBody: 'このタグに対応するインストーラー・実行ファイルは下記アセットからダウンロードしてください。'
+          releaseBody: |
+            このタグに対応するインストーラー・実行ファイルは下記アセットからダウンロードしてください。
+
+            | ファイル | 内容 |
+            |---|---|
+            | `SensitiveMasker_*-setup.exe` / `*.msi`(Windows) | **GUIインストーラー**(`masker`/`masker-mcp`同梱) |
+            | `SensitiveMasker_*_universal.dmg`(macOS) | **GUIインストーラー**(Universal Binary、`masker`/`masker-mcp`同梱) |
+            | `SensitiveMasker_*.deb` / `*.AppImage`(Linux) | **GUIインストーラー** / 単独実行ファイル(`masker`/`masker-mcp`同梱) |
+            | `masker-cli-<OS>`(`.exe`はWindowsのみ) | CLI単独実行ファイル(ターミナルから使う場合のみ必要) |
+            | `masker-mcp-cli-<OS>`(`.exe`はWindowsのみ) | MCPサーバー単独実行ファイル |
+
+            GUIを使うだけなら`SensitiveMasker_*`のインストーラーのみで十分です(`masker`/`masker-mcp`が同梱されます)。詳細は[README](https://github.com/akutori/SensitiveMasker#ダウンロード配布版)を参照してください。
           releaseDraft: false
           prerelease: false
           args: --config src-tauri/tauri.release.conf.json ${{ matrix.args }}
