@@ -2388,7 +2388,7 @@ dependencies = [
 
 [[package]]
 name = "gui"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "arboard",
  "dirs 7.0.0",
@@ -3281,7 +3281,7 @@ dependencies = [
 
 [[package]]
 name = "masker"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "clap",
  "encoding_rs",
@@ -3296,7 +3296,7 @@ dependencies = [
 
 [[package]]
 name = "masker-mcp"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "masker",
  "rmcp",
@@ -3312,7 +3312,7 @@ dependencies = [
 
 [[package]]
 name = "masking-core"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "regex",
  "serde",
@@ -4254,7 +4254,7 @@ dependencies = [
 
 [[package]]
 name = "profile-store"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "age",
  "chacha20poly1305 0.11.0",
@@ -7244,7 +7244,7 @@ dependencies = [
 
 [[package]]
 name = "wipe-check"
-version = "0.0.5"
+version = "0.0.6"
 
 [[package]]
 name = "wit-bindgen"
