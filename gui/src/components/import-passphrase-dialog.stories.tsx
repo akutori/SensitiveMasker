@@ -200,10 +200,13 @@ export const BusyMovesFocus: Story = {
     onPassphraseChange: () => {},
     onConfirm: () => {},
   },
+  // Storybookのvitestアドオンは、storyごとにビューポートを設定し、指定が無ければ1200x900にする
+  // (vite.config.tsの幅は使われない)。mobile2は414x896。
+  globals: { viewport: { value: "mobile2", isRotated: false } },
   render: () => <BusyDemo />,
   play: async () => {
     // 高さの検証は、DialogFooterが縦に積まれる幅(640px未満)でだけ意味がある(横並びになる幅では、行の固定を
-    // 外しても、高さは変わらない)。幅は、vite.config.tsで固定している。
+    // 外しても、高さは変わらない)。幅は、このstoryのglobalsで固定している。
     await expect(window.innerWidth, "この検証は、幅640px未満で行う").toBeLessThan(640);
     const input = await screen.findByLabelText(PASSPHRASE_LABEL);
     const ok = screen.getByRole("button", { name: "OK" });

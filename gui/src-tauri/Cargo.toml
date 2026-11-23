@@ -53,8 +53,8 @@ dirs = "7.0.0"
 # WebView2既定のブラウザアクセラレータキー(Ctrl+F/F3等)を無効化するために直接使う。
 # tauriが内部で使うバージョンと型を一致させる必要があるため、tauriのバージョン固定と
 # 合わせてここも更新する。
-webview2-com = "0.38"
-windows-core = "0.61"
+webview2-com = "0.39"
+windows-core = "0.62"
 
 [target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]
 # デスクトップのみ対応のプラグイン(mobileではビルド対象に含めない)。トレイメニューの

@@ -83,8 +83,9 @@ export default defineConfig(() => ({
           instances: [{
             browser: 'chromium' as const
           }],
-          // ダイアログ下部のボタンの行は、幅640px未満で縦に積まれる。その幅を前提にするstoryがあるため、
-          // ビューポートを明示する(既定値に頼らない)。
+          // ビューポートを明示する(既定値に頼らない)。ただし、Storybookのvitestアドオンがstoryごとに
+          // ビューポートを設定する(指定が無ければ1200x900)ため、特定の幅を前提にするstoryは、
+          // そのstoryのglobalsで幅を指定する。
           viewport: { width: 414, height: 896 }
         }
       }
